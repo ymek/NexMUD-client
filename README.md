@@ -1,4 +1,11 @@
-# NexMUD Client v0.30.0
+# NexMUD Client v0.30.1
+
+## v0.30.1 - Startup stability
+
+- Fixed Automation Library initialization re-entering through the initial filter selection event during main-window construction.
+- The shared library filter is initialized before its `SelectionChanged` subscription and is no longer reconfigured while building the Library visual tree.
+- Prevents duplicate Avalonia visual parenting during application startup.
+- SemVer release: 0.30.1. macOS build: 30001.
 
 ## v0.30.0 - Product ownership and workspace architecture
 

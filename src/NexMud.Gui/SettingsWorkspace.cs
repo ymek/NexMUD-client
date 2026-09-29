@@ -383,7 +383,7 @@ public sealed class SettingsWorkspace : UserControl
         StackPanel body = (StackPanel)diagnostics.Child!;
         body.Children.Add(FormRow("Settings", ReadOnlyPath(_runtime.SettingsStore.Path)));
         body.Children.Add(FormRow("Knowledge DB", ReadOnlyPath(WorldKnowledgePath())));
-        body.Children.Add(FormRow("Client version", ReadOnlyPath("0.30.0")));
+        body.Children.Add(FormRow("Client version", ReadOnlyPath("0.30.1")));
         stack.Children.Add(diagnostics);
 
         Border experimental = SectionCard("Experimental features", "No experimental global features are enabled in this release.");

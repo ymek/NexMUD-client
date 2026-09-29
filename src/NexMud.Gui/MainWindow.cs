@@ -1799,7 +1799,7 @@ public sealed class MainWindow : Window
         });
         content.Children.Add(new TextBlock
         {
-            Text = "Version 0.30.0",
+            Text = "Version 0.30.1",
             Foreground = UiTheme.Faint,
             FontSize = UiTheme.TextSm
         });

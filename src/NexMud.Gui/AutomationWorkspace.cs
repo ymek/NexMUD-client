@@ -43,6 +43,13 @@ internal sealed class AutomationWorkspace : UserControl
         _showScripting = showScripting;
         FontFamily = UiTheme.Sans;
         FontSize = NexTypography.Body;
+
+        // Initialize the filter before subscribing to SelectionChanged. Avalonia raises
+        // selection changes synchronously, so configuring the initial selection while
+        // BuildLibrary is constructing its visual tree can re-enter RefreshLibrary and
+        // attempt to parent the same controls twice during application startup.
+        _filter.ItemsSource = Filters;
+        _filter.SelectedItem = Filters[0];
         _filter.SelectionChanged += (_, _) => RefreshLibrary();
         _library.SelectionChanged += (_, _) => UpdateDetail();
         Content = Build();
@@ -161,8 +168,6 @@ internal sealed class AutomationWorkspace : UserControl
     {
         Grid root = new() { RowDefinitions = new RowDefinitions("Auto,*") };
         Grid toolbar = new() { ColumnDefinitions = new ColumnDefinitions("180,Auto,Auto,*"), ColumnSpacing = 6 };
-        _filter.ItemsSource = Filters;
-        _filter.SelectedItem ??= "All";
         toolbar.Children.Add(_filter);
         Button create = UiTheme.PrimaryButton("New Automation");
         create.Click += (_, _) => ShowNewAutomationMenu(create);

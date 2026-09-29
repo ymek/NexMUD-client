@@ -1,3 +1,12 @@
+# NexMUD 0.30.1
+
+## Startup regression fix
+
+- Fixed synchronous Automation Library filter selection re-entering `RefreshLibrary()` while its first visual tree was still being constructed.
+- Filter items and the initial selection are established before the change-event subscription and are not reset inside `BuildLibrary()`.
+- This removes the duplicate-parent startup failure introduced by the v0.30.0 Automation workspace.
+- SemVer release: 0.30.1. macOS build: 30001.
+
 # NexMUD 0.30.0
 
 - Reorganized global Settings around low-frequency client preferences.

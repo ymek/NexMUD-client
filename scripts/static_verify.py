@@ -1112,15 +1112,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.30.0"):
-    fail("README current version must be NexMUD 0.30.0")
-if '<Version>0.30.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.30.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.30.1"):
+    fail("README current version must be NexMUD 0.30.1")
+if '<Version>0.30.1</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.30.1 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.30.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.30.0")
-if '<string>30000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 30000 for NexMUD 0.30.0")
+if '<string>0.30.1</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.30.1")
+if '<string>30001</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 30001 for NexMUD 0.30.1")
 item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1745,6 +1745,15 @@ for literal in (
         fail(f"0.30.0 Jev ownership surface missing: {literal}")
 if 'new AutomationKeybindingInvoked(' not in main_window_text:
     fail("0.30.0 keybinding provenance must enter Automation activity")
+if automation_workspace_text.count("_filter.ItemsSource = Filters;") != 1:
+    fail("Automation workspace filter must be initialized exactly once")
+filter_init = automation_workspace_text.find("_filter.ItemsSource = Filters;")
+filter_subscription = automation_workspace_text.find("_filter.SelectionChanged +=")
+build_library = automation_workspace_text.find("private Control BuildLibrary()")
+if filter_init < 0 or filter_subscription < 0 or filter_init > filter_subscription:
+    fail("Automation workspace must initialize its filter before subscribing to SelectionChanged")
+if build_library >= 0 and "_filter.ItemsSource = Filters;" in automation_workspace_text[build_library:]:
+    fail("Automation library construction must not reinitialize the shared filter control")
 if 'ActiveConnectionProfile' not in main_window_text or 'ActiveConnectionProfile' not in runtime_text:
     fail("0.30.0 runtime/main shell must use active connection profiles")
 if 'SaveSettingsWorkspaceAsync(' not in runtime_text or 'SaveSettingsWorkspaceAsync(' not in settings_workspace_text:
