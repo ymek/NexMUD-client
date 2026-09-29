@@ -6,13 +6,17 @@ public sealed record InputPreferences(
     bool DeduplicateConsecutiveHistory = true,
     bool CompletionEnabled = true,
     int CompletionTokenLimit = 6_000,
-    bool LocalEcho = true);
+    bool LocalEcho = true,
+    bool CommandBatchingEnabled = true);
 
 public sealed record OutputPreferences(
     TimestampRenderMode TimestampMode = TimestampRenderMode.Off,
     int ScrollbackMaximumEntries = 5_000,
     bool SplitOutputEnabled = true,
-    bool NotifyWhenUnfocused = true);
+    bool NotifyWhenUnfocused = true,
+    bool WrapLongLines = false,
+    bool ShowCommandEcho = true,
+    bool ShowCommandProvenance = true);
 
 public enum TimestampRenderMode
 {

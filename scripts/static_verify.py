@@ -135,7 +135,7 @@ required_literals = {
     "split-view transcript": 'Text = "LIVE OUTPUT"',
     "transcript logger": 'TranscriptLogWriter _logWriter',
     "typed output transformation pipeline": "class OutputTransformationService",
-    "highlight settings page": 'SettingsPage.Highlights',
+    "presentation output rules editor": "class OutputRulesEditor",
     "macOS application name": 'Name = "NexMUD"',
     "neutral telnet identity": 'TerminalType = "xterm-256color"',
     "Jev typed question model": "JevQuestionType",
@@ -172,7 +172,7 @@ required_literals = {
     "automation shared scheduler": "IScriptScheduler _scheduler",
     "mapper shared execution scope": "ScriptOwnerKind.MapperRoute",
     "scripting platform composition root": "class ClientScriptPlatform",
-    "automation settings page": "SettingsPage.Automation",
+    "automation-owned behavior workspace": "class AutomationWorkspace",
     "logical scrollback search": "WorldBufferSearchOptions",
     "command palette": 'Title = "NexMUD Command Palette"',
     "plain transcript log format": "TranscriptLogFormat.PlainText",
@@ -191,7 +191,7 @@ required_literals = {
     "Jev persistent context": "IReadOnlyList<ExecutedCommandKnowledge> RecentCommands",
     "source-aware executed command history": "CREATE TABLE IF NOT EXISTS action_history",
     "source-aware action events": "DecisionSource Source = DecisionSource.Human",
-    "provenance-aware local echo": "AppendCommandEcho(ActionDispatching action, DateTimeOffset timestamp)",
+    "provenance-aware local echo": "AppendCommandEcho(ActionDispatching action, DateTimeOffset timestamp, bool showProvenance)",
     "Jev-labeled automated command echo": '\"[Jev] > \"',
     "normalized semantic help prose": "NormalizeWhitespace(string.Join(\" \", description))",
     "knowledge codex": "BuildKnowledgePanel",
@@ -293,7 +293,8 @@ gui_required_literals = {
     ],
     ROOT / "src/NexMud.Gui/SettingsWorkspace.cs": [
         "using Avalonia.Controls.Primitives;",
-        "matrix.RowDefinitions.Add(new RowDefinition(GridLength.Auto));",
+        "SettingsPage.Connections",
+        "SettingsPage.DataLogging",
     ],
 }
 for path, literals in gui_required_literals.items():
@@ -455,11 +456,13 @@ if "ArgumentNullException.ThrowIfNull(request.Command)" not in client_script_inf
 automation_workspace_text = (ROOT / "src/NexMud.Gui/AutomationWorkspace.cs").read_text(encoding="utf-8")
 scripting_workspace_text = (ROOT / "src/NexMud.Gui/ScriptingWorkspace.cs").read_text(encoding="utf-8")
 for literal in (
-    'Text = "AUTOMATIONS"',
-    'Text = "Choose a behavior to see when it runs and exactly what Jev will do."',
-    'Panel("YOUR AUTOMATIONS"',
-    'Panel("WHAT THIS AUTOMATION DOES"',
-    'Button run = ActionButton("Run now")',
+    'Text = "AUTOMATION"',
+    '"Aliases", "Keybindings", "Triggers", "State Rules", "Workflows", "Timers", "Script-backed"',
+    'UiTheme.PrimaryButton("New Automation")',
+    'BuildKeybindingEditor',
+    'BuildStateRuleEditor',
+    'BuildPreferences',
+    'AutomationKeybindingInvoked',
 ):
     if literal not in automation_workspace_text:
         fail(f"user-facing automation workspace requirement missing: {literal}")
@@ -634,7 +637,7 @@ for literal in (
     'Math.Clamp(_preferredRailWidth, 390, 425)',
     '_workspaceColumn.MinWidth = 380',
     'RowDefinitions = new RowDefinitions("Auto,2,*")',
-    'NexTranscriptTypography.Apply(text, _runtime.Settings.TranscriptFontSize);',
+    'ConfigureTranscriptText(_gameText);',
 ):
     if literal not in main_window_text:
         fail(f"default World main-shell visual invariant missing: {literal}")
@@ -799,14 +802,28 @@ for project in ROOT.glob("src/**/*.csproj"):
     if any((node.get("Include") or "").casefold() == "jint" for node in tree.findall(".//PackageReference")):
         fail(f"Jint package leaked outside adapter project: {project.relative_to(ROOT)}")
 
-jint_source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src/NexMud.Scripting.Jint").rglob("*.cs"))
-for forbidden in ("AllowClr(", "EnableModules(", "System.Reflection", "Process.Start("):
+jint_source_paths = [
+    path
+    for path in (ROOT / "src/NexMud.Scripting.Jint").rglob("*.cs")
+    if not any(part in {"bin", "obj", "artifacts"} for part in path.parts)
+]
+jint_source = "\n".join(path.read_text(encoding="utf-8") for path in jint_source_paths)
+for forbidden in ("AllowClr(", "EnableModules(", "Process.Start("):
     if forbidden in jint_source:
         fail(f"Jint adapter violates sandbox boundary: {forbidden}")
+for path in jint_source_paths:
+    jint_path_source = path.read_text(encoding="utf-8")
+    for forbidden in ("using System.Reflection", "global using System.Reflection", "System.Reflection."):
+        if forbidden in jint_path_source:
+            fail(
+                f"Jint adapter violates sandbox boundary: {forbidden} "
+                f"in {path.relative_to(ROOT)}"
+            )
 for literal in (
     "class JintEngineFactory",
     "DisableStringCompilation()",
     "Interop.Enabled = false",
+    "Interop.AllowSystemReflection = false",
     "AgentCanSuspend = false",
     "Modules.RegisterRequire = false",
     "MaxExecutionStackCount = limits.MaximumExecutionStackDepth",
@@ -1095,15 +1112,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.29.0"):
-    fail("README current version must be NexMUD 0.29.0")
-if '<Version>0.29.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.29.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.30.0"):
+    fail("README current version must be NexMUD 0.30.0")
+if '<Version>0.30.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.30.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.29.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.29.0")
-if '<string>29000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 29000 for NexMUD 0.29.0")
+if '<string>0.30.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.30.0")
+if '<string>30000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 30000 for NexMUD 0.30.0")
 item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1193,7 +1210,7 @@ for literal in (
     'bool active = normalized == NormalizeToolView(_activeTool);',
     'button.SetActive(active);',
     'UpdateNavigationDensity()',
-    'RenderConnectionAction(connected: false, _runtime.Settings.Host, _runtime.Settings.Port);',
+    'RenderConnectionAction(connected: false, _runtime.ActiveConnectionProfile.Host, _runtime.ActiveConnectionProfile.Port);',
     'RenderConnectionAction(connected, connectionHost, connectionPort);',
     '_gameplayHudPanel.Update(viewModel.Character);',
     '_characterHudPanel.Update(viewModel.Character);',
@@ -1432,7 +1449,7 @@ for literal in (
     'return new FontFamily("DejaVu Sans Mono");',
     'public const double DefaultFontSize = 14;',
     'public const double LineHeightRatio = 8d / 7d;',
-    'text.LineHeight = LineHeight(normalized);',
+    'text.LineHeight = Math.Round(normalized * normalizedRatio, 2);',
     'text.LineSpacing = 0;',
     'text.LetterSpacing = 0;',
     'text.Margin = new Thickness(0);',
@@ -1476,8 +1493,8 @@ for literal in (
 if 'Math.Max(14, _runtime.Settings.TranscriptFontSize)' in main_window_text:
     fail("hidden 14-point transcript floor must not return")
 for literal in (
-    'NexTranscriptTypography.Apply(_gameText, transcriptFontSize);',
-    'NexTranscriptTypography.Apply(_liveText, transcriptFontSize);',
+    'ConfigureTranscriptText(_gameText);',
+    'ConfigureTranscriptText(_liveText);',
     'double lineHeight = NexTranscriptTypography.LineHeight(fontSize);',
 ):
     if literal not in main_window_text:
@@ -1488,11 +1505,11 @@ if 'fontSize * 1.35' in main_window_text:
     fail("legacy oversized transcript row-height estimate must not return")
 if 'double TranscriptFontSize = 14' not in client_settings_text:
     fail("new NexMUD profiles must default transcript typography to 14")
-if 'Math.Clamp(settings.TranscriptFontSize, 8, 24)' not in client_settings_store_text:
+if 'TranscriptSize = Math.Clamp(appearance.TranscriptSize, 8, 24)' not in client_settings_store_text:
     fail("persisted transcript font sizes must normalize to 8-24")
-if 'Math.Clamp(transcriptFontSize, 8, 24)' not in runtime_text:
-    fail("runtime transcript font size saving must normalize to 8-24")
-if '_fontSize.ItemsSource = new double[] { 8, 9, 10, 11' not in settings_workspace_text:
+if 'TranscriptFontSize = appearance.TranscriptSize' not in runtime_text:
+    fail("runtime transcript font size saving must synchronize with Appearance")
+if '_transcriptSize.ItemsSource = new double[] { 8, 9, 10, 11' not in settings_workspace_text:
     fail("settings must retain the supported compact transcript size range")
 for literal in (
     'ClientSettingsAllowCompactTranscriptSizes',
@@ -1650,6 +1667,94 @@ for literal in (
 ):
     if literal not in test_program_text:
         fail(f"gameplay semantic regression coverage missing: {literal}")
+
+# 0.30.0 product-ownership architecture
+product_settings_text = (ROOT / "src/NexMud.Client/Settings/ProductSettings.cs").read_text(encoding="utf-8")
+connection_editor_text = (ROOT / "src/NexMud.Gui/ConnectionProfilesEditor.cs").read_text(encoding="utf-8")
+output_rules_editor_text = (ROOT / "src/NexMud.Gui/OutputRulesEditor.cs").read_text(encoding="utf-8")
+mapper_preferences_text = (ROOT / "src/NexMud.Gui/MapperPreferencesEditor.cs").read_text(encoding="utf-8")
+for literal in (
+    "General,",
+    "Appearance,",
+    "Transcript,",
+    "Input,",
+    "Connections,",
+    "DataLogging,",
+    "Advanced",
+):
+    if literal not in settings_workspace_text:
+        fail(f"0.30.0 Settings ownership page missing: {literal}")
+for forbidden in (
+    "SettingsPage.Keybindings",
+    "SettingsPage.Automation",
+    "SettingsPage.Rules",
+    "SettingsPage.Protocols",
+    "SettingsPage.Mapper",
+    "SettingsPage.Jev",
+):
+    if forbidden in settings_workspace_text:
+        fail(f"0.30.0 domain behavior leaked into global Settings: {forbidden}")
+for literal in (
+    "record ConnectionProfile(",
+    "enum ProtocolPolicy",
+    "ProtocolPolicy.Auto",
+    "record AppearancePreferences(",
+    "record GeneralPreferences(",
+):
+    if literal not in product_settings_text:
+        fail(f"0.30.0 product settings contract missing: {literal}")
+for literal in (
+    'Text = "PROFILE LIBRARY"',
+    'SectionTitle("Advanced Protocols"',
+    'ProtocolRow("GMCP"',
+    'ProtocolRow("CHARSET"',
+    'QuietButton("Duplicate")',
+):
+    if literal not in connection_editor_text:
+        fail(f"0.30.0 connection profile UX missing: {literal}")
+for literal in (
+    'Section("Highlights"',
+    'Section("Transformations"',
+    "presentation only",
+):
+    if literal not in output_rules_editor_text:
+        fail(f"0.30.0 transcript Output Rules ownership missing: {literal}")
+for literal in (
+    '"Aliases", "Keybindings", "Triggers", "State Rules", "Workflows", "Timers", "Script-backed"',
+    'BuildKeybindingEditor',
+    'BuildStateRuleEditor',
+    'BuildTemplates',
+    'Disabled group',
+):
+    if literal not in automation_workspace_text:
+        fail(f"0.30.0 Automation ownership missing: {literal}")
+for literal in (
+    'Text = "MAP PREFERENCES"',
+    'Section("Avoidance"',
+    'Section("Auto-move"',
+):
+    if literal not in mapper_preferences_text:
+        fail(f"0.30.0 Map preferences ownership missing: {literal}")
+for literal in (
+    'JevSection.Authority',
+    'JevSection.RecentDecisions',
+    'JevSection.ProviderSettings',
+    'Text = "Provider Settings"',
+):
+    if literal not in main_window_text:
+        fail(f"0.30.0 Jev ownership surface missing: {literal}")
+if 'new AutomationKeybindingInvoked(' not in main_window_text:
+    fail("0.30.0 keybinding provenance must enter Automation activity")
+if 'ActiveConnectionProfile' not in main_window_text or 'ActiveConnectionProfile' not in runtime_text:
+    fail("0.30.0 runtime/main shell must use active connection profiles")
+if 'SaveSettingsWorkspaceAsync(' not in runtime_text or 'SaveSettingsWorkspaceAsync(' not in settings_workspace_text:
+    fail("0.30.0 Settings must persist global preferences and connection profiles atomically")
+if product_settings_text.count("[JsonIgnore]") < 1 or client_settings_text.count("[JsonIgnore]") < 2:
+    fail("0.30.0 computed connection-profile projections must not serialize into settings")
+if 'Enum.GetValues<OutputRuleActionKind>()' not in output_rules_editor_text:
+    fail("0.30.0 Output Rules editor must preserve the complete transformation action surface")
+if 'MoveHighlight(draft, -1)' not in output_rules_editor_text or 'MoveHighlight(draft, 1)' not in output_rules_editor_text:
+    fail("0.30.0 transcript highlights must expose explicit ordering")
 
 if errors:
     print("Static verification failed:")

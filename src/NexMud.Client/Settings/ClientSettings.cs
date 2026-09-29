@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using NexMud.Contracts.Jev;
 
 namespace NexMud.Client.Settings;
@@ -31,7 +32,11 @@ public sealed record ClientSettings(
     string CommandSeparator = ";",
     InputPreferences? Input = null,
     OutputPreferences? Output = null,
-    IReadOnlyList<OutputTransformationRule>? OutputRules = null)
+    IReadOnlyList<OutputTransformationRule>? OutputRules = null,
+    IReadOnlyList<ConnectionProfile>? ConnectionProfiles = null,
+    string? ActiveConnectionProfileId = null,
+    GeneralPreferences? General = null,
+    AppearancePreferences? Appearance = null)
 {
     public static ClientSettings Default { get; } = new(
         JevPreset.Off,
@@ -59,5 +64,28 @@ public sealed record ClientSettings(
         new ProtocolPreferences(),
         new MapperPreferences(),
         true,
-        ";");
+        ";",
+        null,
+        null,
+        null,
+        [ConnectionProfile.Default],
+        ConnectionProfile.Default.Id,
+        new GeneralPreferences(),
+        new AppearancePreferences());
+
+    [JsonIgnore]
+    public IReadOnlyList<ConnectionProfile> EffectiveConnectionProfiles =>
+        ConnectionProfiles is { Count: > 0 } ? ConnectionProfiles : [ConnectionProfile.Default];
+
+    [JsonIgnore]
+    public ConnectionProfile ActiveConnectionProfile
+    {
+        get
+        {
+            IReadOnlyList<ConnectionProfile> profiles = EffectiveConnectionProfiles;
+            return profiles.FirstOrDefault(profile =>
+                       string.Equals(profile.Id, ActiveConnectionProfileId, StringComparison.Ordinal))
+                   ?? profiles[0];
+        }
+    }
 }

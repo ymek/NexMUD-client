@@ -41,14 +41,14 @@ internal sealed record GuiStartupOptions(
     int? Port,
     bool UseTls,
     string? JevModel,
-    bool AutoConnect)
+    bool? AutoConnect)
 {
     public static GuiStartupOptions Parse(string[] args)
     {
         string? host = null;
         int? port = null;
         bool tls = false;
-        bool autoConnect = true;
+        bool? autoConnect = null;
         string? model = null;
 
         for (int index = 0; index < args.Length; index++)
@@ -57,6 +57,7 @@ internal sealed record GuiStartupOptions(
             {
                 case "--host":
                     host = RequireValue(args, ref index, "--host");
+                    autoConnect ??= true;
                     break;
                 case "--port":
                     string portValue = RequireValue(args, ref index, "--port");
@@ -65,6 +66,7 @@ internal sealed record GuiStartupOptions(
                         throw new ArgumentException("--port must be between 1 and 65535.");
                     }
                     port = parsedPort;
+                    autoConnect ??= true;
                     break;
                 case "--tls":
                     tls = true;

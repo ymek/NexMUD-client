@@ -1,4 +1,18 @@
-# NexMUD Client v0.29.0
+# NexMUD Client v0.30.0
+
+## v0.30.0 - Product ownership and workspace architecture
+
+- Reduced global Settings to General, Appearance, Transcript, Input, Connections, Data & Logging, and Advanced.
+- Added first-class connection profiles with profile-scoped terminal and protocol policy.
+- Moved keybindings into the Automation library alongside aliases, triggers, state rules, workflows, timers, and script-backed behavior.
+- Added Automation Library, Activity, Templates, and runtime-only Preferences surfaces; purpose-built editors retain each behavior type's existing execution policy.
+- Split transcript Output Rules from executable Automation State Rules.
+- Output Rules retain the complete transformation action surface and explicit highlight ordering while remaining display-only.
+- Moved Mapper policy into Map Preferences, including chip-based typed avoidance lists.
+- Added Jev Status, Authority, Recent Decisions, and Provider Settings surfaces inside the Jev workspace.
+- Added appearance-owned interface/transcript typography and runtime transcript wrapping controls.
+- Settings now persist connection profiles and global preferences in one atomic save operation; computed profile projections are excluded from JSON persistence.
+- SemVer release: 0.30.0. macOS build: 30000.
 
 ## v0.29.0 - NexMud project and namespace rename
 

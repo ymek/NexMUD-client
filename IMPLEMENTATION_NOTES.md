@@ -1,3 +1,17 @@
+# NexMUD 0.30.0
+
+- Reorganized global Settings around low-frequency client preferences.
+- Introduced persistent first-class connection profiles with per-profile protocol overrides.
+- Made Automation the canonical owner of keybindings and executable behavior.
+- Added Library, Activity, Templates, and runtime-only Preferences surfaces to Automation while preserving trigger/state-rule/workflow execution fields.
+- Made transcript Output Rules explicitly presentation-only.
+- Added explicit highlight ordering and preserved every existing output transformation action kind.
+- Moved Mapper policy into Map-owned Preferences and Jev configuration into Jev-owned surfaces.
+- Added Automation keybinding provenance to the activity event stream.
+- Settings save connection profiles and global preferences atomically; computed profile projections are not serialized.
+- Added settings migration/round-trip coverage for connection profiles, appearance, and general preferences.
+- SemVer release: 0.30.0. macOS build: 30000.
+
 # NexMUD 0.29.0
 
 ## NexMud project and namespace rename

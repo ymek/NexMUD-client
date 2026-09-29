@@ -705,9 +705,13 @@ public sealed class ClientInteractionRuntime
                             replay: observation.Observation.Kind == ObservationKind.ReplayMarker);
                         break;
                     case ActionDispatching action when CommandInputPolicy.ShouldEchoToTranscript(action.Sensitive):
-                        if ((_settings().Input ?? new InputPreferences()).LocalEcho)
-                            AppendCommandEcho(action, envelope.Timestamp);
+                    {
+                        ClientSettings settings = _settings();
+                        OutputPreferences output = settings.Output ?? new OutputPreferences();
+                        if (output.ShowCommandEcho && (settings.Input ?? new InputPreferences()).LocalEcho)
+                            AppendCommandEcho(action, envelope.Timestamp, output.ShowCommandProvenance);
                         break;
+                    }
                     case ConnectionStateChanged connection when connection.Status == ConnectionStatus.Disconnected:
                         lock (_processingGate) Frames.Reset();
                         break;
@@ -772,7 +776,7 @@ public sealed class ClientInteractionRuntime
         }
     }
 
-    private void AppendCommandEcho(ActionDispatching action, DateTimeOffset timestamp)
+    private void AppendCommandEcho(ActionDispatching action, DateTimeOffset timestamp, bool showProvenance)
     {
         string command = action.Command.Length == 0 ? "<enter>" : action.Command;
         CommandOrigin origin = action.Provenance?.Origin ?? action.Source switch
@@ -781,7 +785,7 @@ public sealed class ClientInteractionRuntime
             DecisionSource.Jev or DecisionSource.Hybrid => CommandOrigin.Jev,
             _ => CommandOrigin.System
         };
-        string sourcePrefix = origin switch
+        string sourcePrefix = !showProvenance ? "> " : origin switch
         {
             CommandOrigin.User => "> ",
             CommandOrigin.Alias => "[Alias] > ",

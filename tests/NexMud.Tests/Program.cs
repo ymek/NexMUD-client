@@ -142,6 +142,7 @@ public static class Program
         await RunAsync("command aliases expand positional arguments", CommandAliasesExpandArguments);
         await RunAsync("alias expansions execute command batches", AliasExpansionsExecuteCommandBatches);
         await RunAsync("command separator batches preserve order and escapes", CommandSeparatorSplitsInput);
+        await RunAsync("command batching can be disabled without splitting input", CommandBatchingCanBeDisabled);
         await RunAsync("interaction input pipeline records history and preserves command order", InteractionInputPipelinePreservesHistoryAndOrder);
         await RunAsync("generated interaction commands do not pollute manual history", InteractionGeneratedCommandsDoNotPolluteHistory);
         await RunAsync("interaction history restores in-progress input", InteractionHistoryRestoresInProgressBuffer);
@@ -203,6 +204,7 @@ public static class Program
         await RunAsync("partial ability snapshots preserve known entries", PartialAbilitySnapshotsPreserveKnownEntries);
         await RunAsync("client settings round trip Jev authority", ClientSettingsRoundTripJevAuthority);
         await RunAsync("client settings allow compact transcript sizes", ClientSettingsAllowCompactTranscriptSizes);
+        await RunAsync("connection profiles are first class and migrate legacy protocol policy", ConnectionProfilesAreFirstClass);
         await RunAsync("runtime Jev save persists before returning", RuntimeJevSavePersistsBeforeReturning);
         await RunAsync("dirt kicking eligibility honors terrain", DirtKickingEligibilityHonorsTerrain);
         await RunAsync("skill eligibility remains unknown before skills are observed", SkillEligibilityUnknownBeforeObservation);
@@ -3003,6 +3005,31 @@ public static class Program
         return Task.CompletedTask;
     }
 
+    private static async Task CommandBatchingCanBeDisabled()
+    {
+        ClientSettings settings = ClientSettings.Default with
+        {
+            CommandSeparator = ";",
+            Input = new InputPreferences(CommandBatchingEnabled: false)
+        };
+        CommandHistoryService history = new(maximumEntries: 10);
+        CompletionService completion = new();
+        InputPipeline pipeline = new(() => settings, history, completion);
+        List<string> dispatched = [];
+
+        InputSubmissionResult result = await pipeline.SubmitAsync(
+            new InputRequest(InputSourceKind.Keyboard, "north;south", DateTimeOffset.UtcNow, Guid.NewGuid()),
+            SessionInputMode.Normal,
+            (command, _) =>
+            {
+                dispatched.Add(command);
+                return Task.FromResult(new LocalCommandResult(false));
+            });
+
+        Assert.Equal("north;south", Assert.Single(result.Commands));
+        Assert.Equal("north;south", Assert.Single(dispatched));
+    }
+
     private static async Task InteractionInputPipelinePreservesHistoryAndOrder()
     {
         ClientSettings settings = ClientSettings.Default with { CommandSeparator = ";" };
@@ -4395,15 +4422,15 @@ public static class Program
             ClientSettingsStore store = new(path);
             Assert.Equal(14d, ClientSettings.Default.TranscriptFontSize);
 
-            await store.SaveAsync(ClientSettings.Default with { TranscriptFontSize = 8 });
+            await store.SaveAsync(ClientSettings.Default with { Appearance = new AppearancePreferences(TranscriptSize: 8) });
             ClientSettings compact = await store.LoadAsync();
             Assert.Equal(8d, compact.TranscriptFontSize);
 
-            await store.SaveAsync(ClientSettings.Default with { TranscriptFontSize = 7 });
+            await store.SaveAsync(ClientSettings.Default with { Appearance = new AppearancePreferences(TranscriptSize: 7) });
             ClientSettings clampedLow = await store.LoadAsync();
             Assert.Equal(8d, clampedLow.TranscriptFontSize);
 
-            await store.SaveAsync(ClientSettings.Default with { TranscriptFontSize = 30 });
+            await store.SaveAsync(ClientSettings.Default with { Appearance = new AppearancePreferences(TranscriptSize: 30) });
             ClientSettings clampedHigh = await store.LoadAsync();
             Assert.Equal(24d, clampedHigh.TranscriptFontSize);
         }
@@ -4413,6 +4440,39 @@ public static class Program
             {
                 Directory.Delete(directory, recursive: true);
             }
+        }
+    }
+
+    private static async Task ConnectionProfilesAreFirstClass()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "nexmud-tests", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "settings.json");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            await File.WriteAllTextAsync(path,
+                """{
+                  "jevPreset": "off",
+                  "jevDomains": {},
+                  "host": "legacy.example",
+                  "port": 4444,
+                  "useTls": true,
+                  "terminalType": "ansi",
+                  "protocols": { "charset": false, "eor": true }
+                }""");
+
+            ClientSettings loaded = await new ClientSettingsStore(path).LoadAsync();
+            ConnectionProfile profile = Assert.Single(loaded.EffectiveConnectionProfiles);
+            Assert.Equal("legacy.example", profile.Host);
+            Assert.Equal(4444, profile.Port);
+            Assert.True(profile.UseTls, "TLS should migrate into the connection profile.");
+            Assert.Equal("ansi", profile.TerminalType);
+            Assert.Equal(ProtocolPolicy.Disabled, profile.EffectiveProtocols.Charset);
+            Assert.Equal(ProtocolPolicy.Auto, profile.EffectiveProtocols.Eor);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         }
     }
 
@@ -4446,23 +4506,52 @@ public static class Program
                 Timers = [new CommandTimer("keepalive", 30, "look", Repeat: true, Enabled: true)],
                 KeyBindings = [new CommandKeyBinding("Primary+1", "look", Name: "Look", Context: KeybindingContext.World, Action: KeybindingActionKind.SendCommand, Priority: 4)],
                 Input = new InputPreferences(750, PersistHistory: true, DeduplicateConsecutiveHistory: false, CompletionEnabled: true, CompletionTokenLimit: 7000, LocalEcho: false),
-                Output = new OutputPreferences(TimestampRenderMode.TimeWithMilliseconds, 7000, SplitOutputEnabled: false, NotifyWhenUnfocused: false),
+                Output = new OutputPreferences(TimestampRenderMode.TimeWithMilliseconds, 7000, SplitOutputEnabled: false, NotifyWhenUnfocused: false, WrapLongLines: true, ShowCommandEcho: false, ShowCommandProvenance: false),
                 OutputRules = [new OutputTransformationRule("guard", "Guard", "cityguard", Actions: [new OutputRuleAction(OutputRuleActionKind.Substitute, "[Guard]")])],
                 Workspace = new WorkspacePreferences(1440, 900, true, 420, "Jev", 210),
                 JevEnabled = false,
                 CommandSeparator = "|",
                 Protocols = new ProtocolPreferences(Eor: false),
-                Mapper = new MapperPreferences(AutoOpenDoors: true, DoorOpenCommandTemplate: "open {direction}")
+                Mapper = new MapperPreferences(AutoOpenDoors: true, DoorOpenCommandTemplate: "open {direction}"),
+                ConnectionProfiles =
+                [
+                    new ConnectionProfile(
+                        "avendar-main",
+                        "Avendar Main",
+                        "avendar.net",
+                        9999,
+                        false,
+                        "xterm-256color",
+                        new ConnectionProtocolPreferences(Eor: ProtocolPolicy.Disabled)),
+                    new ConnectionProfile(
+                        "avendar-test",
+                        "Avendar Test",
+                        "test.avendar.net",
+                        9998,
+                        true,
+                        "xterm-256color",
+                        new ConnectionProtocolPreferences(Charset: ProtocolPolicy.Disabled))
+                ],
+                ActiveConnectionProfileId = "avendar-test",
+                General = new GeneralPreferences(false, false, false),
+                Appearance = new AppearancePreferences(AccentPalette: "ArcaneCyan", TranscriptSize: 16, TranscriptLineSpacing: 1.2)
             };
 
             await store.SaveAsync(settings);
+            string persisted = await File.ReadAllTextAsync(path);
+            Assert.False(persisted.Contains("effectiveConnectionProfiles", StringComparison.OrdinalIgnoreCase),
+                "Computed connection-profile projections must not be serialized.");
+            Assert.False(persisted.Contains("activeConnectionProfile\"", StringComparison.OrdinalIgnoreCase),
+                "Computed active-profile projections must not be serialized.");
+            Assert.False(persisted.Contains("effectiveProtocols", StringComparison.OrdinalIgnoreCase),
+                "Computed protocol projections must not be serialized.");
             ClientSettings loaded = await store.LoadAsync();
 
             Assert.Equal(JevPreset.Custom, loaded.JevPreset);
             Assert.Equal(JevAuthority.Suggest, loaded.JevDomains[JevDomain.Combat]);
             Assert.Equal(JevAuthority.Observe, loaded.JevDomains[JevDomain.Navigation]);
-            Assert.Equal("avendar.net", loaded.Host);
-            Assert.Equal(9999, loaded.Port);
+            Assert.Equal("test.avendar.net", loaded.Host);
+            Assert.Equal(9998, loaded.Port);
             Assert.Equal("xterm-256color", loaded.TerminalType);
             Assert.Equal(16d, loaded.TranscriptFontSize);
             Assert.False(loaded.ShowContextDock, "Context dock setting did not round-trip.");
@@ -4492,12 +4581,23 @@ public static class Program
             Assert.Equal(7000, loaded.Output.ScrollbackMaximumEntries);
             Assert.False(loaded.Output.SplitOutputEnabled, "Split-output setting did not round-trip.");
             Assert.False(loaded.Output.NotifyWhenUnfocused, "Notification focus setting did not round-trip.");
+            Assert.True(loaded.Output.WrapLongLines, "Transcript wrapping setting did not round-trip.");
+            Assert.False(loaded.Output.ShowCommandEcho, "Command echo setting did not round-trip.");
+            Assert.False(loaded.Output.ShowCommandProvenance, "Command provenance setting did not round-trip.");
             Assert.Equal("guard", Assert.Single(loaded.OutputRules!).Id);
             Assert.Equal("Jev", loaded.Workspace!.DockView);
             Assert.Equal(420d, loaded.Workspace.DockWidth);
             Assert.False(loaded.JevEnabled, "Jev master enabled state did not round-trip.");
             Assert.Equal("|", loaded.CommandSeparator);
-            Assert.False(loaded.Protocols!.Eor, "EOR protocol preference did not round-trip.");
+            Assert.True(loaded.Protocols!.Eor, "Legacy protocol mirror should follow the active profile.");
+            Assert.Equal(2, loaded.EffectiveConnectionProfiles.Count);
+            Assert.Equal("avendar-test", loaded.ActiveConnectionProfileId);
+            Assert.Equal("Avendar Test", loaded.ActiveConnectionProfile.Name);
+            Assert.Equal(ProtocolPolicy.Disabled, loaded.ActiveConnectionProfile.EffectiveProtocols.Charset);
+            Assert.False(loaded.General!.RestorePreviousWorkspace, "General startup preference did not round-trip.");
+            Assert.False(loaded.General.ShowGameplayRailByDefault, "Gameplay rail preference did not round-trip.");
+            Assert.Equal("ArcaneCyan", loaded.Appearance!.AccentPalette);
+            Assert.Equal(1.2d, loaded.Appearance.TranscriptLineSpacing);
             Assert.True(loaded.Mapper!.AutoOpenDoors, "Mapper automatic door-opening preference did not round-trip.");
             Assert.Equal("open {direction}", loaded.Mapper.DoorOpenCommandTemplate);
         }

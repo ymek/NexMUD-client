@@ -219,12 +219,19 @@ internal static class NexTranscriptTypography
     public static double HeightForRows(int rows, double fontSize) =>
         Math.Max(0, rows) * LineHeight(fontSize);
 
-    public static void Apply(SelectableTextBlock text, double fontSize)
+    public static void Apply(
+        SelectableTextBlock text,
+        double fontSize,
+        string? fontFamily = null,
+        double lineHeightRatio = LineHeightRatio)
     {
         double normalized = NormalizeFontSize(fontSize);
-        text.FontFamily = NexMudTheme.Terminal;
+        double normalizedRatio = Math.Clamp(lineHeightRatio, 1.0, 1.5);
+        text.FontFamily = string.IsNullOrWhiteSpace(fontFamily)
+            ? NexMudTheme.Terminal
+            : new FontFamily(fontFamily);
         text.FontSize = normalized;
-        text.LineHeight = LineHeight(normalized);
+        text.LineHeight = Math.Round(normalized * normalizedRatio, 2);
         text.LineSpacing = 0;
         text.LetterSpacing = 0;
     }

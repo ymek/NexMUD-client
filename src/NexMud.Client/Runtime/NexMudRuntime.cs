@@ -171,6 +171,10 @@ public sealed class NexMudRuntime : IAsyncDisposable
     public ClientSettingsStore SettingsStore { get; }
     public ISecretStore SecretStore { get; }
     public ClientSettings Settings { get; private set; } = ClientSettings.Default;
+
+    public IReadOnlyList<ConnectionProfile> ConnectionProfiles => Settings.EffectiveConnectionProfiles;
+
+    public ConnectionProfile ActiveConnectionProfile => Settings.ActiveConnectionProfile;
     public IJevDecisionEngine? DecisionEngine { get; private set; }
     public bool EnvironmentJevApiKeyConfigured => !string.IsNullOrWhiteSpace(_environmentJevApiKey);
     public CancellationToken CancellationToken => _cts.Token;
@@ -317,41 +321,49 @@ public sealed class NexMudRuntime : IAsyncDisposable
         JevCoordinator.EvaluateRecoveryNowAsync(cancellationToken);
 
 
-    public MudConnectionOptions CreateConnectionOptions(string? host = null, int? port = null, bool? useTls = null)
+    public MudConnectionOptions CreateConnectionOptions(ConnectionProfile? profile = null)
     {
-        ProtocolPreferences protocols = Settings.Protocols ?? new ProtocolPreferences();
+        ConnectionProfile selected = profile ?? ActiveConnectionProfile;
+        ConnectionProtocolPreferences protocols = selected.EffectiveProtocols;
         return new MudConnectionOptions(
-            host ?? Settings.Host,
-            port ?? Settings.Port,
-            useTls ?? Settings.UseTls,
-            Settings.TerminalType,
+            selected.Host,
+            selected.Port,
+            selected.UseTls,
+            selected.TerminalType,
             Protocols: new MudProtocolOptions(
-                Naws: protocols.Naws,
-                Gmcp: protocols.Gmcp,
-                Msdp: protocols.Msdp,
-                Mssp: protocols.Mssp,
-                Mccp2: protocols.Mccp2,
-                Charset: protocols.Charset,
-                NewEnvironment: protocols.NewEnvironment,
-                Mtts: protocols.Mtts,
-                Eor: protocols.Eor),
+                Naws: protocols.Naws != ProtocolPolicy.Disabled,
+                Gmcp: protocols.Gmcp != ProtocolPolicy.Disabled,
+                Msdp: protocols.Msdp != ProtocolPolicy.Disabled,
+                Mssp: protocols.Mssp != ProtocolPolicy.Disabled,
+                Mccp2: protocols.Mccp2 != ProtocolPolicy.Disabled,
+                Charset: protocols.Charset != ProtocolPolicy.Disabled,
+                NewEnvironment: protocols.NewEnvironment != ProtocolPolicy.Disabled,
+                Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
+                Eor: protocols.Eor != ProtocolPolicy.Disabled),
             ClientName: "NexMUD",
-            ClientVersion: "0.29.0");
+            ClientVersion: "0.30.0");
     }
 
-    public async Task SaveSubsystemSettingsAsync(
+    public MudConnectionOptions CreateConnectionOptions(string? host, int? port, bool? useTls)
+    {
+        ConnectionProfile active = ActiveConnectionProfile;
+        return CreateConnectionOptions(active with
+        {
+            Host = host ?? active.Host,
+            Port = port ?? active.Port,
+            UseTls = useTls ?? active.UseTls
+        });
+    }
+
+    public async Task SaveAutomationPreferencesAsync(
         AutomationPreferences automation,
-        ProtocolPreferences protocols,
-        MapperPreferences mapper,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(automation);
-        ArgumentNullException.ThrowIfNull(protocols);
-        ArgumentNullException.ThrowIfNull(mapper);
         await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Settings = Settings with { Automation = automation, Protocols = protocols, Mapper = mapper };
+            Settings = Settings with { Automation = automation };
             await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
             if (!automation.Enabled) Automation.CancelAllWorkflows();
             await AutomationCompiler.ReloadAsync(Settings, cancellationToken).ConfigureAwait(false);
@@ -361,6 +373,109 @@ public sealed class NexMudRuntime : IAsyncDisposable
             _settingsGate.Release();
         }
     }
+
+    public async Task SaveMapperPreferencesAsync(
+        MapperPreferences mapper,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(mapper);
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with { Mapper = mapper };
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveGeneralPreferencesAsync(
+        GeneralPreferences general,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(general);
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                General = general,
+                ShowContextDock = general.ShowGameplayRailByDefault
+            };
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveAppearancePreferencesAsync(
+        AppearancePreferences appearance,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(appearance);
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                Appearance = appearance,
+                TranscriptFontSize = appearance.TranscriptSize
+            };
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveConnectionProfilesAsync(
+        IReadOnlyList<ConnectionProfile> profiles,
+        string activeProfileId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profiles);
+        if (profiles.Count == 0) throw new ArgumentException("At least one connection profile is required.", nameof(profiles));
+        ConnectionProfile active = profiles.FirstOrDefault(profile =>
+            string.Equals(profile.Id, activeProfileId, StringComparison.Ordinal))
+            ?? throw new ArgumentException("Active connection profile must exist in the profile collection.", nameof(activeProfileId));
+
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                ConnectionProfiles = profiles.ToArray(),
+                ActiveConnectionProfileId = active.Id,
+                Host = active.Host,
+                Port = active.Port,
+                UseTls = active.UseTls,
+                TerminalType = active.TerminalType,
+                Protocols = ToLegacyProtocolPreferences(active.EffectiveProtocols)
+            };
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    private static ProtocolPreferences ToLegacyProtocolPreferences(ConnectionProtocolPreferences protocols) => new(
+        Naws: protocols.Naws != ProtocolPolicy.Disabled,
+        Gmcp: protocols.Gmcp != ProtocolPolicy.Disabled,
+        Msdp: protocols.Msdp != ProtocolPolicy.Disabled,
+        Mssp: protocols.Mssp != ProtocolPolicy.Disabled,
+        Mccp2: protocols.Mccp2 != ProtocolPolicy.Disabled,
+        Charset: protocols.Charset != ProtocolPolicy.Disabled,
+        NewEnvironment: protocols.NewEnvironment != ProtocolPolicy.Disabled,
+        Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
+        Eor: protocols.Eor != ProtocolPolicy.Disabled);
+
     public Task<bool> ApproveJevDecisionAsync(Guid decisionId, CancellationToken cancellationToken = default) =>
         JevCoordinator.ApproveAsync(decisionId, cancellationToken);
 
@@ -373,16 +488,16 @@ public sealed class NexMudRuntime : IAsyncDisposable
         bool useTls,
         CancellationToken cancellationToken = default)
     {
-        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        ConnectionProfile active = ActiveConnectionProfile with
         {
-            Settings = Settings with { Host = host, Port = port, UseTls = useTls };
-            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _settingsGate.Release();
-        }
+            Host = host,
+            Port = port,
+            UseTls = useTls
+        };
+        ConnectionProfile[] profiles = ConnectionProfiles
+            .Select(profile => string.Equals(profile.Id, active.Id, StringComparison.Ordinal) ? active : profile)
+            .ToArray();
+        await SaveConnectionProfilesAsync(profiles, active.Id, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SaveClientPreferencesAsync(
@@ -487,6 +602,118 @@ public sealed class NexMudRuntime : IAsyncDisposable
             {
                 Input = input,
                 Output = output,
+                OutputRules = outputRules.ToArray()
+            };
+            Interaction.Configure(Settings);
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveGlobalClientPreferencesAsync(
+        GeneralPreferences general,
+        AppearancePreferences appearance,
+        bool autoLogSessions,
+        bool slurpTelemetryPrompt,
+        string commandSeparator,
+        TranscriptLogFormat logFormat,
+        InputPreferences input,
+        OutputPreferences output,
+        IReadOnlyList<TranscriptHighlightRule> highlightRules,
+        IReadOnlyList<OutputTransformationRule> outputRules,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(general);
+        ArgumentNullException.ThrowIfNull(appearance);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(highlightRules);
+        ArgumentNullException.ThrowIfNull(outputRules);
+
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                General = general,
+                Appearance = appearance,
+                ShowContextDock = general.ShowGameplayRailByDefault,
+                TranscriptFontSize = appearance.TranscriptSize,
+                AutoLogSessions = autoLogSessions,
+                SlurpTelemetryPrompt = slurpTelemetryPrompt,
+                CommandSeparator = commandSeparator,
+                LogFormat = logFormat,
+                Input = input,
+                Output = output,
+                HighlightRules = highlightRules.ToArray(),
+                OutputRules = outputRules.ToArray()
+            };
+            Interaction.Configure(Settings);
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveSettingsWorkspaceAsync(
+        IReadOnlyList<ConnectionProfile> profiles,
+        string activeProfileId,
+        GeneralPreferences general,
+        AppearancePreferences appearance,
+        bool autoLogSessions,
+        bool slurpTelemetryPrompt,
+        string commandSeparator,
+        TranscriptLogFormat logFormat,
+        InputPreferences input,
+        OutputPreferences output,
+        IReadOnlyList<TranscriptHighlightRule> highlightRules,
+        IReadOnlyList<OutputTransformationRule> outputRules,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profiles);
+        ArgumentNullException.ThrowIfNull(general);
+        ArgumentNullException.ThrowIfNull(appearance);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(highlightRules);
+        ArgumentNullException.ThrowIfNull(outputRules);
+        if (profiles.Count == 0)
+            throw new ArgumentException("At least one connection profile is required.", nameof(profiles));
+
+        ConnectionProfile active = profiles.FirstOrDefault(profile =>
+            string.Equals(profile.Id, activeProfileId, StringComparison.Ordinal))
+            ?? throw new ArgumentException(
+                "Active connection profile must exist in the profile collection.",
+                nameof(activeProfileId));
+
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                ConnectionProfiles = profiles.ToArray(),
+                ActiveConnectionProfileId = active.Id,
+                Host = active.Host,
+                Port = active.Port,
+                UseTls = active.UseTls,
+                TerminalType = active.TerminalType,
+                Protocols = ToLegacyProtocolPreferences(active.EffectiveProtocols),
+                General = general,
+                Appearance = appearance,
+                ShowContextDock = general.ShowGameplayRailByDefault,
+                TranscriptFontSize = appearance.TranscriptSize,
+                AutoLogSessions = autoLogSessions,
+                SlurpTelemetryPrompt = slurpTelemetryPrompt,
+                CommandSeparator = commandSeparator,
+                LogFormat = logFormat,
+                Input = input,
+                Output = output,
+                HighlightRules = highlightRules.ToArray(),
                 OutputRules = outputRules.ToArray()
             };
             Interaction.Configure(Settings);

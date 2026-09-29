@@ -624,7 +624,8 @@ public sealed class InputPipeline
             _completion.IndexText(request.Text);
         }
 
-        IReadOnlyList<string> commands = mode == SessionInputMode.Normal
+        InputPreferences inputPreferences = _settings().Input ?? new InputPreferences();
+        IReadOnlyList<string> commands = mode == SessionInputMode.Normal && inputPreferences.CommandBatchingEnabled
             ? _tokenizer.Tokenize(request.Text, _settings().CommandSeparator)
             : [request.Text];
 

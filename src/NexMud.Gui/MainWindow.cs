@@ -27,6 +27,7 @@ using NexMud.Contracts.Jev;
 using NexMud.Contracts.State;
 using NexMud.Contracts.Transport;
 using NexMud.Core.Events;
+using NexMud.Core.Jev;
 using NexMud.Scripting.Host;
 using NexMud.Transport.Text;
 
@@ -47,6 +48,14 @@ public sealed class MainWindow : Window
         Map,
         Scripting,
         Search
+    }
+
+    private enum JevSection
+    {
+        Status,
+        Authority,
+        RecentDecisions,
+        ProviderSettings
     }
 
     private sealed record PaletteCommand(
@@ -144,6 +153,7 @@ public sealed class MainWindow : Window
     private readonly StackPanel _searchResults = new() { Spacing = 7 };
     private double _preferredRailWidth = 360;
     private double _preferredLiveHeight = 190;
+    private bool _gameplayRailVisible = true;
 
     private StateSnapshot _snapshot = StateSnapshot.Initial;
     private JevDecisionTrace? _lastJevDecision;
@@ -158,6 +168,7 @@ public sealed class MainWindow : Window
     private string? _pendingJevCommand;
     private string? _jevExecutionStatus;
     private bool _jevEvaluationInProgress;
+    private JevSection _jevSection = JevSection.Status;
     private ToolView _activeTool = ToolView.Context;
     private bool _followTail = true;
     private int _unseenOutputCount;
@@ -170,7 +181,6 @@ public sealed class MainWindow : Window
         _snapshots = runtime.State.Subscribe(capacity: 8);
         _mapperWorkspace = new MapperWorkspace(
             runtime,
-            ShowSettingsAsync,
             ShowRoomMetadataEditorAsync,
             ShowSpecialExitEditorAsync,
             _cts.Token);
@@ -179,7 +189,11 @@ public sealed class MainWindow : Window
             RouteToCodexLocationAsync,
             SubmitCommandAsync,
             _cts.Token);
-        _automationWorkspace = new AutomationWorkspace(runtime, ShowSettingsAsync);
+        _automationWorkspace = new AutomationWorkspace(runtime, () =>
+        {
+            ShowTool(ToolView.Scripting);
+            return Task.CompletedTask;
+        });
         _scriptingWorkspace = new ScriptingWorkspace(runtime);
         _characterHudPanel = new CharacterHudPanel(ResolveItemInspection);
         _characterWorkspace = new CharacterInventoryWorkspace(ResolveItemInspection, SubmitCommandAsync);
@@ -188,7 +202,11 @@ public sealed class MainWindow : Window
         _runtime.Interaction.World.Appended += HandleWorldBufferAppended;
         _runtime.Interaction.NotificationRequested += HandleOutputNotification;
         _runtime.Interaction.RuleDiagnostic += HandleOutputRuleDiagnostic;
-        WorkspacePreferences workspace = runtime.Settings.Workspace ?? new WorkspacePreferences();
+        GeneralPreferences general = runtime.Settings.General ?? new GeneralPreferences();
+        _gameplayRailVisible = general.ShowGameplayRailByDefault;
+        WorkspacePreferences workspace = general.RestorePreviousWorkspace
+            ? runtime.Settings.Workspace ?? new WorkspacePreferences()
+            : new WorkspacePreferences();
         _preferredRailWidth = workspace.DockWidth;
         _preferredLiveHeight = workspace.LiveSplitHeight;
         _activeTool = ToolView.Context;
@@ -430,7 +448,7 @@ public sealed class MainWindow : Window
         _connect.FontWeight = FontWeight.SemiBold;
         _connect.Click += async (_, _) => await ToggleConnectionAsync();
         actions.Children.Add(_connect);
-        RenderConnectionAction(connected: false, _runtime.Settings.Host, _runtime.Settings.Port);
+        RenderConnectionAction(connected: false, _runtime.ActiveConnectionProfile.Host, _runtime.ActiveConnectionProfile.Port);
 
         NexIconButton palette = new(NexIconKind.Search, "Command palette (⌘K)");
         palette.MinWidth = 34;
@@ -674,10 +692,16 @@ public sealed class MainWindow : Window
 
     private void ConfigureTranscriptText(SelectableTextBlock text)
     {
-        NexTranscriptTypography.Apply(text, _runtime.Settings.TranscriptFontSize);
+        AppearancePreferences appearance = _runtime.Settings.Appearance ?? new AppearancePreferences();
+        OutputPreferences output = _runtime.Settings.Output ?? new OutputPreferences();
+        NexTranscriptTypography.Apply(
+            text,
+            appearance.TranscriptSize,
+            appearance.TranscriptFont,
+            appearance.TranscriptLineSpacing);
         text.Foreground = NexMudTheme.Parchment;
         text.Background = NexMudTheme.DeepConsole;
-        text.TextWrapping = TextWrapping.NoWrap;
+        text.TextWrapping = output.WrapLongLines ? TextWrapping.Wrap : TextWrapping.NoWrap;
         text.Margin = new Thickness(0);
         text.Padding = new Thickness(0);
     }
@@ -1089,6 +1113,14 @@ public sealed class MainWindow : Window
     {
         try
         {
+            await _runtime.Events.PublishAsync(
+                new AutomationKeybindingInvoked(
+                    binding.Gesture,
+                    binding.Context.ToString(),
+                    binding.Action.ToString(),
+                    binding.Command),
+                "keybinding",
+                _cts.Token).ConfigureAwait(true);
             switch (binding.Action)
             {
                 case KeybindingActionKind.SubmitInput:
@@ -1361,7 +1393,7 @@ public sealed class MainWindow : Window
                 () => { ShowTool(ToolView.Abilities); return Task.CompletedTask; }),
             new("NAVIGATE", "Spells", "Open the consolidated ability catalog", null,
                 () => { ShowTool(ToolView.Abilities); return Task.CompletedTask; }),
-            new("NAVIGATE", "Automation", "Rules, workflows, variables and deterministic automation activity", null,
+            new("NAVIGATE", "Automation", "Aliases, keybindings, triggers, state rules, workflows and activity", null,
                 () => { ShowTool(ToolView.Automation); return Task.CompletedTask; }),
             new("NAVIGATE", "Scripting", "Open runtime, script-package and Jint module tooling without hiding World", null,
                 () => { ShowTool(ToolView.Scripting); return Task.CompletedTask; }),
@@ -1387,7 +1419,7 @@ public sealed class MainWindow : Window
             new("JEV", "Evaluate combat now", "Run a fresh typed combat decision against current state", null, EvaluateCombatAsync),
             new("JEV", "Evaluate recovery now", "Run a typed recovery decision against current resources and position", null, EvaluateRecoveryAsync),
             new("JEV", "Evaluate navigation now", "Run a typed route decision against current exits and room memory", null, EvaluateNavigationAsync),
-            new("CLIENT", "Settings", "Connection, interface, automation, protocols, mapper and Jev policy", null, ShowSettingsAsync),
+            new("CLIENT", "Settings", "General, appearance, transcript, input, connections, data and advanced", null, ShowSettingsAsync),
             new("CLIENT", "Connect / Disconnect", "Toggle the configured MUD connection", null, ToggleConnectionAsync),
             new("MUD", "Look", "Request the current room description", null, () => SubmitCommandAsync("look")),
             new("MUD", "Score", "Refresh character sheet and combat stats", null, () => SubmitCommandAsync("score")),
@@ -1690,9 +1722,10 @@ public sealed class MainWindow : Window
             return;
         }
 
-        string host = _runtime.Settings.Host;
-        int port = _runtime.Settings.Port;
-        bool tls = _runtime.Settings.UseTls;
+        ConnectionProfile profile = _runtime.ActiveConnectionProfile;
+        string host = profile.Host;
+        int port = profile.Port;
+        bool tls = profile.UseTls;
         try
         {
             await _runtime.Transport.ConnectAsync(
@@ -1766,7 +1799,7 @@ public sealed class MainWindow : Window
         });
         content.Children.Add(new TextBlock
         {
-            Text = "Version 0.29.0",
+            Text = "Version 0.30.0",
             Foreground = UiTheme.Faint,
             FontSize = UiTheme.TextSm
         });
@@ -1909,6 +1942,7 @@ public sealed class MainWindow : Window
                             }
                         });
                         break;
+                    case AutomationKeybindingInvoked _:
                     case AutomationRuleMatched _:
                     case AutomationVariableChanged _:
                     case AutomationWorkflowStateChanged _:
@@ -2170,7 +2204,7 @@ public sealed class MainWindow : Window
 
     private void StartLogging()
     {
-        string host = _snapshot.Session.Host ?? _runtime.Settings.Host;
+        string host = _snapshot.Session.Host ?? _runtime.ActiveConnectionProfile.Host;
         string path = _logWriter.Start(GetLogDirectory(), host, _runtime.Settings.LogFormat);
         Dispatcher.UIThread.Post(() =>
         {
@@ -2309,8 +2343,8 @@ public sealed class MainWindow : Window
             _jevHudLabel.Text ?? "-",
             memory,
             metadata,
-            _runtime.Settings.Host,
-            _runtime.Settings.Port);
+            _runtime.ActiveConnectionProfile.Host,
+            _runtime.ActiveConnectionProfile.Port);
         _gameplayHudPanel.Update(viewModel.Character);
         _characterHudPanel.Update(viewModel.Character);
         _roomContextPanel.Update(viewModel.Room);
@@ -2323,8 +2357,9 @@ public sealed class MainWindow : Window
         _snapshot = state;
         EnsureRoomMetadata(state.Room.Id);
         bool connected = state.Session.ConnectionStatus != ConnectionStatus.Disconnected;
-        string connectionHost = connected ? state.Session.Host ?? _runtime.Settings.Host : _runtime.Settings.Host;
-        int connectionPort = connected ? state.Session.Port ?? _runtime.Settings.Port : _runtime.Settings.Port;
+        ConnectionProfile activeProfile = _runtime.ActiveConnectionProfile;
+        string connectionHost = connected ? state.Session.Host ?? activeProfile.Host : activeProfile.Host;
+        int connectionPort = connected ? state.Session.Port ?? activeProfile.Port : activeProfile.Port;
         RenderConnectionAction(connected, connectionHost, connectionPort);
         CommandInputPresentation inputPresentation = CommandInputPolicy.For(state.Session.InputMode);
         CommandInputTransitionPresentation inputTransition = CommandInputPolicy.Transition(previousInputMode, state.Session.InputMode);
@@ -3134,6 +3169,229 @@ public sealed class MainWindow : Window
 
     private Control BuildJevPanel(StateSnapshot state)
     {
+        StackPanel root = new() { Spacing = 8 };
+        StackPanel tabs = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
+        foreach ((JevSection section, string label) in new[]
+                 {
+                     (JevSection.Status, "Status"),
+                     (JevSection.Authority, "Authority"),
+                     (JevSection.RecentDecisions, "Recent Decisions"),
+                     (JevSection.ProviderSettings, "Provider Settings")
+                 })
+        {
+            Button button = GhostButton(label);
+            button.FontWeight = _jevSection == section ? FontWeight.SemiBold : FontWeight.Normal;
+            button.Foreground = _jevSection == section ? Accent : TextForeground;
+            button.Click += (_, _) =>
+            {
+                _jevSection = section;
+                RefreshActiveWorkspace();
+            };
+            tabs.Children.Add(button);
+        }
+        root.Children.Add(tabs);
+        root.Children.Add(_jevSection switch
+        {
+            JevSection.Authority => BuildJevAuthorityPanel(state),
+            JevSection.RecentDecisions => BuildJevRecentDecisionsPanel(),
+            JevSection.ProviderSettings => BuildJevProviderSettingsPanel(),
+            _ => BuildJevStatusPanel(state)
+        });
+        return root;
+    }
+
+    private Control BuildJevAuthorityPanel(StateSnapshot state)
+    {
+        StackPanel root = ToolStack();
+        root.Children.Add(new TextBlock
+        {
+            Text = "Authority",
+            Foreground = TextForeground,
+            FontSize = NexTypography.SectionTitle,
+            FontWeight = FontWeight.SemiBold
+        });
+        root.Children.Add(new TextBlock
+        {
+            Text = "Choose a preset or set authority independently for each Jev domain.",
+            Foreground = Muted,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        ComboBox preset = new()
+        {
+            ItemsSource = Enum.GetValues<JevPreset>(),
+            SelectedItem = state.JevAuthority.Preset,
+            MinWidth = 180
+        };
+        root.Children.Add(KeyValueControl("Preset", preset));
+
+        Dictionary<JevDomain, ComboBox> domains = [];
+        foreach (JevDomain domain in Enum.GetValues<JevDomain>())
+        {
+            ComboBox authority = new()
+            {
+                ItemsSource = Enum.GetValues<JevAuthority>(),
+                SelectedItem = state.JevAuthority.Domains[domain],
+                MinWidth = 180
+            };
+            domains[domain] = authority;
+            root.Children.Add(KeyValueControl(domain.ToString(), authority));
+        }
+
+        preset.SelectionChanged += (_, _) =>
+        {
+            if (preset.SelectedItem is not JevPreset selected || selected == JevPreset.Custom) return;
+            JevAuthoritySnapshot snapshot = JevAuthorityService.CreatePreset(selected);
+            foreach ((JevDomain domain, ComboBox combo) in domains)
+                combo.SelectedItem = snapshot.Domains[domain];
+        };
+
+        TextBlock message = new() { Foreground = Muted, FontSize = NexTypography.Metadata };
+        Button save = AccentButton("Save Authority");
+        save.Click += async (_, _) =>
+        {
+            try
+            {
+                Dictionary<JevDomain, JevAuthority> values = domains.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.SelectedItem is JevAuthority authority ? authority : JevAuthority.Off);
+                JevPreset selectedPreset = preset.SelectedItem is JevPreset p ? p : JevPreset.Custom;
+                if (selectedPreset != JevPreset.Custom)
+                {
+                    JevAuthoritySnapshot template = JevAuthorityService.CreatePreset(selectedPreset);
+                    bool unchanged = values.All(pair => template.Domains[pair.Key] == pair.Value);
+                    if (!unchanged) selectedPreset = JevPreset.Custom;
+                }
+                await _runtime.ApplyAndSaveAuthorityAsync(
+                    JevAuthoritySnapshot.Create(selectedPreset, values),
+                    _cts.Token).ConfigureAwait(true);
+                message.Text = "Authority saved.";
+                message.Foreground = Success;
+                RefreshActiveWorkspace();
+            }
+            catch (Exception exception)
+            {
+                message.Text = exception.Message;
+                message.Foreground = Danger;
+            }
+        };
+        root.Children.Add(save);
+        root.Children.Add(message);
+        return ToolScroll(root);
+    }
+
+    private Control BuildJevRecentDecisionsPanel()
+    {
+        StackPanel root = ToolStack();
+        root.Children.Add(new TextBlock
+        {
+            Text = "Recent Decisions",
+            Foreground = TextForeground,
+            FontSize = NexTypography.SectionTitle,
+            FontWeight = FontWeight.SemiBold
+        });
+        if (_jevDecisionHistory.Count == 0)
+        {
+            root.Children.Add(new TextBlock
+            {
+                Text = "No Jev decisions have been observed this session.",
+                Foreground = Muted,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+        else
+        {
+            foreach (JevDecisionTrace decision in _jevDecisionHistory.Take(50))
+                root.Children.Add(BuildDecisionHistoryRow(decision));
+        }
+        return ToolScroll(root);
+    }
+
+    private Control BuildJevProviderSettingsPanel()
+    {
+        StackPanel root = ToolStack();
+        root.Children.Add(new TextBlock
+        {
+            Text = "Provider Settings",
+            Foreground = TextForeground,
+            FontSize = NexTypography.SectionTitle,
+            FontWeight = FontWeight.SemiBold
+        });
+        root.Children.Add(new TextBlock
+        {
+            Text = "Provider credentials and model selection are owned by Jev. Credentials are stored in the platform secret store.",
+            Foreground = Muted,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        TextBox model = new()
+        {
+            Text = _runtime.Settings.JevModel,
+            Background = ConsoleBackground,
+            Foreground = TextForeground,
+            BorderBrush = PanelBorderBrush,
+            MinHeight = 32
+        };
+        TextBox apiKey = new()
+        {
+            PasswordChar = '●',
+            PlaceholderText = "Leave blank to keep the stored API key",
+            Background = ConsoleBackground,
+            Foreground = TextForeground,
+            BorderBrush = PanelBorderBrush,
+            MinHeight = 32
+        };
+        root.Children.Add(KeyValueControl("Model", model));
+        root.Children.Add(KeyValueControl("TypeSafe API key", apiKey));
+        root.Children.Add(new TextBlock
+        {
+            Text = _runtime.DecisionEngine is null ? "Provider status: OFFLINE" : "Provider status: ONLINE",
+            Foreground = _runtime.DecisionEngine is null ? Muted : Success,
+            FontSize = NexTypography.Metadata
+        });
+        TextBlock message = new() { Foreground = Muted, FontSize = NexTypography.Metadata, TextWrapping = TextWrapping.Wrap };
+        Button save = AccentButton("Save Provider Settings");
+        save.Click += async (_, _) =>
+        {
+            try
+            {
+                string? key = string.IsNullOrWhiteSpace(apiKey.Text)
+                    ? await _runtime.GetStoredJevApiKeyAsync(_cts.Token).ConfigureAwait(true)
+                    : apiKey.Text;
+                await _runtime.SaveJevConfigurationAsync(key, model.Text ?? string.Empty, _cts.Token).ConfigureAwait(true);
+                apiKey.Text = string.Empty;
+                message.Text = "Provider settings saved.";
+                message.Foreground = Success;
+                RefreshActiveWorkspace();
+            }
+            catch (Exception exception)
+            {
+                message.Text = exception.Message;
+                message.Foreground = Danger;
+            }
+        };
+        root.Children.Add(save);
+        root.Children.Add(message);
+        return ToolScroll(root);
+    }
+
+    private static Control KeyValueControl(string label, Control value)
+    {
+        Grid row = new() { ColumnDefinitions = new ColumnDefinitions("150,*"), ColumnSpacing = 8 };
+        row.Children.Add(new TextBlock
+        {
+            Text = label,
+            Foreground = Muted,
+            VerticalAlignment = VerticalAlignment.Center,
+            FontSize = NexTypography.Metadata
+        });
+        Grid.SetColumn(value, 1);
+        row.Children.Add(value);
+        return row;
+    }
+
+    private Control BuildJevStatusPanel(StateSnapshot state)
+    {
         StackPanel stack = ToolStack();
 
         Grid heading = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
@@ -3297,9 +3555,13 @@ public sealed class MainWindow : Window
         navigation.Click += async (_, _) => await EvaluateNavigationAsync();
         actions.Children.Add(navigation);
 
-        Button configure = GhostButton("Settings…");
+        Button configure = GhostButton("Provider Settings");
         configure.FontSize = NexTypography.Metadata;
-        configure.Click += async (_, _) => await ShowSettingsAsync();
+        configure.Click += (_, _) =>
+        {
+            _jevSection = JevSection.ProviderSettings;
+            RefreshActiveWorkspace();
+        };
         actions.Children.Add(configure);
         stack.Children.Add(actions);
         return ToolScroll(stack);
@@ -3857,7 +4119,7 @@ public sealed class MainWindow : Window
     {
         if (_runtime.DecisionEngine is null)
         {
-            ShowClientMessage("Jev is not configured. Add a TypeSafe API key in Settings → Jev.", error: true);
+            ShowClientMessage("Jev is not configured. Add a TypeSafe API key in Jev → Provider Settings.", error: true);
             return;
         }
         if (_snapshot.Session.InputMode != SessionInputMode.Normal)
@@ -3966,6 +4228,12 @@ public sealed class MainWindow : Window
     private void ShowTool(ToolView requestedView)
     {
         ToolView view = NormalizeToolView(requestedView);
+        if (view == ToolView.Context)
+        {
+            _gameplayRailVisible = _activeTool == ToolView.Context
+                ? !_gameplayRailVisible
+                : true;
+        }
         if (_activeTool != view)
         {
             DeactivateWorkspace(_activeTool);
@@ -4053,6 +4321,15 @@ public sealed class MainWindow : Window
         switch (NormalizeToolView(view))
         {
             case ToolView.Context:
+                if (!_gameplayRailVisible)
+                {
+                    _workspaceSplitter.IsVisible = false;
+                    _workspaceSplitterColumn.Width = new GridLength(0);
+                    _worldColumn.Width = new GridLength(1, GridUnitType.Star);
+                    _workspaceColumn.MinWidth = 0;
+                    _workspaceColumn.Width = new GridLength(0);
+                    break;
+                }
                 _worldColumn.Width = new GridLength(1, GridUnitType.Star);
                 _workspaceColumn.MinWidth = 370;
                 _workspaceColumn.MaxWidth = 445;
@@ -4106,9 +4383,20 @@ public sealed class MainWindow : Window
     private void ApplyUiSettings()
     {
         _runtime.Interaction.Configure(_runtime.Settings);
-        double transcriptFontSize = NexTranscriptTypography.NormalizeFontSize(_runtime.Settings.TranscriptFontSize);
-        NexTranscriptTypography.Apply(_gameText, transcriptFontSize);
-        NexTranscriptTypography.Apply(_liveText, transcriptFontSize);
+        if (_activeTool == ToolView.Context)
+        {
+            _gameplayRailVisible = (_runtime.Settings.General ?? new GeneralPreferences()).ShowGameplayRailByDefault;
+        }
+        AppearancePreferences appearance = _runtime.Settings.Appearance ?? new AppearancePreferences();
+        if (Enum.TryParse(appearance.AccentPalette, true, out NexAccentTheme accent) && Application.Current is not null)
+        {
+            NexMudTheme.ApplyAccent(Application.Current, accent);
+        }
+        FontFamily = string.IsNullOrWhiteSpace(appearance.InterfaceFont)
+            ? NexMudTheme.Interface
+            : new FontFamily(appearance.InterfaceFont);
+        ConfigureTranscriptText(_gameText);
+        ConfigureTranscriptText(_liveText);
         RebuildTranscript();
         RenderLoggingState();
         if (_runtime.Settings.AutoLogSessions &&

@@ -93,7 +93,38 @@ public sealed class ClientSettingsStore
         string terminalType = string.IsNullOrWhiteSpace(settings.TerminalType)
             ? "xterm-256color"
             : settings.TerminalType.Trim();
-        double transcriptFontSize = Math.Clamp(settings.TranscriptFontSize, 8, 24);
+        ProtocolPreferences legacyProtocols = settings.Protocols ?? new ProtocolPreferences();
+        ConnectionProfile[] connectionProfiles = NormalizeConnectionProfiles(
+            settings.ConnectionProfiles,
+            host,
+            port,
+            settings.UseTls,
+            terminalType,
+            legacyProtocols);
+        string activeConnectionProfileId = connectionProfiles.Any(profile =>
+                string.Equals(profile.Id, settings.ActiveConnectionProfileId, StringComparison.Ordinal))
+            ? settings.ActiveConnectionProfileId!
+            : connectionProfiles[0].Id;
+        ConnectionProfile activeConnectionProfile = connectionProfiles.First(profile =>
+            string.Equals(profile.Id, activeConnectionProfileId, StringComparison.Ordinal));
+
+        AppearancePreferences appearance = settings.Appearance ?? new AppearancePreferences(TranscriptSize: settings.TranscriptFontSize);
+        appearance = appearance with
+        {
+            Theme = string.IsNullOrWhiteSpace(appearance.Theme) ? "Dark" : appearance.Theme.Trim(),
+            AccentPalette = string.IsNullOrWhiteSpace(appearance.AccentPalette) ? "EmberBrass" : appearance.AccentPalette.Trim(),
+            UiScale = Math.Clamp(appearance.UiScale, 0.8, 1.5),
+            InterfaceFont = string.IsNullOrWhiteSpace(appearance.InterfaceFont)
+                ? "Inter, SF Pro Text, Helvetica Neue, sans-serif"
+                : appearance.InterfaceFont.Trim(),
+            TranscriptFont = string.IsNullOrWhiteSpace(appearance.TranscriptFont)
+                ? "Menlo, SFMono-Regular, Consolas, monospace"
+                : appearance.TranscriptFont.Trim(),
+            TranscriptSize = Math.Clamp(appearance.TranscriptSize, 8, 24),
+            TranscriptLineSpacing = Math.Clamp(appearance.TranscriptLineSpacing, 1.0, 1.5)
+        };
+        double transcriptFontSize = appearance.TranscriptSize;
+        GeneralPreferences general = settings.General ?? new GeneralPreferences(ShowGameplayRailByDefault: settings.ShowContextDock);
         string jevModel = string.IsNullOrWhiteSpace(settings.JevModel) ? "jev-latest" : settings.JevModel.Trim();
         TranscriptHighlightRule[] highlights = (settings.HighlightRules ?? Array.Empty<TranscriptHighlightRule>())
             .Where(rule => !string.IsNullOrWhiteSpace(rule.Pattern) && IsHexColor(rule.Foreground))
@@ -195,7 +226,6 @@ public sealed class ClientSettingsStore
                 .Take(100)
                 .ToArray()
         };
-        ProtocolPreferences protocols = settings.Protocols ?? new ProtocolPreferences();
         string commandSeparator = settings.CommandSeparator ?? ";";
         if (commandSeparator.Length > 1 || commandSeparator.Any(char.IsWhiteSpace))
         {
@@ -254,9 +284,10 @@ public sealed class ClientSettingsStore
         return settings with
         {
             JevDomains = domains,
-            Host = host,
-            Port = port,
-            TerminalType = terminalType,
+            Host = activeConnectionProfile.Host,
+            Port = activeConnectionProfile.Port,
+            UseTls = activeConnectionProfile.UseTls,
+            TerminalType = activeConnectionProfile.TerminalType,
             TranscriptFontSize = transcriptFontSize,
             JevModel = jevModel,
             HighlightRules = highlights,
@@ -268,15 +299,91 @@ public sealed class ClientSettingsStore
             KeyBindings = keyBindings,
             Workspace = workspace,
             Automation = automation,
-            Protocols = protocols,
+            Protocols = ToLegacyProtocols(activeConnectionProfile.EffectiveProtocols),
             Mapper = mapper,
             CommandSeparator = commandSeparator,
             Input = input,
             Output = output,
-            OutputRules = outputRules
+            OutputRules = outputRules,
+            ConnectionProfiles = connectionProfiles,
+            ActiveConnectionProfileId = activeConnectionProfileId,
+            General = general,
+            Appearance = appearance
         };
     }
 
+
+    private static ConnectionProfile[] NormalizeConnectionProfiles(
+        IReadOnlyList<ConnectionProfile>? profiles,
+        string legacyHost,
+        int legacyPort,
+        bool legacyTls,
+        string legacyTerminalType,
+        ProtocolPreferences legacyProtocols)
+    {
+        IReadOnlyList<ConnectionProfile> source = profiles is { Count: > 0 }
+            ? profiles
+            : [new ConnectionProfile(
+                ConnectionProfile.Default.Id,
+                ConnectionProfile.Default.Name,
+                legacyHost,
+                legacyPort,
+                legacyTls,
+                legacyTerminalType,
+                FromLegacyProtocols(legacyProtocols))];
+
+        List<ConnectionProfile> normalized = [];
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        int ordinal = 1;
+        foreach (ConnectionProfile profile in source.Take(50))
+        {
+            string id = string.IsNullOrWhiteSpace(profile.Id) ? $"profile-{ordinal}" : profile.Id.Trim();
+            string candidate = id;
+            int suffix = 2;
+            while (!ids.Add(candidate)) candidate = $"{id}-{suffix++}";
+
+            string name = string.IsNullOrWhiteSpace(profile.Name) ? $"Connection {ordinal}" : profile.Name.Trim();
+            string host = string.IsNullOrWhiteSpace(profile.Host) ? legacyHost : profile.Host.Trim();
+            int port = profile.Port is >= 1 and <= 65535 ? profile.Port : legacyPort;
+            string terminalType = string.IsNullOrWhiteSpace(profile.TerminalType)
+                ? "xterm-256color"
+                : profile.TerminalType.Trim();
+            normalized.Add(profile with
+            {
+                Id = candidate,
+                Name = name,
+                Host = host,
+                Port = port,
+                TerminalType = terminalType,
+                Protocols = profile.Protocols ?? new ConnectionProtocolPreferences()
+            });
+            ordinal++;
+        }
+
+        return normalized.Count > 0 ? normalized.ToArray() : [ConnectionProfile.Default];
+    }
+
+    private static ConnectionProtocolPreferences FromLegacyProtocols(ProtocolPreferences legacy) => new(
+        Naws: ConnectionProtocolPreferences.FromLegacy(legacy.Naws),
+        Gmcp: ConnectionProtocolPreferences.FromLegacy(legacy.Gmcp),
+        Msdp: ConnectionProtocolPreferences.FromLegacy(legacy.Msdp),
+        Mssp: ConnectionProtocolPreferences.FromLegacy(legacy.Mssp),
+        Mccp2: ConnectionProtocolPreferences.FromLegacy(legacy.Mccp2),
+        Charset: ConnectionProtocolPreferences.FromLegacy(legacy.Charset),
+        NewEnvironment: ConnectionProtocolPreferences.FromLegacy(legacy.NewEnvironment),
+        Mtts: ConnectionProtocolPreferences.FromLegacy(legacy.Mtts),
+        Eor: ConnectionProtocolPreferences.FromLegacy(legacy.Eor));
+
+    private static ProtocolPreferences ToLegacyProtocols(ConnectionProtocolPreferences protocols) => new(
+        Naws: protocols.Naws != ProtocolPolicy.Disabled,
+        Gmcp: protocols.Gmcp != ProtocolPolicy.Disabled,
+        Msdp: protocols.Msdp != ProtocolPolicy.Disabled,
+        Mssp: protocols.Mssp != ProtocolPolicy.Disabled,
+        Mccp2: protocols.Mccp2 != ProtocolPolicy.Disabled,
+        Charset: protocols.Charset != ProtocolPolicy.Disabled,
+        NewEnvironment: protocols.NewEnvironment != ProtocolPolicy.Disabled,
+        Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
+        Eor: protocols.Eor != ProtocolPolicy.Disabled);
 
     private static string? NormalizeOptionalColor(string? value)
     {

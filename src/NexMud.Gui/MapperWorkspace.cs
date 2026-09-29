@@ -396,7 +396,6 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
 {
     private readonly NexMudRuntime _runtime;
     private readonly MapperReadRepository _repository;
-    private readonly Func<Task> _openSettings;
     private readonly Func<string, Task> _editRoom;
     private readonly Func<string, Task> _addExit;
     private readonly CancellationToken _applicationToken;
@@ -434,7 +433,6 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
 
     public MapperWorkspace(
         NexMudRuntime runtime,
-        Func<Task> openSettings,
         Func<string, Task> editRoom,
         Func<string, Task> addExit,
         CancellationToken applicationToken)
@@ -443,7 +441,6 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         FontFamily = UiTheme.Sans;
         FontSize = NexTypography.Body;
         _repository = new MapperReadRepository(runtime.Knowledge.DatabasePath);
-        _openSettings = openSettings;
         _editRoom = editRoom;
         _addExit = addExit;
         _applicationToken = applicationToken;
@@ -717,8 +714,8 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         _stop.Content = "Stop";
         _stop.Click += async (_, _) => await _runtime.Navigator.StopAsync(cancellationToken: _applicationToken).ConfigureAwait(true);
         controls.Children.Add(_stop);
-        Button settings = new() { Content = "Settings", Padding = new Thickness(7, 2) };
-        settings.Click += async (_, _) => await _openSettings().ConfigureAwait(true);
+        Button settings = new() { Content = "Preferences", Padding = new Thickness(7, 2) };
+        settings.Click += async (_, _) => await ShowPreferencesAsync().ConfigureAwait(true);
         controls.Children.Add(settings);
         Grid.SetColumn(controls, 1);
         footerGrid.Children.Add(controls);
@@ -728,13 +725,39 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         return root;
     }
 
+    private async Task ShowPreferencesAsync()
+    {
+        Window? owner = TopLevel.GetTopLevel(this) as Window;
+        if (owner is null) return;
+
+        Window dialog = new()
+        {
+            Title = "Map Preferences",
+            Width = 620,
+            Height = 760,
+            MinWidth = 520,
+            MinHeight = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = UiTheme.Window
+        };
+        MapperPreferencesEditor editor = new(_runtime, () =>
+        {
+            dialog.Close();
+            return Task.CompletedTask;
+        });
+        dialog.Content = editor;
+        await dialog.ShowDialog(owner).ConfigureAwait(true);
+        UpdateNavigation(_runtime.Navigator.Current);
+        QueueGraphLoad(force: true);
+    }
+
     private void QueueGraphLoad(bool force)
     {
         MapperPreferences mapperSettings = _runtime.Settings.Mapper ?? new MapperPreferences();
         if (!mapperSettings.Enabled)
         {
             _graphStatus.Text = "Mapper disabled";
-            SetMessage("Enable the mapper in Settings to record and browse world topology.");
+            SetMessage("Enable the mapper in Map → Preferences to record and browse world topology.");
             return;
         }
         if (!_active || string.IsNullOrWhiteSpace(_state.Room.Id)) return;

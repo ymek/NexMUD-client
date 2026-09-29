@@ -5,6 +5,7 @@ using Avalonia.Styling;
 using Avalonia.Themes.Fluent;
 using Avalonia.Threading;
 using NexMud.Client.Runtime;
+using NexMud.Client.Settings;
 using NexMud.Contracts.Transport;
 
 namespace NexMud.Gui;
@@ -83,11 +84,14 @@ public sealed class App : Application
             _desktop = null;
         };
 
-        if (options.AutoConnect)
+        GeneralPreferences general = _runtime.Settings.General ?? new GeneralPreferences();
+        bool autoConnect = options.AutoConnect ?? general.ReconnectLastConnectionProfile;
+        if (autoConnect)
         {
-            string? host = options.Host ?? _runtime.Settings.Host;
-            int port = options.Port ?? _runtime.Settings.Port;
-            bool tls = options.Host is null ? _runtime.Settings.UseTls : options.UseTls;
+            ConnectionProfile profile = _runtime.ActiveConnectionProfile;
+            string host = options.Host ?? profile.Host;
+            int port = options.Port ?? profile.Port;
+            bool tls = options.Host is null ? profile.UseTls : options.UseTls;
             if (!string.IsNullOrWhiteSpace(host) && port is >= 1 and <= 65535)
             {
                 _ = ConnectAsync(_runtime, host, port, tls);

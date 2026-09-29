@@ -229,6 +229,7 @@ public enum AutomationWorkflowStatus
     Failed
 }
 
+public sealed record AutomationKeybindingInvoked(string Gesture, string Context, string Action, string? Value = null) : IMudEvent;
 public sealed record AutomationRuleMatched(string RuleName, string RuleKind, string? Command = null) : IMudEvent;
 public sealed record AutomationVariableChanged(string Name, string? Value) : IMudEvent;
 public sealed record AutomationWorkflowStateChanged(
