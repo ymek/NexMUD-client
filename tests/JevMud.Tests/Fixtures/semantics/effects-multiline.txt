@@ -1,0 +1,6 @@
+# Source: Xiganath 06.27.2015.txt
+You are affected by the following:
+Spell: sanctuary      : modifies something for 0 hours
+Spell: stone skin     : modifies resistance to weapon by 20 for 17 hours
+                       : modifies armor class by -40 for 17 hours
+Skill: detect hidden  : modifies something permanently

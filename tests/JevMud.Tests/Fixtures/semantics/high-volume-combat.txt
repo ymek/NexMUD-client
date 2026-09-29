@@ -1,0 +1,7 @@
+# Source: Mines 3_31_15.txt
+A yreg's average raking claw injures you.
+You barely manage to parry a yreg's attack.
+Aistyla's === FEARSOME === holy divine power savages a yreg!
+Aistyla's === FEROCIOUS === holy divine power maims a yreg!
+A yreg dodges your attack.
+A yreg is in awful condition. [0%-15%]

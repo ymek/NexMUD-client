@@ -627,6 +627,7 @@ public sealed class MainWindow : Runnable
     private static bool ShouldDisplayEvent(IMudEvent mudEvent) =>
         mudEvent is not TextReceived and
         not GameTextReceived and
+        not GameObservationReceived and
         not GmcpMessageReceived and
         not CharacterPromptObserved;
 

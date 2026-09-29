@@ -1,4 +1,15 @@
-# NexMUD 0.27.1
+# NexMUD 0.28.0
+
+## Gameplay semantics, observation, and reconciliation architecture
+
+- `AvendarObservationFactory` creates immutable, monotonically ordered evidence records before semantic and display branches.
+- Avendar owns structured prompt/group/effect/scan/entity/movement parsing; reducers reconcile those facts into canonical state while retaining source sequence and ambiguity.
+- `OutboundCommandJournal` records conservative command lifecycle states without prompt acknowledgements. Server `clear` is never remapped to a local clear action.
+- Mapper, scripting/Automation, Codex persistence, HUD state, and replay now have typed semantic seams. Jev remains behaviorally unchanged.
+- Expert-log fixtures from Mines, Xiganath, Void Drake, and Xiganath 06.27 exercise the normalized semantic contracts.
+- Architecture contract: `docs/architecture/NexMUD-gameplay-semantics-event-normalization-state-reconciliation-architecture.md`.
+- SemVer release: 0.28.0. macOS build: 28000.
+
 
 ## Terminal typography and transcript density correction
 

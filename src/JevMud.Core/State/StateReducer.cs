@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Threading.Channels;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 
 namespace JevMud.Core.State;
@@ -142,6 +143,9 @@ public sealed class StateReducer
             TransportError error => ReduceTransportError(current, error),
             CharacterVitalsChanged vitals => ReduceVitals(current, vitals),
             CharacterPositionObserved position => ReducePosition(current, position),
+            CharacterPromptSnapshotObserved prompt => ReducePromptSnapshot(current, prompt.Snapshot),
+            GroupSnapshotObserved group => ReduceGroupSnapshot(current, group.Snapshot),
+            ActiveEffectsSnapshotObserved effects => ReduceActiveEffectsSnapshot(current, effects.Snapshot),
             CharacterPromptObserved prompt => ReducePrompt(current, prompt),
             CharacterScoreObserved score => ReduceScore(current, score),
             SkillsSnapshotObserved skills => ReduceSkills(current, skills, envelope.Timestamp),
@@ -153,10 +157,13 @@ public sealed class StateReducer
             InventorySnapshotObserved inventory => ReduceInventorySnapshot(current, inventory),
             ItemIdentified item => ReduceItemIdentification(current, item.Item),
             CharacterConditionChanged condition => ReduceCharacterCondition(current, condition),
+            CharacterStatusObserved status => ReduceCharacterStatus(current, status),
             RoomChanged room => ReduceRoom(current, room),
             RoomObservationObserved room => ReduceRoomObservation(current, room, envelope.Timestamp),
             RoomContentsObserved contents => ReduceLegacyRoomContents(current, contents),
             RoomOccupantDeparted departed => ReduceRoomOccupantDeparted(current, departed),
+            MovementObserved movement => ReduceMovement(current, movement.Movement),
+            ScanUpdated scan => ReduceScan(current, scan.Scan),
             NavigationAttempted navigation => ReduceNavigationAttempted(current, navigation),
             NavigationResponseCompleted response => ReduceNavigationResponseCompleted(current, response),
             NavigationFailed failed => ReduceNavigationFailed(current, failed),
@@ -255,6 +262,97 @@ public sealed class StateReducer
         };
     }
 
+    private static StateSnapshot ReducePromptSnapshot(StateSnapshot current, CharacterPromptSnapshot observed)
+    {
+        CharacterPromptSnapshot merged = MergePromptSnapshot(current.Character.PromptSnapshot, observed);
+        CharacterState character = current.Character with
+        {
+            HitPoints = MergeResource(current.Character.HitPoints, observed.Health),
+            Mana = MergeResource(current.Character.Mana, observed.Mana),
+            Movement = MergeResource(current.Character.Movement, observed.Movement),
+            Experience = observed.Experience ?? current.Character.Experience,
+            ExperienceToLevel = observed.ExperienceToLevel ?? current.Character.ExperienceToLevel,
+            Exploration = observed.ExplorationPoints is null
+                ? current.Character.Exploration
+                : checked((int)observed.ExplorationPoints.Value),
+            Position = observed.Position ?? current.Character.Position,
+            PromptSnapshot = merged,
+            LastObservedSequence = Math.Max(current.Character.LastObservedSequence, observed.SourceSequence)
+        };
+
+        RoomState room = current.Room;
+        if (!string.IsNullOrWhiteSpace(observed.RoomName) ||
+            !string.IsNullOrWhiteSpace(observed.Terrain) ||
+            !string.IsNullOrWhiteSpace(observed.Light))
+        {
+            room = current.Room with
+            {
+                Name = observed.RoomName ?? current.Room.Name,
+                Terrain = observed.Terrain ?? current.Room.Terrain,
+                Light = observed.Light ?? current.Room.Light,
+                LastObservedSequence = Math.Max(current.Room.LastObservedSequence, observed.SourceSequence)
+            };
+        }
+
+        if (CharacterEquivalent(current.Character, character) && RoomEquivalent(current.Room, room))
+        {
+            return current;
+        }
+
+        return current with { Character = character, Room = room };
+    }
+
+    private static CharacterPromptSnapshot MergePromptSnapshot(
+        CharacterPromptSnapshot? current,
+        CharacterPromptSnapshot observed) =>
+        new(
+            observed.Health ?? current?.Health,
+            observed.Mana ?? current?.Mana,
+            observed.Movement ?? current?.Movement,
+            observed.Experience ?? current?.Experience,
+            observed.ExperienceToLevel ?? current?.ExperienceToLevel,
+            observed.ExplorationPoints ?? current?.ExplorationPoints,
+            observed.GameClock ?? current?.GameClock,
+            observed.Position ?? current?.Position,
+            observed.RoomName ?? current?.RoomName,
+            observed.Terrain ?? current?.Terrain,
+            observed.Light ?? current?.Light,
+            observed.EffectiveUnknownFields.Count > 0
+                ? observed.EffectiveUnknownFields
+                : current?.EffectiveUnknownFields,
+            Math.Max(current?.SourceSequence ?? 0, observed.SourceSequence));
+
+    private static VitalState MergeResource(VitalState current, ResourceValue? observed) =>
+        observed is null ? current : new VitalState(observed.Current, observed.Maximum);
+
+    private static StateSnapshot ReduceGroupSnapshot(StateSnapshot current, GroupSnapshot observed)
+    {
+        CharacterState character = current.Character with
+        {
+            Group = observed,
+            LastObservedSequence = Math.Max(current.Character.LastObservedSequence, observed.SourceSequence)
+        };
+        return GroupSnapshotsEqual(current.Character.Group, observed)
+            ? current
+            : current with { Character = character };
+    }
+
+    private static StateSnapshot ReduceActiveEffectsSnapshot(StateSnapshot current, ActiveEffectsSnapshot observed)
+    {
+        IReadOnlyList<string> names = new ReadOnlyCollection<string>(
+            observed.Effects.Select(effect => effect.Name)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray());
+        CharacterState character = current.Character with
+        {
+            ActiveEffects = observed.Effects,
+            Effects = names,
+            LastObservedSequence = Math.Max(current.Character.LastObservedSequence, observed.SourceSequence)
+        };
+        return current with { Character = character };
+    }
+
     private static StateSnapshot ReducePrompt(StateSnapshot current, CharacterPromptObserved prompt)
     {
         CharacterState character = current.Character with
@@ -264,7 +362,8 @@ public sealed class StateReducer
             Movement = new VitalState(prompt.Movement, prompt.MaxMovement),
             Experience = prompt.Experience,
             ExperienceToLevel = prompt.ExperienceToLevel,
-            Position = prompt.Position
+            Position = prompt.Position,
+            LastObservedSequence = Math.Max(current.Character.LastObservedSequence, prompt.SourceSequence)
         };
 
         bool namedRoomChanged = !string.Equals(prompt.RoomName, current.Room.Name, StringComparison.Ordinal);
@@ -284,7 +383,8 @@ public sealed class StateReducer
                 ? ObservationCompleteness.Unknown
                 : current.Room.ContentsCompleteness,
             Contents = invalidateContents ? EmptyRoomContents() : current.Room.Contents,
-            RecentObservations = invalidateContents ? Array.Empty<string>() : current.Room.RecentObservations
+            RecentObservations = invalidateContents ? Array.Empty<string>() : current.Room.RecentObservations,
+            LastObservedSequence = Math.Max(current.Room.LastObservedSequence, prompt.SourceSequence)
         };
 
         if (CharacterEquivalent(character, current.Character) && RoomEquivalent(room, current.Room))
@@ -635,7 +735,9 @@ public sealed class StateReducer
             observed.ContentsCompleteness,
             Copy(observed.Contents))
         {
-            RecentObservations = Copy(observed.RecentObservations)
+            RecentObservations = Copy(observed.RecentObservations),
+            VisibilityQuality = observed.VisibilityQuality,
+            LastObservedSequence = Math.Max(current.Room.LastObservedSequence, observed.SourceSequence)
         };
 
         WorldMapState world = UpdateWorldMap(current, observed, resolvedRoomId, observedAt);
@@ -777,6 +879,55 @@ public sealed class StateReducer
 
         return current with { Room = current.Room with { Contents = contents, ContentsCompleteness = ObservationCompleteness.Partial } };
     }
+
+    private static StateSnapshot ReduceMovement(StateSnapshot current, MovementObservation movement)
+    {
+        WorldMapState world = current.World;
+        RoomState room = current.Room;
+
+        if (movement.Result is MovementResult.Blocked or MovementResult.CombatRestricted)
+        {
+            IReadOnlyList<string> remaining = RemovePendingDirection(world.PendingDirections, movement.Direction);
+            if (!SequenceEqual(world.PendingDirections, remaining))
+            {
+                world = world with { PendingDirections = remaining };
+            }
+        }
+        else if (movement.Result == MovementResult.SucceededUnknownRoom)
+        {
+            IReadOnlyList<string> remaining = RemovePendingDirection(world.PendingDirections, movement.Direction);
+            if (!SequenceEqual(world.PendingDirections, remaining))
+            {
+                world = world with { PendingDirections = remaining };
+            }
+
+            if (movement.Detail?.Contains("pitch black", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                room = room with
+                {
+                    Id = null,
+                    Name = null,
+                    DescriptionFingerprint = null,
+                    Description = null,
+                    VisibilityQuality = RoomVisibilityQuality.Opaque,
+                    ContentsCompleteness = ObservationCompleteness.Unknown,
+                    Contents = EmptyRoomContents(),
+                    RecentObservations = Array.Empty<string>(),
+                    LastObservedSequence = Math.Max(room.LastObservedSequence, movement.SourceSequence)
+                };
+            }
+        }
+
+        if (ReferenceEquals(world, current.World) && ReferenceEquals(room, current.Room) && current.LastMovement == movement)
+        {
+            return current;
+        }
+
+        return current with { World = world, Room = room, LastMovement = movement };
+    }
+
+    private static StateSnapshot ReduceScan(StateSnapshot current, ScanObservation scan) =>
+        ScanObservationsEqual(current.LastScan, scan) ? current : current with { LastScan = scan };
 
     private static StateSnapshot ReduceNavigationAttempted(StateSnapshot current, NavigationAttempted navigation)
     {
@@ -940,7 +1091,9 @@ public sealed class StateReducer
         {
             Active = true,
             TargetName = condition.TargetName,
-            TargetCondition = condition.Condition
+            TargetCondition = condition.Condition,
+            TargetConditionRange = condition.Range,
+            LastObservedSequence = Math.Max(current.Combat.LastObservedSequence, condition.SourceSequence)
         };
 
         return next == current.Combat ? current : current with { Combat = next };
@@ -965,7 +1118,8 @@ public sealed class StateReducer
                 Active = false,
                 TargetId = null,
                 TargetName = null,
-                TargetCondition = null
+                TargetCondition = null,
+                TargetConditionRange = null
             };
         }
 
@@ -1004,6 +1158,25 @@ public sealed class StateReducer
         }
 
         return current with { Character = current.Character with { Effects = effects } };
+    }
+
+    private static StateSnapshot ReduceCharacterStatus(StateSnapshot current, CharacterStatusObserved status)
+    {
+        IReadOnlyList<string> conditions = ApplyNamedState(current.Character.Conditions, status.Status, status.Active);
+        if (SequenceEqual(current.Character.Conditions, conditions) &&
+            current.Character.LastObservedSequence >= status.SourceSequence)
+        {
+            return current;
+        }
+
+        return current with
+        {
+            Character = current.Character with
+            {
+                Conditions = conditions,
+                LastObservedSequence = Math.Max(current.Character.LastObservedSequence, status.SourceSequence)
+            }
+        };
     }
 
     private static StateSnapshot ReduceExperienceGained(StateSnapshot current, ExperienceGained gained)
@@ -1198,6 +1371,10 @@ public sealed class StateReducer
         left.SpellsCompleteness == right.SpellsCompleteness &&
         left.SkillsObservedAt == right.SkillsObservedAt &&
         left.SpellsObservedAt == right.SpellsObservedAt &&
+        PromptSnapshotsEqual(left.PromptSnapshot, right.PromptSnapshot) &&
+        GroupSnapshotsEqual(left.Group, right.Group) &&
+        ActiveEffectsEqual(left.ActiveEffects, right.ActiveEffects) &&
+        left.LastObservedSequence == right.LastObservedSequence &&
         EquipmentEqual(left.Equipment, right.Equipment);
 
     private static bool EquipmentEqual(EquipmentState left, EquipmentState right) =>
@@ -1227,6 +1404,94 @@ public sealed class StateReducer
         return true;
     }
 
+    private static bool PromptSnapshotsEqual(
+        CharacterPromptSnapshot? left,
+        CharacterPromptSnapshot? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null) return false;
+        return left.Health == right.Health &&
+               left.Mana == right.Mana &&
+               left.Movement == right.Movement &&
+               left.Experience == right.Experience &&
+               left.ExperienceToLevel == right.ExperienceToLevel &&
+               left.ExplorationPoints == right.ExplorationPoints &&
+               left.GameClock == right.GameClock &&
+               left.Position == right.Position &&
+               left.RoomName == right.RoomName &&
+               left.Terrain == right.Terrain &&
+               left.Light == right.Light &&
+               left.SourceSequence == right.SourceSequence &&
+               SequenceEqual(left.EffectiveUnknownFields, right.EffectiveUnknownFields);
+    }
+
+    private static bool GroupSnapshotsEqual(GroupSnapshot? left, GroupSnapshot? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null ||
+            left.SourceSequence != right.SourceSequence ||
+            !string.Equals(left.LeaderName, right.LeaderName, StringComparison.Ordinal) ||
+            left.Members.Count != right.Members.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Members.Count; index++)
+        {
+            if (left.Members[index] != right.Members[index]) return false;
+        }
+        return true;
+    }
+
+    private static bool ActiveEffectsEqual(
+        IReadOnlyList<ActiveEffect> left,
+        IReadOnlyList<ActiveEffect> right)
+    {
+        if (left.Count != right.Count) return false;
+        for (int index = 0; index < left.Count; index++)
+        {
+            ActiveEffect l = left[index];
+            ActiveEffect r = right[index];
+            if (l.Name != r.Name || l.Kind != r.Kind || l.Duration != r.Duration ||
+                l.SourceSequence != r.SourceSequence || l.Modifiers.Count != r.Modifiers.Count)
+            {
+                return false;
+            }
+            for (int modifierIndex = 0; modifierIndex < l.Modifiers.Count; modifierIndex++)
+            {
+                if (l.Modifiers[modifierIndex] != r.Modifiers[modifierIndex]) return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool ScanObservationsEqual(ScanObservation? left, ScanObservation? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null || left.Direction != right.Direction ||
+            left.SourceSequence != right.SourceSequence || left.Tiers.Count != right.Tiers.Count)
+        {
+            return false;
+        }
+        for (int tierIndex = 0; tierIndex < left.Tiers.Count; tierIndex++)
+        {
+            ScanTierObservation l = left.Tiers[tierIndex];
+            ScanTierObservation r = right.Tiers[tierIndex];
+            if (l.Distance != r.Distance || l.Visibility != r.Visibility ||
+                l.Entities.Count != r.Entities.Count) return false;
+            for (int entityIndex = 0; entityIndex < l.Entities.Count; entityIndex++)
+            {
+                EntityObservation le = l.Entities[entityIndex];
+                EntityObservation re = r.Entities[entityIndex];
+                if (le.Kind != re.Kind || le.DisplayText != re.DisplayText ||
+                    le.CanonicalCandidateName != re.CanonicalCandidateName || le.Count != re.Count ||
+                    !SequenceEqual(le.Qualifiers, re.Qualifiers) ||
+                    !SequenceEqual(le.StateFlags, re.StateFlags)) return false;
+            }
+        }
+        return true;
+    }
+
     private static bool RoomEquivalent(RoomState left, RoomState right) =>
         string.Equals(left.Id, right.Id, StringComparison.Ordinal) &&
         string.Equals(left.Name, right.Name, StringComparison.Ordinal) &&
@@ -1237,7 +1502,9 @@ public sealed class StateReducer
         string.Equals(left.Light, right.Light, StringComparison.Ordinal) &&
         left.ContentsCompleteness == right.ContentsCompleteness &&
         RoomContentsEqual(left.Contents, right.Contents) &&
-        SequenceEqual(left.RecentObservations, right.RecentObservations);
+        SequenceEqual(left.RecentObservations, right.RecentObservations) &&
+        left.VisibilityQuality == right.VisibilityQuality &&
+        left.LastObservedSequence == right.LastObservedSequence;
 
     private static bool WorldEquivalent(WorldMapState left, WorldMapState right) =>
         SequenceEqual(left.PendingDirections, right.PendingDirections) &&
@@ -1304,7 +1571,12 @@ public sealed class StateReducer
         }
         for (int index = 0; index < left.Count; index++)
         {
-            if (left[index] != right[index])
+            RoomExitObservation l = left[index];
+            RoomExitObservation r = right[index];
+            if (l.Direction != r.Direction || l.Exists != r.Exists ||
+                l.DoorState != r.DoorState || l.Traversability != r.Traversability ||
+                l.BlockReason != r.BlockReason || l.RawToken != r.RawToken ||
+                !SequenceEqual(l.Qualifiers, r.Qualifiers))
             {
                 return false;
             }
@@ -1329,6 +1601,13 @@ public sealed class StateReducer
         if (index < 0)
         {
             return contents;
+        }
+
+        if (contents[index].Count > 1)
+        {
+            RoomContentObservation[] decremented = contents.ToArray();
+            decremented[index] = decremented[index] with { Count = decremented[index].Count - 1 };
+            return new ReadOnlyCollection<RoomContentObservation>(decremented);
         }
 
         RoomContentObservation[] updated = new RoomContentObservation[contents.Count - 1];
@@ -1371,6 +1650,13 @@ public sealed class StateReducer
         if (index < 0)
         {
             return contents;
+        }
+
+        if (contents[index].Count > 1)
+        {
+            RoomContentObservation[] decremented = contents.ToArray();
+            decremented[index] = decremented[index] with { Count = decremented[index].Count - 1 };
+            return new ReadOnlyCollection<RoomContentObservation>(decremented);
         }
 
         RoomContentObservation[] updated = new RoomContentObservation[contents.Count - 1];
@@ -1432,8 +1718,11 @@ public sealed class StateReducer
                 l.CanonicalName != r.CanonicalName ||
                 l.Kind != r.Kind ||
                 l.Traits != r.Traits ||
+                l.Count != r.Count ||
+                l.OccurrenceId != r.OccurrenceId ||
                 !NullableSequenceEqual(l.TargetKeywords, r.TargetKeywords) ||
-                !NullableSequenceEqual(l.Decorators, r.Decorators))
+                !NullableSequenceEqual(l.Decorators, r.Decorators) ||
+                !SequenceEqual(l.StateFlags, r.StateFlags))
             {
                 return false;
             }

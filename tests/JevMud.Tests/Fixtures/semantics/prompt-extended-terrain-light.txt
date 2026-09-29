@@ -1,0 +1,3 @@
+# Source: Xiganath.txt
+<1043(1043)hp 580(580)m 448(448)mv 8794ep |inside|light|
+5:30>

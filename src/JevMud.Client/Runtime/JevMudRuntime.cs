@@ -47,6 +47,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
         SecretStore = secretStore ?? SecretStoreFactory.CreateDefault();
         Events = new EventPipeline();
         State = new StateReducer(Events.StateEvents);
+        CommandJournal = new OutboundCommandJournal(Events.SubscribeLossless());
         Transport = new TcpMudTransport(Events);
         Authority = new JevAuthorityService(Events);
         Actions = new ActionProcessor(Transport, State, Authority, Events);
@@ -145,6 +146,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
 
     public EventPipeline Events { get; }
     public StateReducer State { get; }
+    public OutboundCommandJournal CommandJournal { get; }
     public TcpMudTransport Transport { get; }
     public JevAuthorityService Authority { get; }
     public ActionProcessor Actions { get; }
@@ -181,6 +183,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
         }
 
         _workers.Add(Task.Run(() => RunWorkerAsync("State reducer", State.RunAsync), CancellationToken.None));
+        _workers.Add(Task.Run(() => RunWorkerAsync("Command journal", CommandJournal.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Action processor", Actions.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Avendar adapter", Avendar.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Settings persistence", PersistSettingsAsync), CancellationToken.None));
@@ -333,7 +336,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts,
                 Eor: protocols.Eor),
             ClientName: "NexMUD",
-            ClientVersion: "0.27.1");
+            ClientVersion: "0.28.0");
     }
 
     public async Task SaveSubsystemSettingsAsync(

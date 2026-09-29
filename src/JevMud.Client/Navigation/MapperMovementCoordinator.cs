@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using JevMud.Client.Settings;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 using JevMud.Core.Events;
 using JevMud.Core.State;
@@ -64,6 +65,9 @@ public sealed class MapperMovementCoordinator
                         break;
                     case NavigationFailed failure:
                         CompleteFailure(failure);
+                        break;
+                    case MovementObserved movement:
+                        CompleteMovement(movement.Movement);
                         break;
                     case ActionRejected rejected:
                         CompleteRejected(rejected);
@@ -244,6 +248,63 @@ public sealed class MapperMovementCoordinator
             ? new ScriptMovementResult("moved", pending.FromRoomId, roomId, pending.Request.ExpectedRoomId, roomId)
             : new ScriptMovementResult("unexpected", pending.FromRoomId, roomId, pending.Request.ExpectedRoomId, roomId);
         pending.Completion.TrySetResult(result);
+    }
+
+    private void CompleteMovement(MovementObservation movement)
+    {
+        PendingMove? pending;
+        lock (_pendingGate) pending = _pending;
+        if (pending is null) return;
+        if (movement.CommandId is not null && movement.CommandId != pending.ActionId) return;
+
+        if (movement.Result == MovementResult.CombatRestricted)
+        {
+            pending.Completion.TrySetResult(Blocked(
+                pending.FromRoomId,
+                ScriptMovementFailureReason.CombatRestriction,
+                movement.Detail,
+                null));
+            return;
+        }
+
+        if (movement.Result == MovementResult.Blocked)
+        {
+            ScriptMovementFailureReason reason = ClassifyFailure(movement.Detail);
+            pending.Completion.TrySetResult(Blocked(
+                pending.FromRoomId,
+                reason,
+                movement.Detail,
+                RecoveryCommand(reason, pending.Request.Direction)));
+            return;
+        }
+
+        bool belongsToPending = movement.CommandId == pending.ActionId ||
+                                movement.Cause == MovementCause.MapperRoute;
+        if (!belongsToPending)
+        {
+            if (movement.Result is MovementResult.SucceededKnownRoom or
+                MovementResult.SucceededUnknownRoom or MovementResult.Forced or
+                MovementResult.Teleported)
+            {
+                pending.Completion.TrySetResult(new ScriptMovementResult(
+                    "unexpected",
+                    FromRoomId: pending.FromRoomId,
+                    ExpectedRoomId: pending.Request.ExpectedRoomId,
+                    ActualRoomId: movement.DestinationRoomId,
+                    Message: movement.Detail ?? "Movement was caused outside the active Mapper route."));
+            }
+            return;
+        }
+
+        if (movement.Result == MovementResult.SucceededUnknownRoom)
+        {
+            pending.Completion.TrySetResult(new ScriptMovementResult(
+                "unexpected",
+                FromRoomId: pending.FromRoomId,
+                ExpectedRoomId: pending.Request.ExpectedRoomId,
+                ActualRoomId: null,
+                Message: movement.Detail ?? "Movement succeeded but the destination room is unresolved."));
+        }
     }
 
     private void CompleteFailure(NavigationFailed failure)

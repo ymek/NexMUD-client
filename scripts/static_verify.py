@@ -1073,15 +1073,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.27.1"):
-    fail("README current version must be NexMUD 0.27.1")
-if '<Version>0.27.1</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.27.1 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.28.0"):
+    fail("README current version must be NexMUD 0.28.0")
+if '<Version>0.28.0</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.28.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.27.1</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.27.1")
-if '<string>27001</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 27001 for NexMUD 0.27.1")
+if '<string>0.28.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.28.0")
+if '<string>28000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 28000 for NexMUD 0.28.0")
 item_inspection_text = (ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1576,6 +1576,58 @@ for literal in (
         fail(f"required integrated workspace ratio missing: {literal}")
 if 'RowDefinitions = new RowDefinitions("*,Auto,Auto")' not in main_window_text:
     fail("World surface must keep transcript, gameplay HUD, and command input mounted together")
+
+# 0.28.0 gameplay semantic source/reconciliation architecture
+semantic_spec = ROOT / "docs/architecture/NexMUD-gameplay-semantics-event-normalization-state-reconciliation-architecture.md"
+if not semantic_spec.is_file():
+    fail("missing gameplay semantics architecture contract")
+observation_factory_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarObservationFactory.cs").read_text(encoding="utf-8")
+avendar_adapter_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
+semantic_parser_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarSemanticParser.cs").read_text(encoding="utf-8")
+command_journal_text = (ROOT / "src/JevMud.Client/Commands/OutboundCommandJournal.cs").read_text(encoding="utf-8")
+for literal in (
+    "public sealed record GameObservation(",
+    "public sealed record CharacterPromptSnapshot(",
+    "public sealed record MovementObservation(",
+    "public sealed record ScanObservation(",
+):
+    if literal not in (ROOT / "src/JevMud.Contracts/Gameplay/GameplayModels.cs").read_text(encoding="utf-8"):
+        fail(f"gameplay semantic contract missing: {literal}")
+for literal in (
+    "Interlocked.Increment(ref _sequence)",
+    "public GameObservation CreateEvidence(",
+    "new GameObservationReceived(observation)",
+    "ReplayObservationAsync(",
+):
+    if literal not in (observation_factory_text + avendar_adapter_text):
+        fail(f"game observation invariant missing: {literal}")
+if "case GameObservationReceived observation when" not in interaction_output_text:
+    fail("display transformations must branch from immutable GameObservation evidence")
+if "case GameTextReceived game:" in interaction_output_text:
+    fail("display transformations must not use the compatibility raw-text event as canonical source")
+for literal in (
+    "GameCommandQueueCleared",
+    "MovementResult.CombatRestricted",
+    "MovementCause.Teleport",
+    "CombatTargetConditionObserved",
+):
+    if literal not in semantic_parser_text:
+        fail(f"Avendar semantic parser invariant missing: {literal}")
+for literal in (
+    "OutboundCommandState.Dispatched",
+    "OutboundCommandState.TransportWritten",
+    "OutboundCommandState.ServerQueueCleared",
+):
+    if literal not in command_journal_text:
+        fail(f"outbound command journal invariant missing: {literal}")
+for literal in (
+    "AvendarReplayInfersLegacyStructure",
+    "OpaqueSpecialMovementPreservesUnknownDestination",
+    "CommandJournalPreservesRepeatedCommandBursts",
+    "SemanticCorpusFixturesCoverExpertLogs",
+):
+    if literal not in test_program_text:
+        fail(f"gameplay semantic regression coverage missing: {literal}")
 
 if errors:
     print("Static verification failed:")

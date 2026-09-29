@@ -1,5 +1,6 @@
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Jev;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 
 namespace JevMud.Contracts.Events;
@@ -22,6 +23,7 @@ public sealed record ResponseCaptureChanged(ResponseCaptureKind Capture) : IMudE
 
 public sealed record TextReceived(string Text) : IMudEvent;
 public sealed record GameTextReceived(string Text) : IMudEvent;
+public sealed record GameObservationReceived(GameObservation Observation) : IMudEvent;
 
 public sealed record GmcpMessageReceived(string Module, string Payload) : IMudEvent;
 public sealed record MsdpMessageReceived(IReadOnlyDictionary<string, JevMud.Contracts.Transport.MsdpValue> Values) : IMudEvent;
@@ -41,6 +43,9 @@ public sealed record CharacterVitalsChanged(
     int? MaxMovement) : IMudEvent;
 
 public sealed record CharacterPositionObserved(string Position) : IMudEvent;
+public sealed record CharacterPromptSnapshotObserved(CharacterPromptSnapshot Snapshot) : IMudEvent;
+public sealed record GroupSnapshotObserved(GroupSnapshot Snapshot) : IMudEvent;
+public sealed record ActiveEffectsSnapshotObserved(ActiveEffectsSnapshot Snapshot) : IMudEvent;
 
 public sealed record CharacterPromptObserved(
     int HitPoints,
@@ -55,7 +60,10 @@ public sealed record CharacterPromptObserved(
     string RoomName,
     ExitState Exits,
     string Terrain,
-    string Light) : IMudEvent;
+    string Light) : IMudEvent
+{
+    public long SourceSequence { get; init; }
+}
 
 public sealed record CharacterScoreObserved(
     CharacterProfileState Profile,
@@ -122,6 +130,9 @@ public sealed record RoomObservationObserved(
     ObservationCompleteness ContentsCompleteness) : IMudEvent
 {
     public IReadOnlyList<string> RecentObservations { get; init; } = Array.Empty<string>();
+    public Guid ObservationId { get; init; }
+    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Normal;
+    public long SourceSequence { get; init; }
 }
 
 // Retained for compatibility with focused tests and callers which only have post-exit contents.
@@ -132,6 +143,9 @@ public sealed record RoomContentsObserved(
     IReadOnlyList<RoomContentObservation> UnknownContents) : IMudEvent;
 
 public sealed record RoomOccupantDeparted(string TargetName, string? Direction) : IMudEvent;
+public sealed record MovementObserved(MovementObservation Movement) : IMudEvent;
+public sealed record ScanUpdated(ScanObservation Scan) : IMudEvent;
+public sealed record GameCommandQueueCleared(long SourceSequence) : IMudEvent;
 public sealed record NavigationAttempted(string Direction, Guid? ActionId = null) : IMudEvent;
 public sealed record NavigationResponseCompleted(Guid ActionId, string Direction, bool RoomObserved) : IMudEvent;
 public sealed record NavigationFailed(string? Direction, string Reason) : IMudEvent;
@@ -227,7 +241,11 @@ public sealed record AutomationWorkflowStateChanged(
 public sealed record CombatStateChanged(bool Active, string? TargetId) : IMudEvent;
 public sealed record CombatDamageObserved(DamageObservation Damage) : IMudEvent;
 public sealed record CombatAttackObserved(CombatAttackObservation Attack) : IMudEvent;
-public sealed record CombatTargetConditionObserved(string TargetName, string Condition) : IMudEvent;
+public sealed record CombatTargetConditionObserved(string TargetName, string Condition) : IMudEvent
+{
+    public ConditionRange? Range { get; init; }
+    public long SourceSequence { get; init; }
+}
 public sealed record EnemyKilled(string TargetName) : IMudEvent;
 public sealed record CorpseDestroyed(string TargetName) : IMudEvent;
 public sealed record EffectStateChanged(string Effect, bool Active) : IMudEvent;
@@ -236,6 +254,9 @@ public sealed record ExperienceGained(int Amount) : IMudEvent;
 public sealed record ExplorationGained(int Amount, int ExperienceAmount) : IMudEvent;
 public sealed record CurrencyGained(string Currency, int Amount) : IMudEvent;
 public sealed record CharacterPromoted(int HitPointGain, int ManaGain, int MovementGain) : IMudEvent;
+public sealed record CorpseHarvested(string ItemName, string CorpseDescription, long SourceSequence) : IMudEvent;
+public sealed record CorpseSacrificed(string ItemName, string? Deity, long SourceSequence) : IMudEvent;
+public sealed record CharacterStatusObserved(string Status, bool Active, long SourceSequence) : IMudEvent;
 public sealed record PagerPromptObserved : IMudEvent;
 
 public sealed record CommunicationObserved(

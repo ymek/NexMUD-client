@@ -11,6 +11,10 @@ public static class ScriptEventTypes
     public const string RoomUpdated = "room.updated";
     public const string CharacterVitalsChanged = "character.vitalsChanged";
     public const string PromptReceived = "character.promptReceived";
+    public const string CharacterPromptUpdated = "character.promptUpdated";
+    public const string CharacterStatusChanged = "character.statusChanged";
+    public const string GroupSnapshotUpdated = "group.snapshotUpdated";
+    public const string EffectStatusSnapshot = "effect.statusSnapshot";
     public const string MobObserved = "mob.observed";
     public const string MobConsidered = "mob.considered";
     public const string ItemObserved = "item.observed";
@@ -19,6 +23,16 @@ public static class ScriptEventTypes
     public const string CombatStarted = "combat.started";
     public const string CombatEnded = "combat.ended";
     public const string EnemyKilled = "combat.enemyKilled";
+    public const string CombatTargetConditionUpdated = "combat.targetConditionUpdated";
+    public const string MovementObserved = "movement.observed";
+    public const string MovementSucceeded = "movement.succeeded";
+    public const string MovementBlocked = "movement.blocked";
+    public const string MovementUnknownDestination = "movement.unknownDestination";
+    public const string MovementForced = "movement.forced";
+    public const string MovementTeleported = "movement.teleported";
+    public const string ScanUpdated = "scan.updated";
+    public const string ItemIdentified = "item.identified";
+    public const string GameCommandQueueCleared = "game.commandQueueCleared";
     public const string ItemAcquired = "item.acquired";
     public const string ConnectionStateChanged = "connection.stateChanged";
     public const string MapperRouteStatusChanged = "mapper.routeStatusChanged";

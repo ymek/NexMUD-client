@@ -1,0 +1,7 @@
+# Source: Mines 3_31_15.txt
+Underneath a Suction Tube
+  A powerful current of air presses down on you from above.
+
+[Exits: east up]
+( 3) The corpse of a yreg is lying here.
+     The corpse of a spindly-legged korakk is lying here.

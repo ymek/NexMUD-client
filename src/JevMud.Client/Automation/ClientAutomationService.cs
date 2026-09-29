@@ -127,6 +127,14 @@ public sealed class ClientAutomationService
             await foreach (EventEnvelope envelope in _events.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
                 CompleteActionWaiter(envelope.Payload);
+
+                // Source observations are evidence for parsers/display, not a second Automation
+                // event surface. Raw trigger compatibility continues through GameTextReceived.
+                if (envelope.Payload is GameObservationReceived)
+                {
+                    continue;
+                }
+
                 SignalEventWaiters(envelope.Payload);
 
                 // Keep Automation's domain matching aligned with the same semantic-event -> state-reduction

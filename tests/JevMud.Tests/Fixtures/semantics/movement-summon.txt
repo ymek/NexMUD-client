@@ -1,0 +1,6 @@
+# Source: Xiganath.txt
+Nyogthua has summoned you!
+The Arcanum
+  You stand in a small square room hewn from the alien purple stone.
+
+[Exits: (east)]

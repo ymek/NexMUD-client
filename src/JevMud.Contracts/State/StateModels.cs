@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using JevMud.Contracts.Events;
 using JevMud.Contracts.Jev;
+using JevMud.Contracts.Gameplay;
 
 namespace JevMud.Contracts.State;
 
@@ -24,7 +25,10 @@ public enum ResponseCaptureKind
     Inventory,
     ItemIdentification,
     AbilityHelp,
-    Where
+    Where,
+    Group,
+    Effects,
+    Scan
 }
 
 public sealed record SessionState(
@@ -149,7 +153,12 @@ public sealed record ItemIdentification(
     string? DamageDice,
     decimal? DamageAverage,
     IReadOnlyDictionary<string, string> ExtraFields,
-    string RawText);
+    string RawText)
+{
+    public string? Size { get; init; }
+    public IReadOnlyList<string> Spells { get; init; } = Array.Empty<string>();
+    public IReadOnlyDictionary<string, string> RawFields => ExtraFields;
+}
 
 public sealed record AbilityHelpDocument(
     string Name,
@@ -185,6 +194,10 @@ public sealed record CharacterState(
     public ObservationCompleteness SpellsCompleteness { get; init; } = ObservationCompleteness.Unknown;
     public DateTimeOffset? SkillsObservedAt { get; init; }
     public DateTimeOffset? SpellsObservedAt { get; init; }
+    public CharacterPromptSnapshot? PromptSnapshot { get; init; }
+    public GroupSnapshot? Group { get; init; }
+    public IReadOnlyList<ActiveEffect> ActiveEffects { get; init; } = Array.Empty<ActiveEffect>();
+    public long LastObservedSequence { get; init; }
 }
 
 
@@ -208,7 +221,11 @@ public sealed record RoomExitObservation(
     bool Exists,
     ExitDoorState DoorState,
     ExitTraversability Traversability,
-    string? BlockReason = null);
+    string? BlockReason = null)
+{
+    public string? RawToken { get; init; }
+    public IReadOnlyList<string> Qualifiers { get; init; } = Array.Empty<string>();
+}
 
 public sealed record ExitState(
     bool IsKnown,
@@ -252,7 +269,12 @@ public sealed record RoomContentObservation(
     RoomEntityKind Kind = RoomEntityKind.Unknown,
     RoomEntityTraits Traits = RoomEntityTraits.None,
     IReadOnlyList<string>? TargetKeywords = null,
-    IReadOnlyList<string>? Decorators = null);
+    IReadOnlyList<string>? Decorators = null)
+{
+    public int Count { get; init; } = 1;
+    public Guid OccurrenceId { get; init; }
+    public IReadOnlyList<string> StateFlags { get; init; } = Array.Empty<string>();
+}
 
 public sealed record RoomState(
     string? Id,
@@ -266,6 +288,8 @@ public sealed record RoomState(
     IReadOnlyList<RoomContentObservation> Contents)
 {
     public IReadOnlyList<string> RecentObservations { get; init; } = Array.Empty<string>();
+    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Unknown;
+    public long LastObservedSequence { get; init; }
 
     public IReadOnlyList<RoomContentObservation> Occupants =>
         Contents.Where(content => content.Kind == RoomEntityKind.Occupant).ToArray();
@@ -341,7 +365,11 @@ public sealed record CombatState(
     string? TargetCondition,
     DamageObservation? LastPlayerDamage,
     DamageObservation? LastOpponentDamage,
-    CombatAttackObservation? LastAvoidedAttack);
+    CombatAttackObservation? LastAvoidedAttack)
+{
+    public ConditionRange? TargetConditionRange { get; init; }
+    public long LastObservedSequence { get; init; }
+}
 
 public sealed record StateSnapshot(
     long Version,
@@ -353,6 +381,9 @@ public sealed record StateSnapshot(
     CombatState Combat,
     JevAuthoritySnapshot JevAuthority)
 {
+    public ScanObservation? LastScan { get; init; }
+    public MovementObservation? LastMovement { get; init; }
+
     public static StateSnapshot Initial { get; } = new(
         Version: 0,
         Timestamp: DateTimeOffset.UnixEpoch,

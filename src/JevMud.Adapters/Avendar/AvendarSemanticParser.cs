@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 
 namespace JevMud.Adapters.Avendar;
@@ -24,7 +25,7 @@ public sealed partial class AvendarSemanticParser
         $@"^(?<source>.+?)'s (?:(?<absolute>{AbsolutePattern}) )?(?<type>\S+) (?<relative>{RelativePattern}) you\.$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    public IReadOnlyList<IMudEvent> ParseLine(string line)
+    public IReadOnlyList<IMudEvent> ParseLine(string line, long sourceSequence = 0)
     {
         string text = line.Trim();
         if (text.Length == 0)
@@ -33,6 +34,90 @@ public sealed partial class AvendarSemanticParser
         }
 
         List<IMudEvent> events = [];
+
+        if (text.Equals("Buffer cleared.", StringComparison.OrdinalIgnoreCase))
+        {
+            events.Add(new GameCommandQueueCleared(sourceSequence));
+            return events;
+        }
+
+        if (text.Equals("You are hungry.", StringComparison.OrdinalIgnoreCase))
+        {
+            events.Add(new CharacterStatusObserved("hungry", true, sourceSequence));
+            return events;
+        }
+
+        if (text.Equals("You are thirsty.", StringComparison.OrdinalIgnoreCase))
+        {
+            events.Add(new CharacterStatusObserved("thirsty", true, sourceSequence));
+            return events;
+        }
+
+        if (CombatMovementRestrictionRegex().IsMatch(text))
+        {
+            events.Add(new MovementObserved(new MovementObservation(
+                MovementCause.Unknown,
+                MovementResult.CombatRestricted,
+                null,
+                null,
+                text,
+                sourceSequence)));
+            return events;
+        }
+
+        if (TeleportCueRegex().IsMatch(text))
+        {
+            events.Add(new MovementObserved(new MovementObservation(
+                MovementCause.Teleport,
+                MovementResult.Unknown,
+                null,
+                null,
+                text,
+                sourceSequence)));
+            return events;
+        }
+
+        Match follow = FollowMovementRegex().Match(text);
+        if (follow.Success)
+        {
+            events.Add(Movement(MovementCause.Follow, null, text, sourceSequence));
+            return events;
+        }
+
+        if (FleeMovementRegex().IsMatch(text))
+        {
+            events.Add(Movement(MovementCause.Flee, null, text, sourceSequence));
+            return events;
+        }
+
+        Match crawl = CrawlMovementRegex().Match(text);
+        if (crawl.Success)
+        {
+            events.Add(Movement(
+                MovementCause.Crawl,
+                crawl.Groups["direction"].Value.ToLowerInvariant(),
+                text,
+                sourceSequence));
+            return events;
+        }
+
+        if (PortalMovementRegex().IsMatch(text))
+        {
+            events.Add(Movement(MovementCause.Portal, null, text, sourceSequence));
+            return events;
+        }
+
+        if (SummonMovementRegex().IsMatch(text))
+        {
+            events.Add(Movement(MovementCause.Summon, null, text, sourceSequence));
+            return events;
+        }
+
+        if (ForcedMovementRegex().IsMatch(text))
+        {
+            events.Add(Movement(MovementCause.Forced, null, text, sourceSequence));
+            return events;
+        }
 
         if (text == "[Hit Return to continue]")
         {
@@ -50,6 +135,13 @@ public sealed partial class AvendarSemanticParser
         if (text.Equals("Alas, you cannot go that way.", StringComparison.OrdinalIgnoreCase))
         {
             events.Add(new NavigationFailed(null, text));
+            events.Add(new MovementObserved(new MovementObservation(
+                MovementCause.Unknown,
+                MovementResult.Blocked,
+                null,
+                null,
+                text,
+                sourceSequence)));
             return events;
         }
 
@@ -76,6 +168,13 @@ public sealed partial class AvendarSemanticParser
             int xp = int.Parse(exploration.Groups["xp"].Value);
             events.Add(new ExplorationGained(points, xp));
             events.Add(new ExperienceGained(xp));
+            return events;
+        }
+
+        Match explorationOnly = ExplorationOnlyRegex().Match(text);
+        if (explorationOnly.Success)
+        {
+            events.Add(new ExplorationGained(int.Parse(explorationOnly.Groups["points"].Value), 0));
             return events;
         }
 
@@ -111,6 +210,15 @@ public sealed partial class AvendarSemanticParser
             return events;
         }
 
+        Match splitCurrency = SplitCurrencyRegex().Match(text);
+        if (splitCurrency.Success)
+        {
+            events.Add(new CurrencyGained(
+                splitCurrency.Groups["currency"].Value.ToLowerInvariant(),
+                int.Parse(splitCurrency.Groups["amount"].Value)));
+            return events;
+        }
+
         Match acquired = ItemAcquiredRegex().Match(text);
         if (acquired.Success)
         {
@@ -143,6 +251,20 @@ public sealed partial class AvendarSemanticParser
                 int.Parse(promotion.Groups["hp"].Value),
                 int.Parse(promotion.Groups["mana"].Value),
                 int.Parse(promotion.Groups["move"].Value)));
+            return events;
+        }
+
+        Match dualWield = DualWieldRegex().Match(text);
+        if (dualWield.Success)
+        {
+            events.Add(new EquipmentChanged("dual wielded", dualWield.Groups["item"].Value));
+            return events;
+        }
+
+        Match held = HoldRegex().Match(text);
+        if (held.Success)
+        {
+            events.Add(new EquipmentChanged("held", held.Groups["item"].Value));
             return events;
         }
 
@@ -269,16 +391,85 @@ public sealed partial class AvendarSemanticParser
             return events;
         }
 
+        Match sacrifice = CorpseSacrificeRegex().Match(text);
+        if (sacrifice.Success && sacrifice.Groups["item"].Value.Contains("corpse", StringComparison.OrdinalIgnoreCase))
+        {
+            events.Add(new CorpseSacrificed(
+                sacrifice.Groups["item"].Value.Trim(),
+                sacrifice.Groups["deity"].Value.Trim(),
+                sourceSequence));
+            return events;
+        }
+
+        Match harvested = CorpseHarvestRegex().Match(text);
+        if (harvested.Success)
+        {
+            events.Add(new CorpseHarvested(
+                harvested.Groups["item"].Value.Trim(),
+                harvested.Groups["corpse"].Value.Trim(),
+                sourceSequence));
+            return events;
+        }
+
+        Match conditionWithPercent = CombatConditionPercentRegex().Match(text);
+        if (conditionWithPercent.Success)
+        {
+            int minimum = int.Parse(conditionWithPercent.Groups["min"].Value);
+            int maximum = conditionWithPercent.Groups["max"].Success
+                ? int.Parse(conditionWithPercent.Groups["max"].Value)
+                : minimum;
+            string descriptor = conditionWithPercent.Groups["condition"].Value.Trim();
+            events.Add(new CombatTargetConditionObserved(
+                conditionWithPercent.Groups["target"].Value.Trim(),
+                descriptor)
+            {
+                Range = new ConditionRange(minimum, maximum, descriptor),
+                SourceSequence = sourceSequence
+            });
+            return events;
+        }
+
         Match condition = CombatConditionRegex().Match(text);
         if (condition.Success)
         {
+            string descriptor = condition.Groups["condition"].Value;
             events.Add(new CombatTargetConditionObserved(
                 condition.Groups["target"].Value,
-                condition.Groups["condition"].Value));
+                descriptor)
+            {
+                Range = KnownConditionRange(descriptor),
+                SourceSequence = sourceSequence
+            });
         }
 
         return events;
     }
+
+    private static MovementObserved Movement(
+        MovementCause cause,
+        string? direction,
+        string detail,
+        long sourceSequence) =>
+        new(new MovementObservation(
+            cause,
+            MovementResult.SucceededUnknownRoom,
+            direction,
+            null,
+            detail,
+            sourceSequence));
+
+    private static ConditionRange? KnownConditionRange(string descriptor) =>
+        descriptor.Trim().ToLowerInvariant() switch
+        {
+            "in excellent condition" => new ConditionRange(100, 100, descriptor),
+            "a few scratches" => new ConditionRange(90, 100, descriptor),
+            "pretty hurt" => new ConditionRange(15, 30, descriptor),
+            "some small wounds and bruises" => new ConditionRange(75, 90, descriptor),
+            "quite a few wounds" => new ConditionRange(50, 75, descriptor),
+            "some big nasty wounds and scratches" => new ConditionRange(30, 50, descriptor),
+            "in awful condition" => new ConditionRange(0, 15, descriptor),
+            _ => null
+        };
 
     private static DamageObservation CreateDamage(
         CombatActor source,
@@ -332,8 +523,14 @@ public sealed partial class AvendarSemanticParser
     [GeneratedRegex(@"^You gained (?<points>\d+) exploration points? and (?<xp>\d+) experience points?!$")]
     private static partial Regex ExplorationRegex();
 
-    [GeneratedRegex(@"^You get (?<amount>\d+) (?<currency>copper|silver|gold) coins? from .+\.$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^You gained (?<points>\d+) exploration points?!$", RegexOptions.IgnoreCase)]
+    private static partial Regex ExplorationOnlyRegex();
+
+    [GeneratedRegex(@"^You get (?<amount>\d+) (?<currency>copper|silver|gold|platinum) coins? from .+\.$", RegexOptions.IgnoreCase)]
     private static partial Regex CurrencyRegex();
+
+    [GeneratedRegex(@"^You split some coins\.\s+Your share is (?<amount>\d+) (?<currency>copper|silver|gold|platinum)\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex SplitCurrencyRegex();
 
     [GeneratedRegex(@"^You get (?<item>.+?) from (?<source>.+?)\.$", RegexOptions.IgnoreCase)]
     private static partial Regex ItemAcquiredRegex();
@@ -349,6 +546,12 @@ public sealed partial class AvendarSemanticParser
 
     [GeneratedRegex(@"^You are now learned at (?<skill>.+?)\.$", RegexOptions.IgnoreCase)]
     private static partial Regex SkillPracticeRegex();
+
+    [GeneratedRegex(@"^You dual wield (?<item>.+?)\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex DualWieldRegex();
+
+    [GeneratedRegex(@"^You hold (?<item>.+?) in your hand\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex HoldRegex();
 
     [GeneratedRegex(@"^You wield (?<item>.+?)\.$", RegexOptions.IgnoreCase)]
     private static partial Regex WieldRegex();
@@ -380,12 +583,47 @@ public sealed partial class AvendarSemanticParser
     [GeneratedRegex(@"^(?<target>.+?) leaves (?<direction>north|east|south|west|up|down)\.$", RegexOptions.IgnoreCase)]
     private static partial Regex OccupantDepartureRegex();
 
-    [GeneratedRegex(@"^(?<target>.+?) is DEAD!!$")]
+    [GeneratedRegex(@"^(?<target>.+?) (?:is DEAD!!|is DESTROYED!)$", RegexOptions.IgnoreCase)]
     private static partial Regex DeathRegex();
 
     [GeneratedRegex(@"^You (?:quickly )?destroy the corpse of (?<target>.+?)\.$", RegexOptions.IgnoreCase)]
     private static partial Regex CorpseDestroyedRegex();
 
-    [GeneratedRegex(@"^(?<target>.+?) (?:(?:looks (?<condition>pretty hurt))|(?:has (?<condition>some small wounds and bruises|quite a few wounds|some big nasty wounds and scratches))|(?:is (?<condition>in awful condition)))\.?$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^No way!\s+You are still fighting!$", RegexOptions.IgnoreCase)]
+    private static partial Regex CombatMovementRestrictionRegex();
+
+    [GeneratedRegex(@"^You feel a slight tingling\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex TeleportCueRegex();
+
+    [GeneratedRegex(@"^You follow (?<target>.+?)\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex FollowMovementRegex();
+
+    [GeneratedRegex(@"^You flee from combat!$", RegexOptions.IgnoreCase)]
+    private static partial Regex FleeMovementRegex();
+
+    [GeneratedRegex(@"^You crawl (?<direction>north|east|south|west|up|down)\b.*$", RegexOptions.IgnoreCase)]
+    private static partial Regex CrawlMovementRegex();
+
+    [GeneratedRegex(@"^You enter (?:the |a )?.*portal\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex PortalMovementRegex();
+
+    [GeneratedRegex(@"^.+ has summoned you!$", RegexOptions.IgnoreCase)]
+    private static partial Regex SummonMovementRegex();
+
+    [GeneratedRegex(@"^(?:You are sucked through .+|You ride the powerful suction.+|The powerful suction .+ you .+)$", RegexOptions.IgnoreCase)]
+    private static partial Regex ForcedMovementRegex();
+
+    [GeneratedRegex(@"^You offer (?<item>.+?) to (?<deity>[^.]+)\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex CorpseSacrificeRegex();
+
+    [GeneratedRegex(@"^You .+?(?<item>heart|eye|hand|finger|tongue|head|brains|hair|entrails).+?corpse of (?<corpse>.+?)\.$", RegexOptions.IgnoreCase)]
+    private static partial Regex CorpseHarvestRegex();
+
+    [GeneratedRegex(
+        @"^(?<target>.+?) (?<condition>is in excellent condition|has a few scratches|has some small wounds and bruises|has quite a few wounds|has some big nasty wounds and scratches|looks pretty hurt|is in awful condition)\.?\s*\[(?<min>\d+)%(?:-(?<max>\d+)%)?\]\s*$",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex CombatConditionPercentRegex();
+
+    [GeneratedRegex(@"^(?<target>.+?) (?:(?:looks (?<condition>pretty hurt))|(?:has (?<condition>a few scratches|some small wounds and bruises|quite a few wounds|some big nasty wounds and scratches))|(?:is (?<condition>in excellent condition|in awful condition)))\.?$", RegexOptions.IgnoreCase)]
     private static partial Regex CombatConditionRegex();
 }

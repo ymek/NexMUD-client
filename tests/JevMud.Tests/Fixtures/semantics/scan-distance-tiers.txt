@@ -1,0 +1,10 @@
+# Source: Xiganath.txt
+You peer intently east.
+=== 1 east ===
+(Translucent) A misty form screams malevolently and swirls about the mists.
+
+=== 2 east ===
+(Translucent) A misty form screams malevolently and swirls about the mists.
+(Translucent) A misty form screams malevolently and swirls about the mists.
+
+=== 3 east ===

@@ -5,6 +5,7 @@ using JevMud.Client.Scripting;
 using JevMud.Client.Settings;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.Jev;
 using JevMud.Contracts.State;
 using JevMud.Core.Events;
@@ -96,6 +97,17 @@ public sealed class AutoMoveService
                             action.Source == DecisionSource.Human
                                 ? "Paused for manual navigation."
                                 : "Paused because another controller issued navigation.",
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    case MovementObserved movement when
+                        movement.Movement.Cause != MovementCause.MapperRoute &&
+                        (movement.Movement.Result is MovementResult.SucceededKnownRoom or
+                            MovementResult.SucceededUnknownRoom or MovementResult.Forced or
+                            MovementResult.Teleported) &&
+                        (Current.Status is AutoMoveStatus.Planning or AutoMoveStatus.Moving or
+                            AutoMoveStatus.Recovering or AutoMoveStatus.Replanning):
+                        await PauseAsync(
+                            "Route requires reconciliation after external movement.",
                             cancellationToken).ConfigureAwait(false);
                         break;
                 }

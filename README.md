@@ -1,4 +1,16 @@
-# NexMUD Client v0.27.1
+# NexMUD Client v0.28.0
+
+## v0.28.0 - Gameplay semantics and state reconciliation
+
+- Added immutable, session-ordered `GameObservation` evidence before semantic parsing and display transformation, preserving raw/plain/ANSI source forms and enabling replay injection.
+- Added typed Avendar semantics for legacy prompts, group snapshots, active effects, scans, movement outcomes, target-condition ranges, command-buffer clears, character statuses, corpse interactions, and structured room/entity evidence. Signed and over-max resources remain unmodified.
+- Added canonical reducer state for prompt/group/effect observations, source sequence traceability, opaque-room movement, scans, and coarse combat health ranges. Parenthesized exit tokens are preserved as unknown qualifiers rather than guessed closed doors.
+- Added a bounded outbound command journal that preserves command bursts/provenance and never treats a generic prompt as execution acknowledgement. Avendar `clear` remains a server command; `Buffer cleared.` records server queue-clear evidence only.
+- Mapper route coordination now consumes typed movement semantics and invalidates active route assumptions after external follow/flee/crawl/portal/teleport/summon/forced movement. Automation and scripting receive stable semantic event names while raw text triggers remain unchanged.
+- Codex persistence preserves explicit duplicate entity counts, item identification retains unknown fields, and regression fixtures extracted from all four expert Avendar logs cover signed resources, effects, scans, duplicates, special movement, clear, darkness, target conditions, and combat volume. Jev behavior is unchanged.
+- Architecture contract: `docs/architecture/NexMUD-gameplay-semantics-event-normalization-state-reconciliation-architecture.md`.
+- SemVer release: 0.28.0. macOS build: 28000.
+
 
 ## v0.27.1 - Terminal typography and transcript density correction
 

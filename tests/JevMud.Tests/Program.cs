@@ -6,9 +6,11 @@ using JevMud.Adapters.Avendar;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
 using JevMud.Contracts.Jev;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 using JevMud.Contracts.Transport;
 using JevMud.Client.Settings;
+using JevMud.Client.Commands;
 using JevMud.Client.Automation;
 using JevMud.Client.Runtime;
 using JevMud.Client.Presentation;
@@ -114,6 +116,18 @@ public static class Program
         await RunAsync("avendar prompt rejects unknown exit codes", AvendarPromptRejectsUnknownExitCodes);
         await RunAsync("avendar prompt models none exits as known empty", AvendarPromptModelsNoneExits);
         await RunAsync("avendar stream extracts telemetry without losing bytes", AvendarStreamExtractsTelemetryWithoutLosingBytes);
+        await RunAsync("game observations preserve source and monotonic ordering", GameObservationsPreserveSourceAndOrder);
+        await RunAsync("avendar replay injects equivalent semantic observations", AvendarReplayInjectsEquivalentObservations);
+        await RunAsync("avendar replay infers legacy group and room semantics", AvendarReplayInfersLegacyStructure);
+        await RunAsync("legacy prompt parser preserves signed and over-max resources", LegacyPromptPreservesObservedResources);
+        await RunAsync("group parser accepts negative HP and transformed names", GroupParserAcceptsNegativeHp);
+        await RunAsync("effects parser preserves zero permanent and continuation modifiers", EffectsParserPreservesDurationsAndModifiers);
+        await RunAsync("semantic parser emits clear movement and condition events", SemanticParserEmitsGameplaySemantics);
+        await RunAsync("opaque special movement preserves unknown destination", OpaqueSpecialMovementPreservesUnknownDestination);
+        await RunAsync("scan semantics remain separate from current room occupants", ScanSemanticsDoNotPolluteRoom);
+        await RunAsync("command journal does not infer prompt acknowledgement", CommandJournalDoesNotInferPromptAcknowledgement);
+        await RunAsync("command journal preserves repeated command bursts", CommandJournalPreservesRepeatedCommandBursts);
+        await RunAsync("semantic corpus fixtures cover all expert source logs", SemanticCorpusFixturesCoverExpertLogs);
         await RunAsync("avendar adapter preserves raw server text for display", AvendarAdapterPreservesRawServerText);
         await RunAsync("avendar adapter follows explicit login input state", AvendarAdapterFollowsExplicitLoginInputState);
         await RunAsync("avendar movement responses correlate denied and successful commands", AvendarMovementResponsesCorrelateCommands);
@@ -156,7 +170,7 @@ public static class Program
         await RunAsync("room parser models corpses independently", RoomParserModelsCorpse);
         await RunAsync("room parser stops at wrapped speech start", RoomParserStopsAtWrappedSpeechStart);
         await RunAsync("duplicate room names produce distinct observed ids", DuplicateRoomNamesProduceDistinctIds);
-        await RunAsync("parenthesized exits are modeled as blocked", ParenthesizedExitsAreBlocked);
+        await RunAsync("parenthesized exits preserve unknown qualifier semantics", ParenthesizedExitsPreserveUnknownQualifier);
         await RunAsync("closed door movement failure clears pending traversal", ClosedDoorMovementFailureClearsPendingTraversal);
         await RunAsync("denied movement response cannot poison the next mapper traversal", DeniedMovementResponseDoesNotPoisonNextTraversal);
         await RunAsync("mapper persists failed closed exits as navigation knowledge", MapperPersistsClosedDoorFailure);
@@ -2224,6 +2238,467 @@ public static class Program
         return Task.CompletedTask;
     }
 
+    private static Task GameObservationsPreserveSourceAndOrder()
+    {
+        AvendarObservationFactory factory = new();
+        DateTimeOffset receivedAt = DateTimeOffset.Parse("2026-09-28T00:00:00Z");
+        GameObservation first = factory.Create("\u001b[31mred", receivedAt);
+        GameObservation local = factory.CreateEvidence(
+            "look",
+            receivedAt.AddMilliseconds(1),
+            ObservationKind.LocalCommandEcho,
+            new ObservationMetadata(IsLocal: true));
+        GameObservation second = factory.Create(" text", receivedAt.AddMilliseconds(2));
+
+        Assert.Equal(1L, first.Sequence);
+        Assert.Equal(2L, local.Sequence);
+        Assert.Equal(3L, second.Sequence);
+        Assert.Equal("\u001b[31mred", first.RawText);
+        Assert.Equal("red", first.PlainText);
+        Assert.Equal("look", local.PlainText);
+        Assert.Equal(ObservationKind.LocalCommandEcho, local.Kind);
+        Assert.True(local.Metadata.IsLocal, "Local source metadata was not preserved.");
+        Assert.Equal(" text", second.PlainText);
+        Assert.True(first.AnsiRuns.Count > 0, "ANSI evidence should be preserved as style runs.");
+        Assert.True(
+            second.AnsiRuns.Count > 0 && second.AnsiRuns[0].Style.Foreground is not null,
+            "Synthetic evidence must not mutate fragmented server ANSI state.");
+
+        factory.Reset();
+        GameObservation nextSession = factory.Create("next", receivedAt.AddSeconds(1));
+        Assert.Equal(1L, nextSession.Sequence);
+        Assert.False(first.SessionId == nextSession.SessionId, "Observation sequence must be scoped to a distinct session id.");
+        return Task.CompletedTask;
+    }
+
+    private static async Task AvendarReplayInjectsEquivalentObservations()
+    {
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        AvendarGameAdapter adapter = new(events.SubscribeLossless(), events);
+        GameObservation observation = new AvendarObservationFactory().Create(
+            "Buffer cleared.\n",
+            DateTimeOffset.Parse("2026-09-28T00:00:00Z"),
+            kind: ObservationKind.ReplayMarker);
+
+        await adapter.ReplayObservationAsync(observation);
+
+        GameObservationReceived? source = null;
+        GameCommandQueueCleared? cleared = null;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
+        while (source is null || cleared is null)
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            source ??= envelope.Payload as GameObservationReceived;
+            cleared ??= envelope.Payload as GameCommandQueueCleared;
+        }
+
+        Assert.Equal(observation, source!.Observation);
+        Assert.Equal(observation.Sequence, cleared!.SourceSequence);
+    }
+
+    private static async Task AvendarReplayInfersLegacyStructure()
+    {
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        AvendarGameAdapter adapter = new(events.SubscribeLossless(), events);
+        const string raw =
+            "Yisharja's group:\n" +
+            "[51 Brd] Olyeasa           -19/1154 hp  929/1041 mana  490/ 490 mv\n" +
+            "[51 ETe] A large hen        25/  25 hp  704/ 704 mana  467/ 467 mv\n" +
+            "<1043(1028)hp 580(590)m 448(448)mv 8794ep |inside|light|\n" +
+            "You feel a slight tingling.\n" +
+            "A Black-Stoned Passage\n" +
+            "  You stand in a low tunnel walled with rough, black stones.\n" +
+            "\n" +
+            "[Exits: east south west]\n" +
+            "<1030(1044)hp 580(580)m 453(453)mv 8504ep |inside|light|\n";
+        GameObservation observation = new AvendarObservationFactory().Create(
+            raw,
+            DateTimeOffset.Parse("2026-09-28T00:00:00Z"),
+            kind: ObservationKind.ReplayMarker);
+
+        await adapter.ReplayObservationAsync(observation);
+
+        GroupSnapshotObserved? group = null;
+        RoomObservationObserved? room = null;
+        MovementObserved? teleport = null;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
+        while (group is null || room is null || teleport is null)
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            group ??= envelope.Payload as GroupSnapshotObserved;
+            room ??= envelope.Payload as RoomObservationObserved;
+            if (envelope.Payload is MovementObserved movement &&
+                movement.Movement.Cause == MovementCause.Teleport &&
+                movement.Movement.Result == MovementResult.Teleported)
+            {
+                teleport = movement;
+            }
+        }
+
+        Assert.Equal(-19, group!.Snapshot.Members[0].Health.Current);
+        Assert.Equal("A large hen", group.Snapshot.Members[1].DisplayName);
+        Assert.Equal("A Black-Stoned Passage", room!.RoomName);
+        Assert.True(room.ObservationId != Guid.Empty, "Room observation identity was not retained.");
+        Assert.Equal(observation.Sequence, room.SourceSequence);
+        Assert.Equal(RoomVisibilityQuality.Normal, room.VisibilityQuality);
+        Assert.Equal(MovementResult.Teleported, teleport!.Movement.Result);
+        Assert.Equal(room.RoomId, teleport.Movement.DestinationRoomId);
+    }
+
+    private static Task LegacyPromptPreservesObservedResources()
+    {
+        string sourcePrompt = ReadSemanticFixture("prompt-current-over-max.txt")[0];
+        bool parsed = AvendarPromptSnapshotParser.TryParseResourceLine(
+            sourcePrompt,
+            17,
+            out CharacterPromptSnapshot? snapshot);
+
+        Assert.True(parsed && snapshot is not null, "Extended legacy prompt did not parse.");
+        Assert.Equal(1043, snapshot!.Health!.Current);
+        Assert.Equal(1028, snapshot.Health.Maximum);
+        Assert.Equal(580, snapshot.Mana!.Current);
+        Assert.Equal(448, snapshot.Movement!.Current);
+        Assert.Equal("inside", snapshot.Terrain);
+        Assert.Equal("light", snapshot.Light);
+        Assert.Equal(17L, snapshot.SourceSequence);
+
+        Assert.True(
+            AvendarPromptSnapshotParser.TryParseResourceLine(
+                "<-2(100)hp 10(10)m 5(5)mv",
+                18,
+                out CharacterPromptSnapshot? signed) && signed is not null,
+            "Signed prompt resource did not parse.");
+        Assert.Equal(-2, signed!.Health!.Current);
+
+        Assert.True(
+            AvendarPromptSnapshotParser.TryParseResourceLine(
+                "<1(2)hp 3(4)m 5(6)mv 7tnl 8ep future |inside|light|opaque|",
+                19,
+                out CharacterPromptSnapshot? extended) && extended is not null,
+            "Unknown prompt extensions should not invalidate the prompt.");
+        Assert.True(
+            extended!.EffectiveUnknownFields.Contains("future") &&
+            extended.EffectiveUnknownFields.Contains("opaque"),
+            "Unknown prompt fields were not preserved.");
+
+        Assert.True(
+            AvendarPromptSnapshotParser.TryExtractGameClockPrefix(
+                "22:30> gr", 20, out CharacterPromptSnapshot? clock, out string remainder),
+            "Game-clock prefix did not parse.");
+        Assert.Equal(22, clock!.GameClock!.Hour);
+        Assert.Equal(30, clock.GameClock.Minute);
+        Assert.Equal("gr", remainder);
+        return Task.CompletedTask;
+    }
+
+    private static Task GroupParserAcceptsNegativeHp()
+    {
+        string[] lines = ReadSemanticFixture("group-negative-hp.txt");
+        Assert.True(
+            AvendarGroupParser.TryParse(lines, 21, out GroupSnapshot? group) && group is not null,
+            "Negative-HP group fixture did not parse.");
+
+        GroupMemberSnapshot olyeasa = group!.Members.Single(member => member.DisplayName == "Olyeasa");
+        Assert.Equal(-19, olyeasa.Health.Current);
+        GroupMemberSnapshot transformed = group.Members.Single(member => member.DisplayName == "A large hen");
+        Assert.Equal("A large hen", transformed.DisplayName);
+        return Task.CompletedTask;
+    }
+
+    private static Task EffectsParserPreservesDurationsAndModifiers()
+    {
+        string[] lines = ReadSemanticFixture("effects-multiline.txt");
+        Assert.True(
+            AvendarEffectsParser.TryParse(lines, 31, out ActiveEffectsSnapshot? snapshot) && snapshot is not null,
+            "Effects fixture did not parse.");
+
+        ActiveEffect sanctuary = snapshot!.Effects.Single(effect => effect.Name == "sanctuary");
+        Assert.Equal(EffectDurationKind.Hours, sanctuary.Duration.Kind);
+        Assert.Equal(0m, sanctuary.Duration.Hours!.Value);
+
+        ActiveEffect stoneSkin = snapshot.Effects.Single(effect => effect.Name == "stone skin");
+        Assert.Equal(2, stoneSkin.Modifiers.Count);
+        Assert.Equal(17m, stoneSkin.Duration.Hours!.Value);
+
+        ActiveEffect detectHidden = snapshot.Effects.Single(effect => effect.Name == "detect hidden");
+        Assert.Equal(EffectDurationKind.Permanent, detectHidden.Duration.Kind);
+        return Task.CompletedTask;
+    }
+
+    private static Task SemanticParserEmitsGameplaySemantics()
+    {
+        AvendarSemanticParser parser = new();
+        GameCommandQueueCleared cleared = Assert.Single(
+            parser.ParseLine("Buffer cleared.", 41).OfType<GameCommandQueueCleared>());
+        Assert.Equal(41L, cleared.SourceSequence);
+
+        MovementObserved crawl = Assert.Single(
+            parser.ParseLine(
+                "You crawl south, squeezing between the bier and the ceiling on your hands and knees.",
+                42).OfType<MovementObserved>());
+        Assert.Equal(MovementCause.Crawl, crawl.Movement.Cause);
+        Assert.Equal(MovementResult.SucceededUnknownRoom, crawl.Movement.Result);
+        Assert.Equal("south", crawl.Movement.Direction);
+
+        MovementObserved blocked = Assert.Single(
+            parser.ParseLine("Alas, you cannot go that way.", 43).OfType<MovementObserved>());
+        Assert.Equal(MovementResult.Blocked, blocked.Movement.Result);
+
+        MovementObserved combatRestricted = Assert.Single(
+            parser.ParseLine("No way!  You are still fighting!", 44).OfType<MovementObserved>());
+        Assert.Equal(MovementResult.CombatRestricted, combatRestricted.Movement.Result);
+
+        MovementObserved follow = Assert.Single(
+            parser.ParseLine("You follow Ialoes.", 45).OfType<MovementObserved>());
+        Assert.Equal(MovementCause.Follow, follow.Movement.Cause);
+
+        MovementObserved flee = Assert.Single(
+            parser.ParseLine("You flee from combat!", 46).OfType<MovementObserved>());
+        Assert.Equal(MovementCause.Flee, flee.Movement.Cause);
+
+        MovementObserved teleport = Assert.Single(
+            parser.ParseLine("You feel a slight tingling.", 47).OfType<MovementObserved>());
+        Assert.Equal(MovementCause.Teleport, teleport.Movement.Cause);
+        Assert.Equal(MovementResult.Unknown, teleport.Movement.Result);
+
+        MovementObserved summon = Assert.Single(
+            parser.ParseLine("Nyogthua has summoned you!", 48).OfType<MovementObserved>());
+        Assert.Equal(MovementCause.Summon, summon.Movement.Cause);
+
+        CombatTargetConditionObserved condition = Assert.Single(
+            parser.ParseLine("A yreg looks pretty hurt. [15%-30%]", 49)
+                .OfType<CombatTargetConditionObserved>());
+        Assert.Equal(15, condition.Range!.MinPercent);
+        Assert.Equal(30, condition.Range.MaxPercent);
+
+        CombatTargetConditionObserved scratches = Assert.Single(
+            parser.ParseLine("Atthagth has a few scratches.", 50)
+                .OfType<CombatTargetConditionObserved>());
+        Assert.Equal(90, scratches.Range!.MinPercent);
+        Assert.Equal(100, scratches.Range.MaxPercent);
+        return Task.CompletedTask;
+    }
+
+    private static async Task OpaqueSpecialMovementPreservesUnknownDestination()
+    {
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        AvendarGameAdapter adapter = new(events.SubscribeLossless(), events);
+        GameObservation observation = new AvendarObservationFactory().Create(
+            "You follow Ialoes.\nIt is pitch black ...\n",
+            DateTimeOffset.Parse("2026-09-28T00:00:00Z"),
+            kind: ObservationKind.ReplayMarker);
+
+        await adapter.ReplayObservationAsync(observation);
+
+        MovementObserved? opaque = null;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
+        while (opaque is null)
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            if (envelope.Payload is MovementObserved movement &&
+                movement.Movement.Cause == MovementCause.Follow &&
+                movement.Movement.Result == MovementResult.SucceededUnknownRoom &&
+                movement.Movement.Detail?.Contains("pitch black", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                opaque = movement;
+            }
+        }
+
+        StateSnapshot known = StateReducer.Reduce(
+            StateSnapshot.Initial,
+            Envelope(1, new RoomChanged("known", "Known Room", ["east"])));
+        StateSnapshot reduced = StateReducer.Reduce(known, Envelope(2, opaque!));
+        Assert.Equal<string?>(null, reduced.Room.Id);
+        Assert.Equal<string?>(null, reduced.Room.Name);
+        Assert.Equal(RoomVisibilityQuality.Opaque, reduced.Room.VisibilityQuality);
+        Assert.Equal(observation.Sequence, reduced.Room.LastObservedSequence);
+    }
+
+    private static Task ScanSemanticsDoNotPolluteRoom()
+    {
+        AvendarRoomContentsParser roomParser = new();
+        roomParser.ObserveLine("Current Room");
+        roomParser.ObserveLine("  A test chamber.");
+        roomParser.ObserveLine(string.Empty);
+        roomParser.ObserveLine("[Exits: east]");
+        roomParser.ObserveLine("A local guard stands here.");
+        Assert.True(
+            roomParser.TryComplete("Current Room", out RoomObservationObserved? room) && room is not null,
+            "Current room fixture did not parse.");
+
+        StateSnapshot state = StateReducer.Reduce(StateSnapshot.Initial, Envelope(1, room!));
+        int currentOccupants = state.Room.Contents.Count;
+
+        string[] lines = ReadSemanticFixture("scan-distance-tiers.txt");
+        Assert.True(
+            AvendarScanParser.TryParse(lines, 52, out ScanObservation? scan) && scan is not null,
+            "Scan fixture did not parse.");
+        StateSnapshot next = StateReducer.Reduce(state, Envelope(2, new ScanUpdated(scan!)));
+
+        Assert.Equal(currentOccupants, next.Room.Contents.Count);
+        Assert.Equal(3, next.LastScan!.Tiers.Count);
+        Assert.Equal(2, next.LastScan.Tiers[1].Entities.Count);
+        return Task.CompletedTask;
+    }
+
+    private static async Task CommandJournalDoesNotInferPromptAcknowledgement()
+    {
+        Channel<EventEnvelope> channel = Channel.CreateUnbounded<EventEnvelope>();
+        OutboundCommandJournal journal = new(channel.Reader, 8);
+        Guid id = Guid.NewGuid();
+        await channel.Writer.WriteAsync(Envelope(1, new ActionDispatching(id, "clear")));
+        await channel.Writer.WriteAsync(Envelope(2, new ActionExecuted(id, "clear")));
+        await channel.Writer.WriteAsync(Envelope(3, new CharacterPromptSnapshotObserved(
+            new CharacterPromptSnapshot(
+                new ResourceValue(10, 10),
+                new ResourceValue(10, 10),
+                new ResourceValue(10, 10),
+                SourceSequence: 2))));
+        channel.Writer.TryComplete();
+        await journal.RunAsync(CancellationToken.None);
+
+        OutboundCommandRecord record = Assert.Single(journal.Snapshot());
+        Assert.Equal("clear", record.Text);
+        Assert.Equal(OutboundCommandState.TransportWritten, record.State);
+
+        Channel<EventEnvelope> queueClearedChannel = Channel.CreateUnbounded<EventEnvelope>();
+        OutboundCommandJournal queueClearedJournal = new(queueClearedChannel.Reader, 8);
+        await queueClearedChannel.Writer.WriteAsync(Envelope(4, new ActionDispatching(id, "clear")));
+        await queueClearedChannel.Writer.WriteAsync(Envelope(5, new ActionExecuted(id, "clear")));
+        await queueClearedChannel.Writer.WriteAsync(Envelope(6, new GameCommandQueueCleared(3)));
+        queueClearedChannel.Writer.TryComplete();
+        await queueClearedJournal.RunAsync(CancellationToken.None);
+
+        OutboundCommandRecord retained = Assert.Single(queueClearedJournal.Snapshot());
+        Assert.Equal("clear", retained.Text);
+        Assert.Equal(OutboundCommandState.ServerQueueCleared, retained.State);
+    }
+
+    private static async Task CommandJournalPreservesRepeatedCommandBursts()
+    {
+        Channel<EventEnvelope> channel = Channel.CreateUnbounded<EventEnvelope>();
+        OutboundCommandJournal journal = new(channel.Reader, 8);
+        string[] commands = ReadSemanticFixture("command-burst.txt");
+        for (int index = 0; index < commands.Length; index++)
+        {
+            await channel.Writer.WriteAsync(Envelope(
+                index + 1,
+                new ActionDispatching(Guid.NewGuid(), commands[index])));
+        }
+        channel.Writer.TryComplete();
+        await journal.RunAsync(CancellationToken.None);
+
+        IReadOnlyList<OutboundCommandRecord> records = journal.Snapshot();
+        Assert.Equal(commands.Length, records.Count);
+        Assert.True(records.All(record => record.Text == "cc"), "Repeated command text was altered.");
+        Assert.Equal(records.Count, records.Select(record => record.CommandId).Distinct().Count());
+    }
+
+    private static Task SemanticCorpusFixturesCoverExpertLogs()
+    {
+        string fixtureRoot = Path.Combine(AppContext.BaseDirectory, "Fixtures", "semantics");
+        string[] expectedSources =
+        [
+            "Mines 3_31_15.txt",
+            "Xiganath.txt",
+            "Void Drake Fight.txt",
+            "Xiganath 06.27.2015.txt"
+        ];
+        string[] corpusFiles = Directory.GetFiles(fixtureRoot, "*.txt");
+        foreach (string source in expectedSources)
+        {
+            Assert.True(
+                corpusFiles.Any(path => File.ReadAllText(path).Contains(source, StringComparison.Ordinal)),
+                $"Semantic regression corpus is missing source coverage for {source}.");
+        }
+
+        string[] roomLines = ReadSemanticFixture("room-duplicate-corpses.txt");
+        AvendarRoomContentsParser roomParser = new();
+        foreach (string line in roomLines) roomParser.ObserveLine(line);
+        Assert.True(
+            roomParser.TryComplete("Underneath a Suction Tube", out RoomObservationObserved? room) && room is not null,
+            "Duplicate corpse fixture did not parse.");
+        RoomContentObservation yregCorpses = room!.Contents.Single(content =>
+            content.Description.Contains("corpse of a yreg", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(3, yregCorpses.Count);
+        Assert.True(yregCorpses.OccurrenceId != Guid.Empty, "Room occurrence identity was not retained.");
+
+        Assert.True(
+            AvendarItemIdentificationParser.TryParse(
+                ReadSemanticFixture("item-id-structured.txt"),
+                out ItemIdentified? identified) && identified is not null,
+            "Structured item fixture did not parse.");
+        Assert.Equal("retained", identified!.Item.RawFields["mystery field"]);
+        Assert.Equal("-45", identified.Item.RawFields["effect armor class"]);
+        Assert.Equal("tiny", identified.Item.Size);
+        Assert.True(identified.Item.Flags.Contains("hum"), "Item flags were not tokenized.");
+        Assert.True(identified.Item.Flags.Contains("nodestroy"), "Item flags lost a token.");
+
+        AvendarSemanticParser semantic = new();
+        string specialMovement = ReadSemanticFixture("movement-special.txt")[0];
+        Assert.True(
+            semantic.ParseLine(specialMovement, 71).OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Cause == MovementCause.Crawl),
+            "Crawl movement fixture did not produce movement semantics.");
+        Assert.True(
+            ReadSemanticFixture("movement-blocked.txt")
+                .SelectMany(line => semantic.ParseLine(line, 72))
+                .OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Result == MovementResult.CombatRestricted),
+            "Blocked movement fixture lost combat restriction semantics.");
+        Assert.True(
+            ReadSemanticFixture("movement-follow.txt")
+                .SelectMany(line => semantic.ParseLine(line, 73))
+                .OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Cause == MovementCause.Follow),
+            "Follow movement fixture did not produce movement semantics.");
+        Assert.True(
+            ReadSemanticFixture("movement-flee.txt")
+                .SelectMany(line => semantic.ParseLine(line, 74))
+                .OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Cause == MovementCause.Flee),
+            "Flee movement fixture did not produce movement semantics.");
+        Assert.True(
+            ReadSemanticFixture("movement-teleport.txt")
+                .SelectMany(line => semantic.ParseLine(line, 75))
+                .OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Cause == MovementCause.Teleport),
+            "Teleport movement fixture did not produce movement semantics.");
+        Assert.True(
+            ReadSemanticFixture("movement-summon.txt")
+                .SelectMany(line => semantic.ParseLine(line, 76))
+                .OfType<MovementObserved>()
+                .Any(movement => movement.Movement.Cause == MovementCause.Summon),
+            "Summon movement fixture did not produce movement semantics.");
+        Assert.True(
+            ReadSemanticFixture("command-clear-buffer.txt")
+                .SelectMany(line => semantic.ParseLine(line, 77))
+                .OfType<GameCommandQueueCleared>()
+                .Any(),
+            "Server queue clear fixture did not produce semantics.");
+        Assert.True(
+            ReadSemanticFixture("target-condition-ranges.txt")
+                .SelectMany(line => semantic.ParseLine(line, 78))
+                .OfType<CombatTargetConditionObserved>()
+                .All(condition => condition.Range is not null),
+            "Target condition fixture lost coarse ranges.");
+        Assert.True(
+            ReadSemanticFixture("high-volume-combat.txt")
+                .SelectMany(line => semantic.ParseLine(line, 79))
+                .OfType<CombatTargetConditionObserved>()
+                .Any(),
+            "High-volume combat fixture produced no target condition semantics.");
+        return Task.CompletedTask;
+    }
+
+    private static string[] ReadSemanticFixture(string fileName) =>
+        File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "Fixtures", "semantics", fileName))
+            .Where(line => !line.StartsWith("# Source:", StringComparison.Ordinal))
+            .ToArray();
+
     private static async Task AvendarAdapterPreservesRawServerText()
     {
         await using EventPipeline events = new();
@@ -2954,7 +3429,7 @@ public static class Program
         return Task.CompletedTask;
     }
 
-    private static Task ParenthesizedExitsAreBlocked()
+    private static Task ParenthesizedExitsPreserveUnknownQualifier()
     {
         AvendarRoomContentsParser parser = new();
         parser.ObserveLine("The Hall of Fates");
@@ -2966,8 +3441,10 @@ public static class Program
 
         RoomExitObservation north = observed!.ExitDetails.Single(exit => exit.Direction == "north");
         RoomExitObservation west = observed.ExitDetails.Single(exit => exit.Direction == "west");
-        Assert.Equal(ExitDoorState.Closed, north.DoorState);
-        Assert.Equal(ExitTraversability.Blocked, north.Traversability);
+        Assert.Equal(ExitDoorState.Unknown, north.DoorState);
+        Assert.Equal(ExitTraversability.Unknown, north.Traversability);
+        Assert.Equal("(north)", north.RawToken);
+        Assert.True(north.Qualifiers.Contains("parenthesized"), "Parenthesized exit qualifier was lost.");
         Assert.Equal(ExitTraversability.Traversable, west.Traversability);
         return Task.CompletedTask;
     }

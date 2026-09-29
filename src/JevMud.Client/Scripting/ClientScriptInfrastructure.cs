@@ -6,6 +6,7 @@ using JevMud.Client.Settings;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
 using JevMud.Contracts.Jev;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 using JevMud.Core.Actions;
 using JevMud.Core.Events;
@@ -45,6 +46,11 @@ public sealed class ClientScriptEventBridge
         {
             await foreach (EventEnvelope envelope in _events.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
+                // GameObservation is the immutable semantic source, not a second user-facing
+                // raw-text event. Raw trigger compatibility remains GameTextReceived.
+                if (envelope.Payload is GameObservationReceived)
+                    continue;
+
                 // Script handlers are allowed to read current state while processing an event.
                 // Preserve the architectural ordering: semantic event -> state reduction -> script notification.
                 await _state.WaitUntilProcessedAsync(envelope.Sequence, cancellationToken).ConfigureAwait(false);
@@ -72,6 +78,15 @@ public sealed class ClientScriptEventBridge
         RoomObservationObserved room => ProjectRoomEventType(room.RoomId),
         CharacterVitalsChanged => ScriptEventTypes.CharacterVitalsChanged,
         CharacterPromptObserved => ScriptEventTypes.PromptReceived,
+        CharacterPromptSnapshotObserved => ScriptEventTypes.CharacterPromptUpdated,
+        CharacterStatusObserved => ScriptEventTypes.CharacterStatusChanged,
+        GroupSnapshotObserved => ScriptEventTypes.GroupSnapshotUpdated,
+        ActiveEffectsSnapshotObserved => ScriptEventTypes.EffectStatusSnapshot,
+        CombatTargetConditionObserved => ScriptEventTypes.CombatTargetConditionUpdated,
+        MovementObserved movement => ProjectMovementEventType(movement.Movement),
+        ScanUpdated => ScriptEventTypes.ScanUpdated,
+        ItemIdentified => ScriptEventTypes.ItemIdentified,
+        GameCommandQueueCleared => ScriptEventTypes.GameCommandQueueCleared,
         CombatStateChanged { Active: true } => ScriptEventTypes.CombatStarted,
         CombatStateChanged { Active: false } => ScriptEventTypes.CombatEnded,
         EnemyKilled => ScriptEventTypes.EnemyKilled,
@@ -83,6 +98,16 @@ public sealed class ClientScriptEventBridge
         GameTextReceived => ScriptEventTypes.RawTextReceived,
         ScriptRuntimeTaskFaulted => ScriptEventTypes.RuntimeTaskFaulted,
         _ => mudEvent.GetType().Name
+    };
+
+    private static string ProjectMovementEventType(MovementObservation movement) => movement.Result switch
+    {
+        MovementResult.Blocked or MovementResult.CombatRestricted => ScriptEventTypes.MovementBlocked,
+        MovementResult.SucceededKnownRoom => ScriptEventTypes.MovementSucceeded,
+        MovementResult.SucceededUnknownRoom => ScriptEventTypes.MovementUnknownDestination,
+        MovementResult.Forced => ScriptEventTypes.MovementForced,
+        MovementResult.Teleported => ScriptEventTypes.MovementTeleported,
+        _ => ScriptEventTypes.MovementObserved
     };
 
     private static string ProjectMapperRouteEventType(MapperRouteLifecycleKind kind) => kind switch
@@ -157,6 +182,29 @@ public sealed class ClientScriptEventBridge
             exits = prompt.Exits.Directions,
             terrain = prompt.Terrain,
             light = prompt.Light
+        }, JsonOptions),
+        CharacterPromptSnapshotObserved prompt => JsonSerializer.SerializeToElement(prompt.Snapshot, JsonOptions),
+        CharacterStatusObserved status => JsonSerializer.SerializeToElement(new
+        {
+            status = status.Status,
+            active = status.Active,
+            sourceSequence = status.SourceSequence
+        }, JsonOptions),
+        GroupSnapshotObserved group => JsonSerializer.SerializeToElement(group.Snapshot, JsonOptions),
+        ActiveEffectsSnapshotObserved effects => JsonSerializer.SerializeToElement(effects.Snapshot, JsonOptions),
+        CombatTargetConditionObserved condition => JsonSerializer.SerializeToElement(new
+        {
+            target = condition.TargetName,
+            descriptor = condition.Condition,
+            range = condition.Range,
+            sourceSequence = condition.SourceSequence
+        }, JsonOptions),
+        MovementObserved movement => JsonSerializer.SerializeToElement(movement.Movement, JsonOptions),
+        ScanUpdated scan => JsonSerializer.SerializeToElement(scan.Scan, JsonOptions),
+        ItemIdentified item => JsonSerializer.SerializeToElement(item.Item, JsonOptions),
+        GameCommandQueueCleared cleared => JsonSerializer.SerializeToElement(new
+        {
+            sourceSequence = cleared.SourceSequence
         }, JsonOptions),
         CombatStateChanged combat => JsonSerializer.SerializeToElement(new
         {

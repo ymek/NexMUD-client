@@ -1,0 +1,5 @@
+# Source: Void Drake Fight.txt
+You crawl south, squeezing between the bier and the ceiling on your hands and knees.
+After a short way, you reach the end of the bier, and drop down to the floor.
+A Large Cavernous Chamber
+[Exits: south west]

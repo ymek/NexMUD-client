@@ -18,6 +18,24 @@ public enum CommandOrigin
     Keybinding = 7
 }
 
+
+public enum OutboundCommandState
+{
+    Dispatched,
+    TransportWritten,
+    ServerQueueCleared,
+    SessionEnded
+}
+
+public sealed record OutboundCommandRecord(
+    Guid CommandId,
+    CommandOrigin SourceKind,
+    string Text,
+    long SentSequence,
+    DateTimeOffset SentAt,
+    OutboundCommandState State,
+    Guid? ParentOperationId = null);
+
 public sealed record CommandProvenance(
     CommandOrigin Origin,
     string OwnerId,

@@ -1769,6 +1769,7 @@ public sealed class WorldKnowledgeStore
                     _pendingTraversals.Clear();
                 break;
             case CharacterPromptObserved:
+            case CharacterPromptSnapshotObserved:
             case CharacterScoreObserved:
             case CharacterVitalsChanged:
                 await PersistCharacterObservationAsync(connection, state, envelope.Timestamp, cancellationToken).ConfigureAwait(false);

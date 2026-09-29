@@ -17,6 +17,7 @@ public static partial class AvendarItemIdentificationParser
         }
 
         Dictionary<string, string> fields = new(StringComparer.OrdinalIgnoreCase);
+        List<string> spells = [];
         foreach (string rawLine in lines)
         {
             Match affect = AffectRegex().Match(rawLine);
@@ -31,6 +32,18 @@ public static partial class AvendarItemIdentificationParser
                 continue;
             }
 
+            Match effectRow = EffectRowRegex().Match(rawLine);
+            if (effectRow.Success)
+            {
+                string stat = NormalizeKey(effectRow.Groups["stat"].Value);
+                string amount = effectRow.Groups["amount"].Value.Trim();
+                if (stat.Length > 0 && amount.Length > 0)
+                {
+                    fields[$"effect {stat}"] = amount;
+                }
+                continue;
+            }
+
             Match match = FieldRegex().Match(rawLine);
             if (!match.Success)
             {
@@ -41,6 +54,10 @@ public static partial class AvendarItemIdentificationParser
             string value = match.Groups["value"].Value.Trim();
             if (key.Length > 0 && value.Length > 0)
             {
+                if (key.Equals("spell", StringComparison.OrdinalIgnoreCase))
+                {
+                    spells.Add(value);
+                }
                 fields[key] = value;
             }
         }
@@ -53,7 +70,7 @@ public static partial class AvendarItemIdentificationParser
         decimal? weight = TryDecimal(fields, "weight");
         int? level = TryInt(fields, "level");
         decimal? damageAverage = null;
-        string? damageDice = Value(fields, "damage dice");
+        string? damageDice = Value(fields, "damage dice") ?? Value(fields, "damage");
         if (!string.IsNullOrWhiteSpace(damageDice))
         {
             Match damage = DamageDiceRegex().Match(damageDice);
@@ -74,7 +91,7 @@ public static partial class AvendarItemIdentificationParser
         HashSet<string> knownKeys = new(StringComparer.OrdinalIgnoreCase)
         {
             "object", "flags", "weight", "wear", "level", "material", "type",
-            "weapon type", "weapon flags", "damage type", "damage dice"
+            "weapon type", "weapon flags", "damage type", "damage dice", "damage"
         };
         Dictionary<string, string> extra = fields
             .Where(pair => !knownKeys.Contains(pair.Key))
@@ -82,19 +99,23 @@ public static partial class AvendarItemIdentificationParser
 
         ItemIdentification item = new(
             name.Trim(),
-            SplitList(Value(fields, "flags")),
+            SplitFlags(Value(fields, "flags")),
             weight,
             SplitList(Value(fields, "wear")),
             level,
             Value(fields, "material"),
             Value(fields, "type"),
             Value(fields, "weapon type"),
-            SplitList(Value(fields, "weapon flags")),
+            SplitFlags(Value(fields, "weapon flags")),
             Value(fields, "damage type"),
             damageDice,
             damageAverage,
             new ReadOnlyDictionary<string, string>(extra),
-            string.Join("\n", lines));
+            string.Join("\n", lines))
+        {
+            Spells = new ReadOnlyCollection<string>(spells.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
+            Size = Value(fields, "size")
+        };
 
         observed = new ItemIdentified(item);
         return true;
@@ -129,11 +150,28 @@ public static partial class AvendarItemIdentificationParser
             return Array.Empty<string>();
         }
 
-        return value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return new ReadOnlyCollection<string>(
+            value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    private static IReadOnlyList<string> SplitFlags(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            return Array.Empty<string>();
+        }
+
+        string[] flags = Regex.Split(value.Trim(), @"[\s,]+")
+            .Where(flag => flag.Length > 0)
+            .ToArray();
+        return new ReadOnlyCollection<string>(flags);
     }
 
     [GeneratedRegex(@"^\s*\|\s*Affects\s+(?<stat>.+?)\s+by\s+(?<amount>[+-]?\d+(?:\.\d+)?)\s*\|\s*$", RegexOptions.IgnoreCase)]
     private static partial Regex AffectRegex();
+
+    [GeneratedRegex(@"^\s*\|\s*-\s+(?<stat>.+?)\s+(?<amount>[+-]?\d+(?:\.\d+)?)\s*\|\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex EffectRowRegex();
 
     [GeneratedRegex(@"^\s*\|\s*(?<key>[^:|]+?)\s*:\s*(?<value>.*?)\s*\|\s*$")]
     private static partial Regex FieldRegex();

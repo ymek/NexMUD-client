@@ -1,6 +1,8 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.State;
 using JevMud.Core.Events;
 using JevMud.Transport.Text;
@@ -19,7 +21,10 @@ public sealed class AvendarGameAdapter
         Inventory,
         ItemIdentification,
         AbilityHelp,
-        Where
+        Where,
+        Group,
+        Effects,
+        Scan
     }
 
     private readonly ChannelReader<EventEnvelope> _events;
@@ -28,21 +33,45 @@ public sealed class AvendarGameAdapter
     private readonly AvendarSemanticParser _semanticParser = new();
     private readonly AvendarCommunicationParser _communicationParser = new();
     private readonly AvendarRoomContentsParser _roomContentsParser = new();
+    private readonly AvendarObservationFactory _observationFactory = new();
     private readonly AnsiStripper _ansiStripper = new();
     private readonly StringBuilder _lineBuffer = new();
     private readonly List<string> _responseLines = [];
     private readonly Queue<PendingNavigationResponse> _pendingNavigationResponses = new();
     private bool _navigationResponseSawText;
+    private bool _navigationSawOpaqueRoom;
+    private long _currentSourceSequence;
+    private string _currentObservationSessionId = string.Empty;
+    private long _responseSourceSequence;
+    private MovementCause? _pendingSpecialMovementCause;
+    private long _pendingSpecialMovementSequence;
+    private string? _lastObservedRoomId;
     private ResponseMode _responseMode;
     private bool _scoreCorePublished;
     private SessionInputMode _inputMode = SessionInputMode.Unknown;
 
-    private sealed record PendingNavigationResponse(Guid ActionId, string Direction, bool ExplicitFailureObserved = false);
+    private sealed record PendingNavigationResponse(
+        Guid ActionId,
+        string Direction,
+        MovementCause Cause,
+        bool ExplicitFailureObserved = false);
 
     public AvendarGameAdapter(ChannelReader<EventEnvelope> events, IEventSink sink)
     {
         _events = events;
         _sink = sink;
+    }
+
+    public async ValueTask ReplayObservationAsync(
+        GameObservation observation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        await _sink.PublishAsync(
+            new GameObservationReceived(observation),
+            "adapter.avendar.replay",
+            cancellationToken).ConfigureAwait(false);
+        await ProcessObservationAsync(observation, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -56,16 +85,35 @@ public sealed class AvendarGameAdapter
                     switch (envelope.Payload)
                     {
                         case TextReceived text:
-                            await ProcessTextAsync(text.Text, cancellationToken).ConfigureAwait(false);
+                            GameObservation observation = _observationFactory.Create(
+                                text.Text,
+                                envelope.Timestamp);
+                            await _sink.PublishAsync(
+                                new GameObservationReceived(observation),
+                                "adapter.avendar.observation",
+                                cancellationToken).ConfigureAwait(false);
+                            await ProcessObservationAsync(observation, cancellationToken).ConfigureAwait(false);
                             break;
                         case ActionDispatching action:
+                            await PublishLocalCommandObservationAsync(action, envelope.Timestamp, cancellationToken)
+                                .ConfigureAwait(false);
                             await BeginResponseCollectionAsync(action, cancellationToken).ConfigureAwait(false);
                             break;
-                        case ProtocolStateChanged protocol when protocol.Protocol.Equals("ECHO", StringComparison.OrdinalIgnoreCase):
-                            await HandleEchoProtocolAsync(protocol.Enabled, cancellationToken).ConfigureAwait(false);
+                        case ProtocolStateChanged protocol:
+                            await PublishProtocolObservationAsync(protocol, envelope.Timestamp, cancellationToken)
+                                .ConfigureAwait(false);
+                            if (protocol.Protocol.Equals("ECHO", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await HandleEchoProtocolAsync(protocol.Enabled, cancellationToken).ConfigureAwait(false);
+                            }
                             break;
-                        case ConnectionStateChanged connection when connection.Status != ConnectionStatus.Connected:
-                            ResetSessionParsing();
+                        case ConnectionStateChanged connection:
+                            await PublishConnectionObservationAsync(connection, envelope.Timestamp, cancellationToken)
+                                .ConfigureAwait(false);
+                            if (connection.Status != ConnectionStatus.Connected)
+                            {
+                                ResetSessionParsing();
+                            }
                             break;
                     }
                 }
@@ -88,10 +136,75 @@ public sealed class AvendarGameAdapter
         }
     }
 
-    private async Task ProcessTextAsync(string rawText, CancellationToken cancellationToken)
+    private async Task PublishLocalCommandObservationAsync(
+        ActionDispatching action,
+        DateTimeOffset timestamp,
+        CancellationToken cancellationToken)
     {
-        // Display is an immutable projection of the decoded server stream. Semantic
-        // parsing may recognize or split frames, but it must never filter game output.
+        string text = action.Sensitive ? "<redacted>" : action.Command;
+        GameObservation observation = _observationFactory.CreateEvidence(
+            text,
+            timestamp,
+            ObservationKind.LocalCommandEcho,
+            new ObservationMetadata(IsLocal: true));
+        await _sink.PublishAsync(
+            new GameObservationReceived(observation),
+            "adapter.avendar.observation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PublishProtocolObservationAsync(
+        ProtocolStateChanged protocol,
+        DateTimeOffset timestamp,
+        CancellationToken cancellationToken)
+    {
+        string text = protocol.Detail ?? $"{protocol.Protocol}:{(protocol.Enabled ? "enabled" : "disabled")}";
+        IReadOnlyDictionary<string, string> fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["enabled"] = protocol.Enabled.ToString()
+        };
+        GameObservation observation = _observationFactory.CreateEvidence(
+            text,
+            timestamp,
+            ObservationKind.ProtocolEvent,
+            new ObservationMetadata(Protocol: protocol.Protocol, Fields: fields));
+        await _sink.PublishAsync(
+            new GameObservationReceived(observation),
+            "adapter.avendar.observation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PublishConnectionObservationAsync(
+        ConnectionStateChanged connection,
+        DateTimeOffset timestamp,
+        CancellationToken cancellationToken)
+    {
+        string text = connection.Reason ?? connection.Status.ToString();
+        IReadOnlyDictionary<string, string> fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["status"] = connection.Status.ToString(),
+            ["host"] = connection.Host ?? string.Empty,
+            ["port"] = connection.Port?.ToString() ?? string.Empty
+        };
+        GameObservation observation = _observationFactory.CreateEvidence(
+            text,
+            timestamp,
+            ObservationKind.ConnectionEvent,
+            new ObservationMetadata(Fields: fields));
+        await _sink.PublishAsync(
+            new GameObservationReceived(observation),
+            "adapter.avendar.observation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ProcessObservationAsync(GameObservation observation, CancellationToken cancellationToken)
+    {
+        _currentSourceSequence = observation.Sequence;
+        _currentObservationSessionId = observation.SessionId;
+        string rawText = observation.RawText;
+
+        // Display and semantics branch from the same immutable source observation.
+        // Presentation transforms can therefore never alter parser evidence.
         await _sink.PublishAsync(new GameTextReceived(rawText), "adapter.avendar.display", cancellationToken)
             .ConfigureAwait(false);
 
@@ -115,21 +228,35 @@ public sealed class AvendarGameAdapter
                     if (AvendarPromptParser.TryParse(prompt.Text, out CharacterPromptObserved? observed) &&
                         observed is not null)
                     {
+                        observed = observed with { SourceSequence = _currentSourceSequence };
                         await _sink.PublishAsync(observed, "adapter.avendar.prompt", cancellationToken)
                             .ConfigureAwait(false);
+                        await _sink.PublishAsync(
+                            new CharacterPromptSnapshotObserved(
+                                AvendarPromptSnapshotParser.FromTelemetry(observed, _currentSourceSequence)),
+                            "adapter.avendar.prompt",
+                            cancellationToken).ConfigureAwait(false);
                         await PublishInputModeAsync(SessionInputMode.Normal, cancellationToken).ConfigureAwait(false);
 
                         RoomObservationObserved? completedRoom = null;
                         if (_roomContentsParser.TryComplete(observed.RoomName, out RoomObservationObserved? room) &&
                             room is not null)
                         {
-                            completedRoom = room;
-                            await _sink.PublishAsync(room, "adapter.avendar.room", cancellationToken)
+                            completedRoom = StampRoomObservation(room, _currentSourceSequence, _currentObservationSessionId);
+                            await _sink.PublishAsync(completedRoom, "adapter.avendar.room", cancellationToken)
                                 .ConfigureAwait(false);
+                            await ReconcileUncorrelatedRoomTransitionAsync(completedRoom, cancellationToken)
+                                .ConfigureAwait(false);
+                            await CompleteSpecialMovementAsync(completedRoom, cancellationToken).ConfigureAwait(false);
                         }
 
-                        await CompleteNavigationResponseAsync(completedRoom is not null, cancellationToken)
+                        await CompleteNavigationResponseAsync(completedRoom, cancellationToken)
                             .ConfigureAwait(false);
+                        if (completedRoom is null)
+                        {
+                            _pendingSpecialMovementCause = null;
+                            _pendingSpecialMovementSequence = 0;
+                        }
                     }
                     else
                     {
@@ -152,10 +279,6 @@ public sealed class AvendarGameAdapter
         }
 
         string plainText = _ansiStripper.Process(Encoding.UTF8.GetBytes(rawText));
-        if (_pendingNavigationResponses.Count > 0 && !string.IsNullOrWhiteSpace(plainText))
-        {
-            _navigationResponseSawText = true;
-        }
         foreach (char value in plainText)
         {
             if (value == '\r')
@@ -190,42 +313,125 @@ public sealed class AvendarGameAdapter
 
     private async Task ProcessLineAsync(string line, CancellationToken cancellationToken)
     {
+        string semanticLine = line;
+        if (AvendarPromptSnapshotParser.TryParseResourceLine(
+                line,
+                _currentSourceSequence,
+                out CharacterPromptSnapshot? resourcePrompt) &&
+            resourcePrompt is not null)
+        {
+            await CompleteLegacyPromptBoundaryAsync(cancellationToken).ConfigureAwait(false);
+            await _sink.PublishAsync(
+                new CharacterPromptSnapshotObserved(resourcePrompt),
+                "adapter.avendar.prompt",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (AvendarPromptSnapshotParser.TryExtractGameClockPrefix(
+                line,
+                _currentSourceSequence,
+                out CharacterPromptSnapshot? clockPrompt,
+                out string remainder) &&
+            clockPrompt is not null)
+        {
+            await CompleteLegacyPromptBoundaryAsync(cancellationToken).ConfigureAwait(false);
+            await _sink.PublishAsync(
+                new CharacterPromptSnapshotObserved(clockPrompt),
+                "adapter.avendar.prompt",
+                cancellationToken).ConfigureAwait(false);
+            semanticLine = remainder;
+            if (string.IsNullOrWhiteSpace(semanticLine))
+            {
+                return;
+            }
+        }
+
+        await TryBeginInferredResponseCaptureAsync(semanticLine, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (_pendingNavigationResponses.Count > 0 &&
+            !string.IsNullOrWhiteSpace(semanticLine) &&
+            !IsPendingNavigationEcho(semanticLine))
+        {
+            _navigationResponseSawText = true;
+        }
+
+        if (semanticLine.Trim().Equals("It is pitch black ...", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_pendingNavigationResponses.Count > 0)
+            {
+                _navigationSawOpaqueRoom = true;
+                _navigationResponseSawText = true;
+                await CompleteNavigationResponseAsync(null, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (_pendingSpecialMovementCause is not null)
+            {
+                MovementCause cause = _pendingSpecialMovementCause.Value;
+                long sourceSequence = Math.Max(_pendingSpecialMovementSequence, _currentSourceSequence);
+                _pendingSpecialMovementCause = null;
+                _pendingSpecialMovementSequence = 0;
+                await _sink.PublishAsync(
+                    new MovementObserved(new MovementObservation(
+                        cause,
+                        MovementResult.SucceededUnknownRoom,
+                        null,
+                        null,
+                        "It is pitch black ...",
+                        sourceSequence)),
+                    "adapter.avendar.navigation",
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         if (_responseMode != ResponseMode.None)
         {
-            _responseLines.Add(line);
+            _responseLines.Add(semanticLine);
+            _responseSourceSequence = _currentSourceSequence;
             if (_responseMode == ResponseMode.Score && !_scoreCorePublished)
             {
                 await TryPublishCompleteScoreCoreAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 
-        IReadOnlyList<IMudEvent> semanticEvents = _semanticParser.ParseLine(line);
+        IReadOnlyList<IMudEvent> semanticEvents = _semanticParser.ParseLine(semanticLine, _currentSourceSequence);
         foreach (IMudEvent mudEvent in semanticEvents)
         {
-            if (mudEvent is NavigationFailed)
+            if (mudEvent is NavigationFailed ||
+                mudEvent is MovementObserved
+                { Movement.Result: MovementResult.Blocked or MovementResult.CombatRestricted })
             {
                 MarkCurrentNavigationFailure();
+            }
+
+            if (mudEvent is MovementObserved movement &&
+                (movement.Movement.Result is MovementResult.SucceededUnknownRoom or MovementResult.Unknown) &&
+                movement.Movement.Cause is not MovementCause.ManualDirection and not MovementCause.MapperRoute)
+            {
+                _pendingSpecialMovementCause = movement.Movement.Cause;
+                _pendingSpecialMovementSequence = movement.Movement.SourceSequence;
             }
 
             await _sink.PublishAsync(mudEvent, "adapter.avendar.semantic", cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        bool communicationClaimed = _communicationParser.TryParse(line, out CommunicationObserved? communication);
+        bool communicationClaimed = _communicationParser.TryParse(semanticLine, out CommunicationObserved? communication);
         if (communication is not null)
         {
             await _sink.PublishAsync(communication, "adapter.avendar.communication", cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        SessionInputModeChanged? session = AvendarSessionParser.ParseLine(line);
+        SessionInputModeChanged? session = AvendarSessionParser.ParseLine(semanticLine);
         if (session is not null)
         {
             await PublishInputModeAsync(session.Mode, cancellationToken).ConfigureAwait(false);
         }
 
         _roomContentsParser.ObserveLine(
-            line,
+            semanticLine,
             claimedByAnotherParser: _responseMode != ResponseMode.None ||
                                     semanticEvents.Count > 0 || communicationClaimed || session is not null);
     }
@@ -307,6 +513,88 @@ public sealed class AvendarGameAdapter
                (inventory.Copper is not null || inventory.Silver is not null || inventory.Gold is not null);
     }
 
+    private async Task CompleteLegacyPromptBoundaryAsync(CancellationToken cancellationToken)
+    {
+        if (_responseMode != ResponseMode.None &&
+            _responseLines.Any(candidate => !string.IsNullOrWhiteSpace(candidate)))
+        {
+            await FinalizeResponseAsync(cancellationToken, complete: true).ConfigureAwait(false);
+        }
+
+        RoomObservationObserved? completedRoom = null;
+        if (_roomContentsParser.TryCompleteLatest(out RoomObservationObserved? room) && room is not null)
+        {
+            completedRoom = StampRoomObservation(room, _currentSourceSequence, _currentObservationSessionId);
+            await _sink.PublishAsync(completedRoom, "adapter.avendar.room", cancellationToken)
+                .ConfigureAwait(false);
+            await ReconcileUncorrelatedRoomTransitionAsync(completedRoom, cancellationToken)
+                .ConfigureAwait(false);
+            await CompleteSpecialMovementAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            _roomContentsParser.Reset();
+        }
+
+        await CompleteNavigationResponseAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+        if (completedRoom is null)
+        {
+            _pendingSpecialMovementCause = null;
+            _pendingSpecialMovementSequence = 0;
+        }
+    }
+
+    private async Task TryBeginInferredResponseCaptureAsync(
+        string line,
+        CancellationToken cancellationToken)
+    {
+        string trimmed = line.Trim();
+        ResponseMode inferred = ResponseMode.None;
+        if (trimmed.EndsWith("'s group:", StringComparison.OrdinalIgnoreCase))
+        {
+            inferred = ResponseMode.Group;
+        }
+        else if (trimmed.Equals("You are affected by the following:", StringComparison.OrdinalIgnoreCase))
+        {
+            inferred = ResponseMode.Effects;
+        }
+        else if (trimmed.StartsWith("You peer intently ", StringComparison.OrdinalIgnoreCase) &&
+                 trimmed.EndsWith(".", StringComparison.Ordinal))
+        {
+            inferred = ResponseMode.Scan;
+        }
+        else if ((trimmed.StartsWith("You study ", StringComparison.OrdinalIgnoreCase) &&
+                  trimmed.Contains(" carefully", StringComparison.OrdinalIgnoreCase)) ||
+                 (trimmed.StartsWith("|", StringComparison.Ordinal) &&
+                  trimmed.Contains("Object:", StringComparison.OrdinalIgnoreCase)))
+        {
+            inferred = ResponseMode.ItemIdentification;
+        }
+
+        if (inferred == ResponseMode.None || inferred == _responseMode)
+        {
+            return;
+        }
+
+        // Structural server evidence wins over command-response guesses. Expert play can
+        // queue commands, so a later ActionDispatching event must not pin parsing to the
+        // wrong response type when an unambiguous group/effect/scan/id frame arrives.
+        if (_responseMode != ResponseMode.None &&
+            _responseLines.Any(candidate => !string.IsNullOrWhiteSpace(candidate)))
+        {
+            await FinalizeResponseAsync(cancellationToken, complete: false).ConfigureAwait(false);
+        }
+
+        _responseMode = inferred;
+        _responseLines.Clear();
+        _responseSourceSequence = _currentSourceSequence;
+        _scoreCorePublished = false;
+        await _sink.PublishAsync(
+            new ResponseCaptureChanged(ToCaptureKind(inferred)),
+            "adapter.avendar.response",
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task BeginResponseCollectionAsync(ActionDispatching action, CancellationToken cancellationToken)
     {
         if (action.Sensitive)
@@ -318,7 +606,10 @@ public sealed class AvendarGameAdapter
 
         if (TryNormalizeMovement(normalized, out string direction))
         {
-            _pendingNavigationResponses.Enqueue(new PendingNavigationResponse(action.ActionId, direction));
+            MovementCause cause = action.Provenance?.Origin == JevMud.Contracts.Actions.CommandOrigin.Mapper
+                ? MovementCause.MapperRoute
+                : MovementCause.ManualDirection;
+            _pendingNavigationResponses.Enqueue(new PendingNavigationResponse(action.ActionId, direction, cause));
             await _sink.PublishAsync(
                 new NavigationAttempted(direction, action.ActionId),
                 "adapter.avendar.navigation",
@@ -378,8 +669,23 @@ public sealed class AvendarGameAdapter
         {
             _responseMode = ResponseMode.Where;
         }
+        else if (normalized.Equals("gr", StringComparison.OrdinalIgnoreCase) ||
+                 normalized.Equals("group", StringComparison.OrdinalIgnoreCase))
+        {
+            _responseMode = ResponseMode.Group;
+        }
+        else if (normalized.Equals("af", StringComparison.OrdinalIgnoreCase) ||
+                 normalized.Equals("affects", StringComparison.OrdinalIgnoreCase))
+        {
+            _responseMode = ResponseMode.Effects;
+        }
+        else if (IsCommand(normalized, "scan") || IsCommand(normalized, "sca"))
+        {
+            _responseMode = ResponseMode.Scan;
+        }
 
         _responseLines.Clear();
+        _responseSourceSequence = 0;
         _scoreCorePublished = false;
         if (_responseMode != ResponseMode.None)
         {
@@ -481,12 +787,43 @@ public sealed class AvendarGameAdapter
                             .ConfigureAwait(false);
                     }
                     break;
+                case ResponseMode.Group:
+                    if (AvendarGroupParser.TryParse(_responseLines, _responseSourceSequence, out GroupSnapshot? group) &&
+                        group is not null)
+                    {
+                        await _sink.PublishAsync(
+                            new GroupSnapshotObserved(group),
+                            "adapter.avendar.group",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    break;
+                case ResponseMode.Effects:
+                    if (AvendarEffectsParser.TryParse(_responseLines, _responseSourceSequence, out ActiveEffectsSnapshot? effects) &&
+                        effects is not null)
+                    {
+                        await _sink.PublishAsync(
+                            new ActiveEffectsSnapshotObserved(effects),
+                            "adapter.avendar.effects",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    break;
+                case ResponseMode.Scan:
+                    if (AvendarScanParser.TryParse(_responseLines, _responseSourceSequence, out ScanObservation? scan) &&
+                        scan is not null)
+                    {
+                        await _sink.PublishAsync(
+                            new ScanUpdated(scan),
+                            "adapter.avendar.scan",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    break;
             }
         }
         finally
         {
             _responseMode = ResponseMode.None;
             _responseLines.Clear();
+            _responseSourceSequence = 0;
             _scoreCorePublished = false;
             await _sink.PublishAsync(
                 new ResponseCaptureChanged(ResponseCaptureKind.None),
@@ -505,6 +842,9 @@ public sealed class AvendarGameAdapter
         ResponseMode.ItemIdentification => ResponseCaptureKind.ItemIdentification,
         ResponseMode.AbilityHelp => ResponseCaptureKind.AbilityHelp,
         ResponseMode.Where => ResponseCaptureKind.Where,
+        ResponseMode.Group => ResponseCaptureKind.Group,
+        ResponseMode.Effects => ResponseCaptureKind.Effects,
+        ResponseMode.Scan => ResponseCaptureKind.Scan,
         _ => ResponseCaptureKind.None
     };
 
@@ -532,6 +872,19 @@ public sealed class AvendarGameAdapter
     private static bool IsCommand(string normalized, string command) =>
         normalized.Equals(command, StringComparison.OrdinalIgnoreCase) ||
         normalized.StartsWith(command + " ", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsPendingNavigationEcho(string line)
+    {
+        if (_pendingNavigationResponses.Count == 0 ||
+            !TryNormalizeMovement(line.Trim(), out string echoedDirection))
+        {
+            return false;
+        }
+
+        return echoedDirection.Equals(
+            _pendingNavigationResponses.Peek().Direction,
+            StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool TryNormalizeMovement(string command, out string direction)
     {
@@ -562,29 +915,124 @@ public sealed class AvendarGameAdapter
         }
     }
 
-    private async Task CompleteNavigationResponseAsync(bool roomObserved, CancellationToken cancellationToken)
+    private async Task CompleteNavigationResponseAsync(
+        RoomObservationObserved? room,
+        CancellationToken cancellationToken)
     {
         if (_pendingNavigationResponses.Count == 0 || !_navigationResponseSawText) return;
 
         PendingNavigationResponse pending = _pendingNavigationResponses.Dequeue();
         _navigationResponseSawText = false;
+        bool opaque = _navigationSawOpaqueRoom;
+        _navigationSawOpaqueRoom = false;
         if (pending.ExplicitFailureObserved) return;
 
+        bool roomObserved = room is not null;
         await _sink.PublishAsync(
             new NavigationResponseCompleted(pending.ActionId, pending.Direction, roomObserved),
             "adapter.avendar.navigation",
             cancellationToken).ConfigureAwait(false);
+        await _sink.PublishAsync(
+            new MovementObserved(new MovementObservation(
+                pending.Cause,
+                roomObserved ? MovementResult.SucceededKnownRoom : MovementResult.SucceededUnknownRoom,
+                pending.Direction,
+                room?.RoomId,
+                opaque ? "It is pitch black ..." : null,
+                _currentSourceSequence,
+                pending.ActionId)),
+            "adapter.avendar.navigation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ReconcileUncorrelatedRoomTransitionAsync(
+        RoomObservationObserved room,
+        CancellationToken cancellationToken)
+    {
+        bool changed = _lastObservedRoomId is not null &&
+            !string.Equals(_lastObservedRoomId, room.RoomId, StringComparison.Ordinal);
+        bool alreadyCorrelated = _pendingNavigationResponses.Count > 0 ||
+            _pendingSpecialMovementCause is not null;
+
+        _lastObservedRoomId = room.RoomId;
+        if (!changed || alreadyCorrelated)
+        {
+            return;
+        }
+
+        // A room transition without a correlated direction/special-movement message is
+        // still authoritative movement evidence. Preserve the unknown cause rather than
+        // inventing teleport/follow semantics. This covers spoken teleports and other
+        // game mechanics whose cause is not explicit in the observed output.
+        await _sink.PublishAsync(
+            new MovementObserved(new MovementObservation(
+                MovementCause.Unknown,
+                MovementResult.SucceededKnownRoom,
+                null,
+                room.RoomId,
+                room.RoomName,
+                room.SourceSequence)),
+            "adapter.avendar.navigation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CompleteSpecialMovementAsync(
+        RoomObservationObserved room,
+        CancellationToken cancellationToken)
+    {
+        if (_pendingSpecialMovementCause is null) return;
+
+        MovementCause cause = _pendingSpecialMovementCause.Value;
+        long sourceSequence = Math.Max(_pendingSpecialMovementSequence, room.SourceSequence);
+        _pendingSpecialMovementCause = null;
+        _pendingSpecialMovementSequence = 0;
+        await _sink.PublishAsync(
+            new MovementObserved(new MovementObservation(
+                cause,
+                cause is MovementCause.Teleport or MovementCause.Summon
+                    ? MovementResult.Teleported
+                    : cause == MovementCause.Forced
+                        ? MovementResult.Forced
+                        : MovementResult.SucceededKnownRoom,
+                null,
+                room.RoomId,
+                room.RoomName,
+                sourceSequence)),
+            "adapter.avendar.navigation",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RoomObservationObserved StampRoomObservation(
+        RoomObservationObserved room,
+        long sourceSequence,
+        string sessionId)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"room-observation|{sessionId}|{sourceSequence}|{room.RoomId}|{room.DescriptionFingerprint}"));
+        return room with
+        {
+            ObservationId = new Guid(hash.AsSpan(0, 16)),
+            SourceSequence = sourceSequence
+        };
     }
 
     private void ResetSessionParsing()
     {
         _streamProcessor.Reset();
         _roomContentsParser.Reset();
+        _observationFactory.Reset();
         _ansiStripper.Reset();
         _lineBuffer.Clear();
         _responseLines.Clear();
         _pendingNavigationResponses.Clear();
         _navigationResponseSawText = false;
+        _navigationSawOpaqueRoom = false;
+        _currentSourceSequence = 0;
+        _currentObservationSessionId = string.Empty;
+        _responseSourceSequence = 0;
+        _pendingSpecialMovementCause = null;
+        _pendingSpecialMovementSequence = 0;
+        _lastObservedRoomId = null;
         _responseMode = ResponseMode.None;
         _scoreCorePublished = false;
         _inputMode = SessionInputMode.Unknown;

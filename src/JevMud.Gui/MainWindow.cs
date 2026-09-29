@@ -22,6 +22,7 @@ using JevMud.Client.Settings;
 using JevMud.Client.Scripting;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.Jev;
 using JevMud.Contracts.State;
 using JevMud.Contracts.Transport;
@@ -1765,7 +1766,7 @@ public sealed class MainWindow : Window
         });
         content.Children.Add(new TextBlock
         {
-            Text = "Version 0.27.1",
+            Text = "Version 0.28.0",
             Foreground = UiTheme.Faint,
             FontSize = UiTheme.TextSm
         });
@@ -1798,8 +1799,9 @@ public sealed class MainWindow : Window
             {
                 switch (envelope.Payload)
                 {
-                    case GameTextReceived game:
-                        _logWriter.Write(game.Text);
+                    case GameObservationReceived observation when
+                        observation.Observation.Kind is ObservationKind.Text or ObservationKind.ReplayMarker:
+                        _logWriter.Write(observation.Observation.RawText);
                         break;
                     case ConnectionStateChanged connection:
                         HandleLoggingConnectionState(connection);

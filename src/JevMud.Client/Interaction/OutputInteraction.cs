@@ -6,6 +6,7 @@ using JevMud.Client.Settings;
 using JevMud.Client.Presentation;
 using JevMud.Contracts.Actions;
 using JevMud.Contracts.Events;
+using JevMud.Contracts.Gameplay;
 using JevMud.Contracts.Jev;
 using JevMud.Core.Events;
 using JevMud.Transport.Text;
@@ -695,8 +696,13 @@ public sealed class ClientInteractionRuntime
             {
                 switch (envelope.Payload)
                 {
-                    case GameTextReceived game:
-                        ProcessServerOutput(game.Text, envelope.Timestamp);
+                    case GameObservationReceived observation when
+                        !observation.Observation.Metadata.IsLocal &&
+                        observation.Observation.Kind is ObservationKind.Text or ObservationKind.ReplayMarker:
+                        ProcessServerOutput(
+                            observation.Observation.RawText,
+                            observation.Observation.ReceivedAt,
+                            replay: observation.Observation.Kind == ObservationKind.ReplayMarker);
                         break;
                     case ActionDispatching action when CommandInputPolicy.ShouldEchoToTranscript(action.Sensitive):
                         if ((_settings().Input ?? new InputPreferences()).LocalEcho)

@@ -81,6 +81,15 @@ public sealed partial class AvendarRoomContentsParser
                 contents.Add(ClassifyPostExitContent(captured.Text));
             }
 
+            for (int index = 0; index < contents.Count; index++)
+            {
+                RoomContentObservation content = contents[index];
+                contents[index] = content with
+                {
+                    OccurrenceId = CreateOccurrenceId(fingerprint, index, content.Description)
+                };
+            }
+
             observed = new RoomObservationObserved(
                 RoomId: $"avendar:{fingerprint[..16]}",
                 RoomName: roomName,
@@ -98,6 +107,51 @@ public sealed partial class AvendarRoomContentsParser
         {
             Reset();
         }
+    }
+
+    public bool TryCompleteLatest(out RoomObservationObserved? observed)
+    {
+        int exitsIndex = -1;
+        for (int index = _lines.Count - 1; index >= 0; index--)
+        {
+            if (ExitsRegex().IsMatch(_lines[index].Text))
+            {
+                exitsIndex = index;
+                break;
+            }
+        }
+
+        if (exitsIndex < 2)
+        {
+            observed = null;
+            return false;
+        }
+
+        for (int index = exitsIndex - 2; index >= 0; index--)
+        {
+            string candidate = _lines[index].Text;
+            if (string.IsNullOrWhiteSpace(candidate) || char.IsWhiteSpace(candidate[0]))
+            {
+                continue;
+            }
+
+            string next = _lines[index + 1].Text;
+            if (next.Length == 0 || !char.IsWhiteSpace(next[0]))
+            {
+                continue;
+            }
+
+            string roomName = candidate.Trim();
+            if (roomName.Length == 0 || IsNonRoomMessage(roomName))
+            {
+                continue;
+            }
+
+            return TryComplete(roomName, out observed);
+        }
+
+        observed = null;
+        return false;
     }
 
     public void Reset() => _lines.Clear();
@@ -189,8 +243,8 @@ public sealed partial class AvendarRoomContentsParser
         string body = match.Groups["body"].Value;
         foreach (string rawToken in body.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            bool closed = rawToken.StartsWith('(') && rawToken.EndsWith(')');
-            string token = closed ? rawToken[1..^1] : rawToken;
+            bool parenthesized = rawToken.StartsWith('(') && rawToken.EndsWith(')');
+            string token = parenthesized ? rawToken[1..^1] : rawToken;
             string? direction = NormalizeDirection(token);
             if (direction is null)
             {
@@ -200,9 +254,12 @@ public sealed partial class AvendarRoomContentsParser
             exits.Add(new RoomExitObservation(
                 direction,
                 Exists: true,
-                DoorState: closed ? ExitDoorState.Closed : ExitDoorState.Unknown,
-                Traversability: closed ? ExitTraversability.Blocked : ExitTraversability.Traversable,
-                BlockReason: closed ? "closed" : null));
+                DoorState: ExitDoorState.Unknown,
+                Traversability: parenthesized ? ExitTraversability.Unknown : ExitTraversability.Traversable)
+            {
+                RawToken = rawToken,
+                Qualifiers = parenthesized ? new[] { "parenthesized" } : Array.Empty<string>()
+            });
         }
 
         return new ReadOnlyCollection<RoomExitObservation>(exits.ToArray());
@@ -211,9 +268,14 @@ public sealed partial class AvendarRoomContentsParser
     private static RoomContentObservation ClassifyPostExitContent(string line)
     {
         string description = line.Trim();
-        if (LooksLikeCorpse(description))
+        AvendarEntityObservationParser.ParsedEntityText parsed =
+            AvendarEntityObservationParser.ParseDecorators(description);
+        string undecorated = parsed.Undecorated;
+
+        RoomContentObservation content;
+        if (LooksLikeCorpse(undecorated))
         {
-            return new RoomContentObservation(
+            content = new RoomContentObservation(
                 description,
                 Kind: RoomEntityKind.Corpse,
                 Traits: RoomEntityTraits.Examinable |
@@ -223,49 +285,56 @@ public sealed partial class AvendarRoomContentsParser
                         RoomEntityTraits.Corpse,
                 TargetKeywords: Keywords("corpse"));
         }
-
-        if (AvendarRoomEntityClassifier.IsFixtureSubject(description))
+        else if (AvendarRoomEntityClassifier.IsFixtureSubject(undecorated))
         {
-            return CreateFixture(description);
+            content = CreateFixture(description, undecorated);
         }
-
-        if (char.IsWhiteSpace(line[0]))
+        else if (char.IsWhiteSpace(line[0]))
         {
-            return new RoomContentObservation(
+            content = new RoomContentObservation(
                 description,
                 Kind: RoomEntityKind.Object,
-                Traits: RoomEntityTraits.Examinable | ReadableTrait(description),
-                TargetKeywords: ExtractKnownKeywords(description));
+                Traits: RoomEntityTraits.Examinable | ReadableTrait(undecorated),
+                TargetKeywords: ExtractKnownKeywords(undecorated));
+        }
+        else
+        {
+            content = new RoomContentObservation(
+                description,
+                CanonicalName: AvendarRoomEntityClassifier.ExtractOccupantCanonicalName(undecorated),
+                Kind: RoomEntityKind.Occupant,
+                Traits: RoomEntityTraits.Mobile | RoomEntityTraits.Examinable);
         }
 
-        IReadOnlyList<string> decorators = StripDecorators(description).Decorators;
-        return new RoomContentObservation(
-            description,
-            CanonicalName: AvendarRoomEntityClassifier.ExtractOccupantCanonicalName(description),
-            Kind: RoomEntityKind.Occupant,
-            Traits: RoomEntityTraits.Mobile | RoomEntityTraits.Examinable,
-            TargetKeywords: null,
-            Decorators: decorators.Count == 0 ? null : decorators);
+        return content with
+        {
+            Count = parsed.Count,
+            Decorators = parsed.Qualifiers.Count == 0 ? null : parsed.Qualifiers,
+            StateFlags = parsed.StateFlags
+        };
     }
 
-    private static RoomContentObservation CreateFixture(string description)
+    private static RoomContentObservation CreateFixture(string description) =>
+        CreateFixture(description, AvendarEntityObservationParser.ParseDecorators(description).Undecorated);
+
+    private static RoomContentObservation CreateFixture(string description, string undecorated)
     {
-        RoomEntityTraits traits = RoomEntityTraits.Fixture | RoomEntityTraits.Examinable | ReadableTrait(description);
-        if (ContainsWord(description, "fountain"))
+        RoomEntityTraits traits = RoomEntityTraits.Fixture | RoomEntityTraits.Examinable | ReadableTrait(undecorated);
+        if (ContainsWord(undecorated, "fountain"))
         {
             traits |= RoomEntityTraits.Drinkable;
         }
-        if (ContainsWord(description, "bin") || ContainsWord(description, "bins"))
+        if (ContainsWord(undecorated, "bin") || ContainsWord(undecorated, "bins"))
         {
             traits |= RoomEntityTraits.Container;
         }
 
         return new RoomContentObservation(
             description,
-            CanonicalName: AvendarRoomEntityClassifier.ExtractFixtureCanonicalName(description),
+            CanonicalName: AvendarRoomEntityClassifier.ExtractFixtureCanonicalName(undecorated),
             Kind: RoomEntityKind.Fixture,
             Traits: traits,
-            TargetKeywords: ExtractKnownKeywords(description));
+            TargetKeywords: ExtractKnownKeywords(undecorated));
     }
 
     private static RoomEntityTraits ReadableTrait(string description) =>
@@ -311,6 +380,13 @@ public sealed partial class AvendarRoomContentsParser
         }
 
         return (remaining, new ReadOnlyCollection<string>(decorators.ToArray()));
+    }
+
+    private static Guid CreateOccurrenceId(string fingerprint, int index, string description)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{fingerprint}|{index}|{description}"));
+        return new Guid(hash.AsSpan(0, 16));
     }
 
     private static bool IsNonRoomMessage(string line)
