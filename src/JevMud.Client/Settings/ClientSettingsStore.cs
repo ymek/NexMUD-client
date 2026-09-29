@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JevMud.Contracts.Jev;
+using JevMud.Client.Interaction;
 
 namespace JevMud.Client.Settings;
 
@@ -159,12 +160,15 @@ public sealed class ClientSettingsStore
             })
             .ToArray();
         CommandKeyBinding[] keyBindings = (settings.KeyBindings ?? Array.Empty<CommandKeyBinding>())
-            .Where(binding => !string.IsNullOrWhiteSpace(binding.Gesture) && !string.IsNullOrWhiteSpace(binding.Command))
-            .Take(100)
+            .Where(binding => !string.IsNullOrWhiteSpace(binding.Gesture) &&
+                              (binding.Action != KeybindingActionKind.SendCommand || !string.IsNullOrWhiteSpace(binding.Command)))
+            .Take(250)
             .Select(binding => binding with
             {
                 Gesture = binding.Gesture.Trim(),
-                Command = binding.Command.Trim()
+                Command = binding.Command?.Trim() ?? string.Empty,
+                Name = string.IsNullOrWhiteSpace(binding.Name) ? null : binding.Name.Trim(),
+                Priority = Math.Clamp(binding.Priority, -10_000, 10_000)
             })
             .ToArray();
         WorkspacePreferences workspace = settings.Workspace ?? new WorkspacePreferences();
@@ -197,6 +201,41 @@ public sealed class ClientSettingsStore
         {
             commandSeparator = ";";
         }
+        InputPreferences input = settings.Input ?? new InputPreferences();
+        input = input with
+        {
+            HistoryMaximumEntries = Math.Clamp(input.HistoryMaximumEntries, 1, 10_000),
+            CompletionTokenLimit = Math.Clamp(input.CompletionTokenLimit, 100, 50_000)
+        };
+        OutputPreferences output = settings.Output ?? new OutputPreferences();
+        output = output with
+        {
+            ScrollbackMaximumEntries = Math.Clamp(output.ScrollbackMaximumEntries, 250, 100_000)
+        };
+        OutputTransformationRule[] outputRules = (settings.OutputRules ?? Array.Empty<OutputTransformationRule>())
+            .Where(rule => !string.IsNullOrWhiteSpace(rule.Id) &&
+                           !string.IsNullOrWhiteSpace(rule.Name) &&
+                           !string.IsNullOrWhiteSpace(rule.Pattern))
+            .Take(250)
+            .Select(rule => rule with
+            {
+                Id = rule.Id.Trim(),
+                Name = rule.Name.Trim(),
+                Pattern = rule.Pattern.Length > 4096 ? rule.Pattern[..4096] : rule.Pattern,
+                Priority = Math.Clamp(rule.Priority, -10_000, 10_000),
+                Actions = (rule.Actions ?? Array.Empty<OutputRuleAction>())
+                    .Take(16)
+                    .Select(action => action with
+                    {
+                        Text = action.Text is { Length: > 4096 } ? action.Text[..4096] : action.Text,
+                        Foreground = NormalizeOptionalColor(action.Foreground),
+                        Background = NormalizeOptionalColor(action.Background)
+                    })
+                    .ToArray()
+            })
+            .Where(rule => rule.EffectiveActions.Count > 0)
+            .ToArray();
+
         MapperPreferences mapper = settings.Mapper ?? new MapperPreferences();
         mapper = mapper with
         {
@@ -231,10 +270,20 @@ public sealed class ClientSettingsStore
             Automation = automation,
             Protocols = protocols,
             Mapper = mapper,
-            CommandSeparator = commandSeparator
+            CommandSeparator = commandSeparator,
+            Input = input,
+            Output = output,
+            OutputRules = outputRules
         };
     }
 
+
+    private static string? NormalizeOptionalColor(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        string normalized = value.Trim().ToUpperInvariant();
+        return IsHexColor(normalized) ? normalized : null;
+    }
 
     private static string NormalizeDoorOpenTemplate(string? value)
     {

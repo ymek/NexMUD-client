@@ -112,7 +112,7 @@ required_literals = {
     "lossless raw display publication": 'new GameTextReceived(rawText)',
     "split-view transcript": 'Text = "LIVE OUTPUT"',
     "transcript logger": 'TranscriptLogWriter _logWriter',
-    "transcript highlighter": 'TranscriptHighlighter _highlighter',
+    "typed output transformation pipeline": "class OutputTransformationService",
     "highlight settings page": 'SettingsPage.Highlights',
     "macOS application name": 'Name = "NexMUD"',
     "neutral telnet identity": 'TerminalType = "xterm-256color"',
@@ -151,7 +151,7 @@ required_literals = {
     "mapper shared execution scope": "ScriptOwnerKind.MapperRoute",
     "scripting platform composition root": "class ClientScriptPlatform",
     "automation settings page": "SettingsPage.Automation",
-    "transcript search": 'PlaceholderText = "Search server output"',
+    "logical scrollback search": "WorldBufferSearchOptions",
     "command palette": 'Title = "NexMUD Command Palette"',
     "plain transcript log format": "TranscriptLogFormat.PlainText",
     "json transcript log format": "TranscriptLogFormat.JsonLines",
@@ -169,12 +169,12 @@ required_literals = {
     "Jev persistent context": "IReadOnlyList<ExecutedCommandKnowledge> RecentCommands",
     "source-aware executed command history": "CREATE TABLE IF NOT EXISTS action_history",
     "source-aware action events": "DecisionSource Source = DecisionSource.Human",
-    "GUI command local echo": "AppendCommandEcho(ActionDispatching action)",
+    "provenance-aware local echo": "AppendCommandEcho(ActionDispatching action, DateTimeOffset timestamp)",
     "Jev-labeled automated command echo": '\"[Jev] > \"',
     "normalized semantic help prose": "NormalizeWhitespace(string.Join(\" \", description))",
     "knowledge codex": "BuildKnowledgePanel",
-    "persistent command history UI": "RestoreCommandHistoryAsync",
-    "contextual tab completion": "BuildCompletionCandidates",
+    "persistent command history service": "Interaction.Input.RestoreHistoryAsync",
+    "contextual tab completion service": "class CompletionService",
     "configurable command hotkeys": "CommandKeyBinding",
     "flat command palette": 'Text = "COMMAND PALETTE"',
     "macOS primary shortcut support": "KeyModifiers.Meta",
@@ -328,9 +328,35 @@ if "ClearSearchAfterSelection();\n        await PlanRouteAsync()" not in mapper_
     fail("mapper selection must clear its originating query before asynchronous route planning")
 if "await PlanRouteAsync().ConfigureAwait(true);\n        ClearSearchAfterSelection();" in mapper_workspace_text:
     fail("stale route planning may not clear a newer mapper search")
-for literal in ("RenderedTranscriptSegmentLimit", "TrimRenderedTranscriptIfNeeded()", "IndexCompletionText(string.Concat(segments.Select(segment => segment.Text)))", "_completionTokenRecency"):
+interaction_input_text = (ROOT / "src/JevMud.Client/Interaction/InputInteraction.cs").read_text(encoding="utf-8")
+interaction_output_text = (ROOT / "src/JevMud.Client/Interaction/OutputInteraction.cs").read_text(encoding="utf-8")
+interaction_keybinding_text = (ROOT / "src/JevMud.Client/Interaction/Keybindings.cs").read_text(encoding="utf-8")
+for literal in ("RenderedTranscriptSegmentLimit", "TrimRenderedTranscriptIfNeeded()", "_runtime.Interaction.World.Appended += HandleWorldBufferAppended"):
     if literal not in main_window_text:
-        fail(f"transcript performance/completion invariant missing: {literal}")
+        fail(f"logical transcript projection invariant missing: {literal}")
+for literal in ("class CommandHistoryService", "class CompletionService", "class InputPipeline", "CommandBatchSplitter.Split", "_aliases.TryResolveAsync"):
+    if literal not in interaction_input_text:
+        fail(f"interaction input ownership invariant missing: {literal}")
+for literal in ("record OutputFrame", "class OutputTransformationService", "class WorldBuffer", "SourceFrames.Append(frame)", "CreatePresentation(frame)"):
+    if literal not in interaction_output_text:
+        fail(f"interaction output ownership invariant missing: {literal}")
+if "case GameTextReceived game:" in main_window_text and "ProcessServerOutput" in main_window_text:
+    fail("Avalonia must project WorldBuffer rather than transform GameTextReceived itself")
+if "_completionTokenRecency" in main_window_text or "BuildCompletionCandidates" in main_window_text:
+    fail("Avalonia must not retain UI-local completion ownership")
+if "_runtime.Interaction.Frames.Reset()" in main_window_text:
+    fail("Avalonia must not own output parser/transformation lifecycle resets")
+if ".LoadAsync(preferences.HistoryMaximumEntries" not in interaction_input_text:
+    fail("persistent history restore must honor the configured history capacity")
+if "PublishAppended(entry)" not in interaction_output_text or "GetInvocationList()" not in interaction_output_text:
+    fail("logical output/view notifications must isolate subscriber faults from the output worker")
+if "FindMatches(matcher, rendered)" not in interaction_output_text:
+    fail("highlight matching must use the full rendered line so ANSI run boundaries do not break matches")
+contracts_actions_text = (ROOT / "src/JevMud.Contracts/Actions/MudActions.cs").read_text(encoding="utf-8")
+script_host_contracts_text = (ROOT / "src/JevMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
+for literal in ("User = 0", "Automation = 1", "Jev = 2", "Mapper = 3", "Script = 4", "System = 5", "Alias = 6", "Keybinding = 7"):
+    if literal not in contracts_actions_text or literal not in script_host_contracts_text:
+        fail(f"command provenance enum compatibility invariant missing: {literal}")
 contracts_events_text = (ROOT / "src/JevMud.Contracts/Events/MudEvents.cs").read_text(encoding="utf-8")
 adapter_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
 knowledge_text = (ROOT / "src/JevMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text(encoding="utf-8")
@@ -1048,15 +1074,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.26.5"):
-    fail("README current version must be NexMUD 0.26.5")
-if '<Version>0.26.5</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.26.5 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.27.0"):
+    fail("README current version must be NexMUD 0.27.0")
+if '<Version>0.27.0</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.27.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.26.5</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.26.5")
-if '<string>26005</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 26005 for NexMUD 0.26.5")
+if '<string>0.27.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.27.0")
+if '<string>27000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 27000 for NexMUD 0.27.0")
 item_inspection_text = (ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1073,11 +1099,13 @@ if "CommandAliasExpander.TryExpand" not in alias_input_text or "CommandBatchSpli
     fail("alias expansion must occur before final command-batch splitting")
 if "SplitPreservingEscapes" not in alias_input_text:
     fail("alias command planning must preserve escaped separators until final expansion")
-if "CommandInputExpander.Expand" not in main_window_text:
-    fail("Avalonia command submission must use the shared alias/batch expansion stage")
+if "_runtime.Interaction.Input.SubmitAsync" not in main_window_text:
+    fail("Avalonia command submission must use the shared interaction input pipeline")
 tui_main_window_text = (ROOT / "src/JevMud.Tui/Views/MainWindow.cs").read_text(encoding="utf-8")
-if "CommandInputExpander.Expand" not in tui_main_window_text:
-    fail("TUI command submission must use the shared alias/batch expansion stage")
+if "_runtime.Interaction.Input.SubmitAsync" not in tui_main_window_text:
+    fail("TUI command submission must use the shared interaction input pipeline")
+if "_runtime.Interaction.World.Appended += HandleWorldBufferAppended" not in tui_main_window_text:
+    fail("TUI world output must project the shared logical WorldBuffer")
 
 # 0.19.x gameplay shell compile-safety
 gameplay_shell_text = (ROOT / "src/JevMud.Gui/GameplayShellViewModels.cs").read_text(encoding="utf-8")
@@ -1389,10 +1417,11 @@ for literal in (
     '_gameScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;',
     '_liveScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;',
     'NormalizeTranscriptFontSize(double fontSize) => Math.Clamp(fontSize, 8, 24)',
-    'visibleText = _displayLineEndings.Process(visibleText);',
 ):
     if literal not in (nex_design_text + main_window_text):
         fail(f"0.21.0 terminal presentation invariant missing: {literal}")
+if "_presentationLineEndings.Process(displayRaw)" not in interaction_output_text:
+    fail("display line-ending normalization must remain in the presentation-only output path")
 for literal in (
     'private bool _pendingCarriageReturn;',
     "if (text[index + 1] == '\\n')",

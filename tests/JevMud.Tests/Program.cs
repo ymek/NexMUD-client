@@ -14,6 +14,7 @@ using JevMud.Client.Runtime;
 using JevMud.Client.Presentation;
 using JevMud.Client.Logging;
 using JevMud.Client.Knowledge;
+using JevMud.Client.Interaction;
 using JevMud.Client.Navigation;
 using JevMud.Client.Scripting;
 using JevMud.Scripting.Compilation;
@@ -126,6 +127,19 @@ public static class Program
         await RunAsync("command aliases expand positional arguments", CommandAliasesExpandArguments);
         await RunAsync("alias expansions execute command batches", AliasExpansionsExecuteCommandBatches);
         await RunAsync("command separator batches preserve order and escapes", CommandSeparatorSplitsInput);
+        await RunAsync("interaction input pipeline records history and preserves command order", InteractionInputPipelinePreservesHistoryAndOrder);
+        await RunAsync("generated interaction commands do not pollute manual history", InteractionGeneratedCommandsDoNotPolluteHistory);
+        await RunAsync("interaction history restores in-progress input", InteractionHistoryRestoresInProgressBuffer);
+        await RunAsync("interaction completion preserves MUD names and reverses stable cycle", InteractionCompletionPreservesMudNames);
+        await RunAsync("interaction keybindings resolve context and expose conflicts", InteractionKeybindingsResolveContextAndConflicts);
+        await RunAsync("output transformation preserves source while substituting highlighting and gagging", OutputTransformationPreservesSourceData);
+        await RunAsync("output highlighting spans ANSI run boundaries", OutputHighlightSpansAnsiRuns);
+        await RunAsync("world buffer subscribers cannot fault output processing", WorldBufferSubscriberFailureIsIsolated);
+        await RunAsync("interaction replay produces deterministic rendered output", InteractionReplayIsDeterministic);
+        await RunAsync("interaction local echo remains separate from server source", InteractionLocalEchoIsSeparate);
+        await RunAsync("output rule failures are isolated and diagnosed", OutputRuleFailuresAreIsolated);
+        await RunAsync("command provenance enum values remain backward compatible", CommandOriginValuesRemainCompatible);
+        await RunAsync("world scrollback is bounded and searchable", WorldScrollbackIsBoundedAndSearchable);
         await RunAsync("automation expressions support OR predicates variables and entity functions", AutomationExpressionsSupportRichPredicates);
         await RunAsync("automation rules yield to the human override window without dropping commands", AutomationRulesWaitForHumanOverride);
         await RunAsync("automation workflow settings round trip", AutomationWorkflowSettingsRoundTrip);
@@ -2493,6 +2507,291 @@ public static class Program
         return Task.CompletedTask;
     }
 
+    private static async Task InteractionInputPipelinePreservesHistoryAndOrder()
+    {
+        ClientSettings settings = ClientSettings.Default with { CommandSeparator = ";" };
+        CommandHistoryService history = new(maximumEntries: 10);
+        CompletionService completion = new();
+        InputPipeline pipeline = new(() => settings, history, completion);
+        List<string> dispatched = [];
+
+        InputSubmissionResult result = await pipeline.SubmitAsync(
+            new InputRequest(InputSourceKind.Keyboard, @"n;say one\;two;look", DateTimeOffset.UtcNow, Guid.NewGuid()),
+            SessionInputMode.Normal,
+            (command, _) =>
+            {
+                dispatched.Add(command);
+                return Task.FromResult(new LocalCommandResult(false));
+            });
+
+        Assert.SequenceEqual(new[] { "n", "say one;two", "look" }, result.Commands);
+        Assert.SequenceEqual(result.Commands, dispatched);
+        Assert.Equal(@"n;say one\;two;look", Assert.Single(history.Snapshot()));
+    }
+
+    private static async Task InteractionGeneratedCommandsDoNotPolluteHistory()
+    {
+        ClientSettings settings = ClientSettings.Default;
+        CommandHistoryService history = new(maximumEntries: 10);
+        CompletionService completion = new();
+        InputPipeline pipeline = new(() => settings, history, completion);
+
+        await pipeline.SubmitAsync(
+            new InputRequest(InputSourceKind.Mapper, "north", DateTimeOffset.UtcNow, Guid.NewGuid()),
+            SessionInputMode.Normal,
+            (_, _) => Task.FromResult(new LocalCommandResult(false)));
+
+        Assert.Equal(0, history.Snapshot().Count);
+    }
+
+    private static Task InteractionHistoryRestoresInProgressBuffer()
+    {
+        CommandHistoryService history = new(maximumEntries: 3, deduplicateConsecutive: true);
+        history.Add("look");
+        history.Add("north");
+        history.Add("north");
+        history.Add("score");
+
+        Assert.Equal("score", history.Previous("say unfinished"));
+        Assert.Equal("north", history.Previous("ignored"));
+        Assert.Equal("score", history.Next());
+        Assert.Equal("say unfinished", history.Next());
+        Assert.SequenceEqual(new[] { "look", "north", "score" }, history.Snapshot());
+        return Task.CompletedTask;
+    }
+
+    private static Task InteractionCompletionPreservesMudNames()
+    {
+        CompletionService completion = new(tokenLimit: 100);
+        completion.IndexText("Laoris hands you the axe Xchilwnsdhg'rta");
+        completion.IndexText("Xcali waits nearby");
+
+        IReadOnlyList<string> candidates = completion.Find(new CompletionContext("xc"));
+        Assert.True(candidates.Contains("Xchilwnsdhg'rta", StringComparer.OrdinalIgnoreCase), "Apostrophe-containing MUD name was split during completion indexing.");
+        Assert.Equal("Xcali", candidates[0]);
+
+        string? first = completion.Cycle("xc", candidates, reverse: false);
+        string? second = completion.Cycle("xc", candidates, reverse: false);
+        string? reversed = completion.Cycle("xc", candidates, reverse: true);
+        Assert.Equal(candidates[0], first);
+        Assert.Equal(candidates[1], second);
+        Assert.Equal(candidates[0], reversed);
+        return Task.CompletedTask;
+    }
+
+    private static Task InteractionKeybindingsResolveContextAndConflicts()
+    {
+        KeybindingService service = new();
+        CommandKeyBinding global = new("Ctrl+L", "look", Context: KeybindingContext.Global, Action: KeybindingActionKind.SendCommand, Priority: 1);
+        CommandKeyBinding input = new("Ctrl+L", "clear", Context: KeybindingContext.Input, Action: KeybindingActionKind.ClearInput, Priority: 5);
+        service.Configure([global, input]);
+
+        KeybindingResolution exact = service.Resolve("Ctrl+L", KeybindingContext.Input);
+        Assert.Equal(input, exact.Binding);
+        KeybindingResolution fallback = service.Resolve("Ctrl+L", KeybindingContext.Mapper);
+        Assert.Equal(global, fallback.Binding);
+
+        service.Configure([
+            global,
+            global with { Command = "score", Name = "duplicate" }
+        ]);
+        KeybindingResolution conflict = service.Resolve("Ctrl+L", KeybindingContext.Global);
+        Assert.True(conflict.HasConflict, "Equal-priority keybinding collision should be explicit.");
+        Assert.Equal(1, service.Conflicts().Count);
+        return Task.CompletedTask;
+    }
+
+    private static Task OutputTransformationPreservesSourceData()
+    {
+        OutputTransformationRule[] rules =
+        [
+            new("capture", "Tell capture", @"^(\w+) tells you '(.*)'$", OutputRuleMatchType.Regex, Actions: [new OutputRuleAction(OutputRuleActionKind.Capture)]),
+            new("sub", "Guard substitution", "A cityguard says 'Halt!'", Actions: [new OutputRuleAction(OutputRuleActionKind.Substitute, "[Guard] Halt!")]),
+            new("highlight", "Guard highlight", "[Guard]", Priority: 10, Actions: [new OutputRuleAction(OutputRuleActionKind.Highlight, Foreground: "#FFD166", Bold: true)]),
+            new("gag", "Hunger gag", "You are hungry.", Actions: [new OutputRuleAction(OutputRuleActionKind.Gag)])
+        ];
+        ClientSettings settings = ClientSettings.Default with { OutputRules = rules };
+        ClientInteractionRuntime runtime = new(() => settings);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        WorldBufferEntry substituted = runtime.ProcessServerOutput("A cityguard says 'Halt!'\n", now)!;
+        OutputFrame source = runtime.SourceFrames.Find(substituted.SourceFrameId)!;
+        Assert.Equal("A cityguard says 'Halt!'\n", source.RawText);
+        Assert.True(substituted.RenderedText.Contains("[Guard] Halt!", StringComparison.Ordinal), "Substitution did not affect rendered projection.");
+        Assert.True(substituted.StyledRuns.Any(run => run.Override?.Foreground == "#FFD166"), "Highlight did not compose over substituted text.");
+
+        WorldBufferEntry capture = runtime.ProcessServerOutput("Laoris tells you 'hello'", now.AddSeconds(1))!;
+        Assert.True(capture.Captures.Any(item => item.Values.TryGetValue("1", out string? speaker) && speaker == "Laoris"), "Regex capture groups were not preserved as structured data.");
+
+        WorldBufferEntry gagged = runtime.ProcessServerOutput("You are hungry.\n", now.AddSeconds(2))!;
+        Assert.True(gagged.IsGagged, "Gag rule did not suppress display projection.");
+        Assert.True(runtime.SourceFrames.Find(gagged.SourceFrameId) is not null, "Gagging destroyed the source output frame.");
+        Assert.False(runtime.World.Snapshot().Any(entry => entry.EntryId == gagged.EntryId), "Gagged entry leaked into visible scrollback.");
+        Assert.True(runtime.World.Snapshot(includeGagged: true).Any(entry => entry.EntryId == gagged.EntryId), "Gagged entry was not retained as logical source-linked scrollback metadata.");
+        return Task.CompletedTask;
+    }
+
+    private static Task OutputHighlightSpansAnsiRuns()
+    {
+        OutputTransformationService service = new();
+        service.Configure(
+        [
+            new OutputTransformationRule(
+                "cross-run",
+                "Cross run",
+                "guard",
+                Actions: [new OutputRuleAction(OutputRuleActionKind.Highlight, Foreground: "#FFD166")])
+        ],
+        legacyHighlights: null);
+
+        OutputFrame frame = new(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow,
+            "guard",
+            "guard",
+            [
+                new AnsiTextSegment("gu", AnsiTextStyle.Default with { Bold = true }),
+                new AnsiTextSegment("ard", AnsiTextStyle.Default)
+            ],
+            false,
+            OutputFrameSource.Server,
+            1);
+
+        WorldBufferEntry entry = service.Transform(frame).Entry;
+        Assert.Equal("guard", string.Concat(entry.StyledRuns.Select(run => run.Text)));
+        Assert.True(entry.StyledRuns.Where(run => run.Text.Length > 0).All(run => run.Override?.Foreground == "#FFD166"),
+            "Highlight did not span source ANSI run boundaries.");
+        return Task.CompletedTask;
+    }
+
+    private static Task WorldBufferSubscriberFailureIsIsolated()
+    {
+        WorldBuffer buffer = new();
+        int observed = 0;
+        buffer.Appended += _ => throw new InvalidOperationException("test subscriber fault");
+        buffer.Appended += _ => observed++;
+        string text = "still visible";
+        buffer.Append(new WorldBufferEntry(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow,
+            Guid.NewGuid(),
+            text,
+            [new WorldStyledRun(text, AnsiTextStyle.Default)],
+            false,
+            false,
+            false,
+            OutputFrameSource.Server,
+            [],
+            []));
+
+        Assert.Equal(1, observed);
+        Assert.Equal(1, buffer.Snapshot().Count);
+        return Task.CompletedTask;
+    }
+
+    private static Task InteractionReplayIsDeterministic()
+    {
+        OutputTransformationRule[] rules =
+        [
+            new("sub", "Guard substitution", "A cityguard says 'Halt!'", Actions: [new OutputRuleAction(OutputRuleActionKind.Substitute, "[Guard] Halt!")]),
+            new("gag", "Hunger gag", "You are hungry.", Actions: [new OutputRuleAction(OutputRuleActionKind.Gag)]),
+            new("capture", "Tell capture", @"^(\w+) tells you '(.*)'$", OutputRuleMatchType.Regex, Actions: [new OutputRuleAction(OutputRuleActionKind.Capture)])
+        ];
+        ClientSettings settings = ClientSettings.Default with { OutputRules = rules };
+        ClientInteractionRuntime first = new(() => settings);
+        ClientInteractionRuntime second = new(() => settings);
+        DateTimeOffset timestamp = new(2026, 9, 28, 12, 0, 0, TimeSpan.Zero);
+
+        WorldBufferEntry firstEntry = first.ProcessServerOutput("A cityguard says 'Halt!'\n", timestamp, replay: true)!;
+        WorldBufferEntry secondEntry = second.ProcessServerOutput("A cityguard says 'Halt!'\n", timestamp, replay: true)!;
+        Assert.Equal(firstEntry.RenderedText, secondEntry.RenderedText);
+        Assert.Equal(firstEntry.IsGagged, secondEntry.IsGagged);
+        Assert.Equal(OutputFrameSource.Replay, firstEntry.Source);
+        Assert.Equal(OutputFrameSource.Replay, secondEntry.Source);
+
+        WorldBufferEntry firstCapture = first.ProcessServerOutput("Laoris tells you 'hello'", timestamp.AddSeconds(1), replay: true)!;
+        WorldBufferEntry secondCapture = second.ProcessServerOutput("Laoris tells you 'hello'", timestamp.AddSeconds(1), replay: true)!;
+        Assert.Equal(
+            firstCapture.Captures.Single().Values["1"],
+            secondCapture.Captures.Single().Values["1"]);
+        return Task.CompletedTask;
+    }
+
+    private static Task InteractionLocalEchoIsSeparate()
+    {
+        ClientInteractionRuntime runtime = new(() => ClientSettings.Default);
+        DateTimeOffset timestamp = DateTimeOffset.UtcNow;
+        WorldBufferEntry entry = runtime.AppendLocalEcho("> look\n", timestamp);
+        OutputFrame source = runtime.SourceFrames.Find(entry.SourceFrameId)!;
+
+        Assert.True(entry.IsLocalEcho, "Local echo entry was not marked as local echo.");
+        Assert.Equal(OutputFrameSource.LocalEcho, entry.Source);
+        Assert.Equal(OutputFrameSource.LocalEcho, source.Source);
+        Assert.Equal("> look\n", source.RawText);
+        return Task.CompletedTask;
+    }
+
+    private static Task OutputRuleFailuresAreIsolated()
+    {
+        ClientSettings settings = ClientSettings.Default with
+        {
+            OutputRules =
+            [
+                new("invalid", "Invalid regex", "(", OutputRuleMatchType.Regex, Actions: [new OutputRuleAction(OutputRuleActionKind.Gag)]),
+                new("valid", "Valid highlight", "guard", Actions: [new OutputRuleAction(OutputRuleActionKind.Highlight, Foreground: "#FFD166")])
+            ]
+        };
+        ClientInteractionRuntime runtime = new(() => settings);
+        List<OutputRuleDiagnostic> diagnostics = [];
+        runtime.RuleDiagnostic += diagnostics.Add;
+        runtime.Configure(settings);
+
+        WorldBufferEntry entry = runtime.ProcessServerOutput("A guard arrives.\n", DateTimeOffset.UtcNow)!;
+        Assert.True(diagnostics.Any(item => item.RuleId == "invalid"), "Invalid output rule was not diagnosed.");
+        Assert.True(entry.StyledRuns.Any(run => run.Override?.Foreground == "#FFD166"), "A failed output rule prevented unrelated rules from running.");
+        return Task.CompletedTask;
+    }
+
+    private static Task CommandOriginValuesRemainCompatible()
+    {
+        Assert.Equal(0, (int)CommandOrigin.User);
+        Assert.Equal(1, (int)CommandOrigin.Automation);
+        Assert.Equal(2, (int)CommandOrigin.Jev);
+        Assert.Equal(3, (int)CommandOrigin.Mapper);
+        Assert.Equal(4, (int)CommandOrigin.Script);
+        Assert.Equal(5, (int)CommandOrigin.System);
+        Assert.Equal(6, (int)CommandOrigin.Alias);
+        Assert.Equal(7, (int)CommandOrigin.Keybinding);
+        Assert.Equal(0, (int)ScriptCommandOrigin.User);
+        Assert.Equal(1, (int)ScriptCommandOrigin.Automation);
+        Assert.Equal(2, (int)ScriptCommandOrigin.Jev);
+        Assert.Equal(3, (int)ScriptCommandOrigin.Mapper);
+        Assert.Equal(4, (int)ScriptCommandOrigin.Script);
+        Assert.Equal(5, (int)ScriptCommandOrigin.System);
+        Assert.Equal(6, (int)ScriptCommandOrigin.Alias);
+        Assert.Equal(7, (int)ScriptCommandOrigin.Keybinding);
+        return Task.CompletedTask;
+    }
+
+    private static Task WorldScrollbackIsBoundedAndSearchable()
+    {
+        WorldBuffer buffer = new(maximumEntries: 250);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        for (int index = 0; index < 260; index++)
+        {
+            string text = index == 259 ? "Laoris arrives from the north." : $"line {index}";
+            buffer.Append(new WorldBufferEntry(
+                Guid.NewGuid(), now.AddSeconds(index), Guid.NewGuid(), text,
+                [new WorldStyledRun(text, AnsiTextStyle.Default)], false, false, false,
+                OutputFrameSource.Server, [], []));
+        }
+
+        Assert.Equal(250, buffer.Snapshot().Count);
+        Assert.Equal(1, buffer.Search("laoris").Count);
+        Assert.Equal(1, buffer.Search(@"Laoris\s+arrives", new WorldBufferSearchOptions(Regex: true)).Count);
+        return Task.CompletedTask;
+    }
+
     private static Task UnindentedFixtureIsNotOccupant()
     {
         AvendarRoomContentsParser parser = new();
@@ -3633,7 +3932,10 @@ public static class Program
                 Aliases = [new CommandAlias("kk", "kill $*")],
                 Triggers = [new TriggerRule("You are hungry", "eat bread")],
                 Timers = [new CommandTimer("keepalive", 30, "look", Repeat: true, Enabled: true)],
-                KeyBindings = [new CommandKeyBinding("Primary+1", "look")],
+                KeyBindings = [new CommandKeyBinding("Primary+1", "look", Name: "Look", Context: KeybindingContext.World, Action: KeybindingActionKind.SendCommand, Priority: 4)],
+                Input = new InputPreferences(750, PersistHistory: true, DeduplicateConsecutiveHistory: false, CompletionEnabled: true, CompletionTokenLimit: 7000, LocalEcho: false),
+                Output = new OutputPreferences(TimestampRenderMode.TimeWithMilliseconds, 7000, SplitOutputEnabled: false, NotifyWhenUnfocused: false),
+                OutputRules = [new OutputTransformationRule("guard", "Guard", "cityguard", Actions: [new OutputRuleAction(OutputRuleActionKind.Substitute, "[Guard]")])],
                 Workspace = new WorkspacePreferences(1440, 900, true, 420, "Jev", 210),
                 JevEnabled = false,
                 CommandSeparator = "|",
@@ -3664,7 +3966,21 @@ public static class Program
             Assert.Equal("kk", Assert.Single(loaded.Aliases!).Name);
             Assert.Equal("You are hungry", Assert.Single(loaded.Triggers!).Pattern);
             Assert.Equal(30, Assert.Single(loaded.Timers!).IntervalSeconds);
-            Assert.Equal("Primary+1", Assert.Single(loaded.KeyBindings!).Gesture);
+            CommandKeyBinding loadedBinding = Assert.Single(loaded.KeyBindings!);
+            Assert.Equal("Primary+1", loadedBinding.Gesture);
+            Assert.Equal("Look", loadedBinding.Name);
+            Assert.Equal(KeybindingContext.World, loadedBinding.Context);
+            Assert.Equal(KeybindingActionKind.SendCommand, loadedBinding.Action);
+            Assert.Equal(4, loadedBinding.Priority);
+            Assert.Equal(750, loaded.Input!.HistoryMaximumEntries);
+            Assert.False(loaded.Input.DeduplicateConsecutiveHistory, "History de-duplication setting did not round-trip.");
+            Assert.False(loaded.Input.LocalEcho, "Local echo setting did not round-trip.");
+            Assert.Equal(7000, loaded.Input.CompletionTokenLimit);
+            Assert.Equal(TimestampRenderMode.TimeWithMilliseconds, loaded.Output!.TimestampMode);
+            Assert.Equal(7000, loaded.Output.ScrollbackMaximumEntries);
+            Assert.False(loaded.Output.SplitOutputEnabled, "Split-output setting did not round-trip.");
+            Assert.False(loaded.Output.NotifyWhenUnfocused, "Notification focus setting did not round-trip.");
+            Assert.Equal("guard", Assert.Single(loaded.OutputRules!).Id);
             Assert.Equal("Jev", loaded.Workspace!.DockView);
             Assert.Equal(420d, loaded.Workspace.DockWidth);
             Assert.False(loaded.JevEnabled, "Jev master enabled state did not round-trip.");

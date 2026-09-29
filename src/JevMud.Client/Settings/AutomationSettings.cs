@@ -1,3 +1,5 @@
+using JevMud.Client.Interaction;
+
 namespace JevMud.Client.Settings;
 
 public enum TranscriptLogFormat
@@ -101,7 +103,11 @@ public sealed record CommandTimer(
 public sealed record CommandKeyBinding(
     string Gesture,
     string Command,
-    bool Enabled = true);
+    bool Enabled = true,
+    string? Name = null,
+    KeybindingContext Context = KeybindingContext.Global,
+    KeybindingActionKind Action = KeybindingActionKind.SendCommand,
+    int Priority = 0);
 
 public sealed record AutomationPreferences(
     bool Enabled = true,

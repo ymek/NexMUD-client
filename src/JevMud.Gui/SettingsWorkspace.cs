@@ -5,6 +5,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using System.Text.RegularExpressions;
 using JevMud.Client.Runtime;
+using JevMud.Client.Interaction;
 using JevMud.Client.Settings;
 using JevMud.Contracts.Jev;
 using JevMud.Core.Jev;
@@ -16,6 +17,7 @@ public sealed class SettingsWorkspace : UserControl
     private enum SettingsPage
     {
         General,
+        Keybindings,
         Highlights,
         Automation,
         Protocols,
@@ -43,6 +45,7 @@ public sealed class SettingsWorkspace : UserControl
         public required CheckBox Underline { get; init; }
         public required CheckBox CaseSensitive { get; init; }
         public required CheckBox Enabled { get; init; }
+        public required IReadOnlyList<OutputRuleAction> PreservedActions { get; init; }
     }
 
     private sealed class AliasEditor
@@ -64,6 +67,7 @@ public sealed class SettingsWorkspace : UserControl
         public required CheckBox StopProcessing { get; init; }
         public required CheckBox CaseSensitive { get; init; }
         public required CheckBox Enabled { get; init; }
+        public required IReadOnlyList<OutputRuleAction> PreservedActions { get; init; }
         public required CheckBox OneShot { get; init; }
     }
 
@@ -107,9 +111,27 @@ public sealed class SettingsWorkspace : UserControl
 
     private sealed class KeyBindingEditor
     {
+        public required TextBox Name { get; init; }
         public required TextBox Gesture { get; init; }
         public required TextBox Command { get; init; }
+        public required ComboBox Context { get; init; }
+        public required ComboBox Action { get; init; }
+        public required TextBox Priority { get; init; }
         public required CheckBox Enabled { get; init; }
+    }
+
+    private sealed class OutputRuleEditor
+    {
+        public required string Id { get; init; }
+        public required TextBox Name { get; init; }
+        public required TextBox Pattern { get; init; }
+        public required ComboBox MatchType { get; init; }
+        public required ComboBox Action { get; init; }
+        public required TextBox Value { get; init; }
+        public required TextBox Priority { get; init; }
+        public required CheckBox CaseSensitive { get; init; }
+        public required CheckBox Enabled { get; init; }
+        public required IReadOnlyList<OutputRuleAction> PreservedActions { get; init; }
     }
 
     private readonly JevMudRuntime _runtime;
@@ -125,9 +147,21 @@ public sealed class SettingsWorkspace : UserControl
     private readonly CheckBox _autoLogSessions = new();
     private readonly CheckBox _slurpTelemetryPrompt = new();
     private readonly TextBox _commandSeparator = Field();
+    private readonly TextBox _historyMaximum = Field();
+    private readonly CheckBox _persistHistory = new();
+    private readonly CheckBox _deduplicateHistory = new();
+    private readonly CheckBox _completionEnabled = new();
+    private readonly TextBox _completionTokenLimit = Field();
+    private readonly CheckBox _localEcho = new();
+    private readonly ComboBox _timestampMode = new();
+    private readonly TextBox _scrollbackMaximum = Field();
+    private readonly CheckBox _splitOutputEnabled = new();
+    private readonly CheckBox _notifyWhenUnfocused = new();
     private readonly ComboBox _logFormat = new();
     private readonly StackPanel _highlightRows = new() { Spacing = 0 };
     private readonly List<HighlightEditor> _highlightEditors = [];
+    private readonly StackPanel _outputRuleRows = new() { Spacing = 0 };
+    private readonly List<OutputRuleEditor> _outputRuleEditors = [];
     private readonly StackPanel _aliasRows = new() { Spacing = 0 };
     private readonly List<AliasEditor> _aliasEditors = [];
     private readonly StackPanel _triggerRows = new() { Spacing = 0 };
@@ -203,6 +237,7 @@ public sealed class SettingsWorkspace : UserControl
         FontSize = NexTypography.Body;
 
         _pages[SettingsPage.General] = BuildGeneralPage();
+        _pages[SettingsPage.Keybindings] = BuildKeybindingsPage();
         _pages[SettingsPage.Highlights] = BuildHighlightsPage();
         _pages[SettingsPage.Automation] = BuildAutomationPage();
         _pages[SettingsPage.Protocols] = BuildProtocolsPage();
@@ -242,8 +277,9 @@ public sealed class SettingsWorkspace : UserControl
             FontWeight = FontWeight.SemiBold,
             Margin = new Thickness(8, 0, 8, 10)
         });
-        nav.Children.Add(NavigationButton(SettingsPage.General, "General", "Game surface and behavior"));
-        nav.Children.Add(NavigationButton(SettingsPage.Highlights, "Highlights", "Presentation-only text rules"));
+        nav.Children.Add(NavigationButton(SettingsPage.General, "Input & Output", "History, completion, transcript"));
+        nav.Children.Add(NavigationButton(SettingsPage.Keybindings, "Keybindings", "Contexts, actions, conflicts"));
+        nav.Children.Add(NavigationButton(SettingsPage.Highlights, "Rules", "Highlight, gag, substitute, notify"));
         nav.Children.Add(NavigationButton(SettingsPage.Automation, "Automation", "Rules, aliases, triggers, timers"));
         nav.Children.Add(NavigationButton(SettingsPage.Protocols, "Protocols", "Telnet capabilities and OOB data"));
         nav.Children.Add(NavigationButton(SettingsPage.Mapper, "Mapper", "World graph and route planning"));
@@ -291,8 +327,8 @@ public sealed class SettingsWorkspace : UserControl
     private Control BuildGeneralPage()
     {
         StackPanel stack = PageStack(
-            "General",
-            "Tune the game surface and local presentation. Raw server data remains available to parsing and logging.");
+            "Input & Output",
+            "Configure first-class interaction behavior. Raw server data remains available to parsing, Automation, replay, and logging.");
 
         Border transcript = SectionCard("Game transcript", "Presentation only. Server text is preserved exactly as received.");
         StackPanel transcriptBody = (StackPanel)transcript.Child!;
@@ -308,9 +344,18 @@ public sealed class SettingsWorkspace : UserControl
             FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
+        _timestampMode.ItemsSource = Enum.GetValues<TimestampRenderMode>();
+        _timestampMode.MinWidth = 180;
+        transcriptBody.Children.Add(FormRow("Timestamps", _timestampMode));
+        _scrollbackMaximum.Width = 110;
+        transcriptBody.Children.Add(FormRow("Scrollback entries", _scrollbackMaximum));
+        ConfigureCheckBox(_splitOutputEnabled, "Enable split-output history/live view when scrolling away from the bottom");
+        ConfigureCheckBox(_notifyWhenUnfocused, "Allow output rules to request attention when NexMUD is unfocused");
+        transcriptBody.Children.Add(_splitOutputEnabled);
+        transcriptBody.Children.Add(_notifyWhenUnfocused);
         stack.Children.Add(transcript);
 
-        Border input = SectionCard("Command input", "Send ordered command batches directly from the input line.");
+        Border input = SectionCard("Command input", "History, completion, and ordered command batches are application services, not TextBox behavior.");
         StackPanel inputBody = (StackPanel)input.Child!;
         _commandSeparator.Width = 72;
         _commandSeparator.MaxLength = 1;
@@ -323,6 +368,18 @@ public sealed class SettingsWorkspace : UserControl
             FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
+        _historyMaximum.Width = 100;
+        _completionTokenLimit.Width = 110;
+        inputBody.Children.Add(FormRow("History entries", _historyMaximum));
+        inputBody.Children.Add(FormRow("Completion token index", _completionTokenLimit));
+        ConfigureCheckBox(_persistHistory, "Persist manual command history");
+        ConfigureCheckBox(_deduplicateHistory, "Collapse consecutive duplicate history entries");
+        ConfigureCheckBox(_completionEnabled, "Enable Tab / Shift-Tab completion");
+        ConfigureCheckBox(_localEcho, "Echo manual and generated commands in World with provenance styling");
+        inputBody.Children.Add(_persistHistory);
+        inputBody.Children.Add(_deduplicateHistory);
+        inputBody.Children.Add(_completionEnabled);
+        inputBody.Children.Add(_localEcho);
         stack.Children.Add(input);
 
         Border context = SectionCard("Gameplay rail", "Character telemetry and room context are persistent parts of the world-first gameplay surface.");
@@ -354,11 +411,49 @@ public sealed class SettingsWorkspace : UserControl
         return PageScroll(stack);
     }
 
+    private Control BuildKeybindingsPage()
+    {
+        StackPanel stack = PageStack(
+            "Keybindings",
+            "Typed, context-aware bindings invoke application actions. Equal-priority collisions in the same context are configuration errors.");
+
+        Border bindings = SectionCard(
+            "Bindings",
+            "Use Primary for Command on macOS / Ctrl elsewhere. Input context wins over Global; Global is the fallback.");
+        StackPanel body = (StackPanel)bindings.Child!;
+        body.Children.Add(_keyBindingRows);
+        StackPanel bindingActions = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+        Button add = SecondaryButton("Add Key Binding");
+        add.Click += (_, _) => AddKeyBindingEditor(new CommandKeyBinding(
+            "Primary+1",
+            "look",
+            Context: KeybindingContext.Global,
+            Action: KeybindingActionKind.SendCommand));
+        bindingActions.Children.Add(add);
+        Button reset = SecondaryButton("Clear Custom Bindings");
+        reset.Click += (_, _) =>
+        {
+            _keyBindingRows.Children.Clear();
+            _keyBindingEditors.Clear();
+        };
+        bindingActions.Children.Add(reset);
+        body.Children.Add(bindingActions);
+        body.Children.Add(new TextBlock
+        {
+            Text = "Conflicts are detected by gesture + context + priority and must be resolved before settings can be saved.",
+            Foreground = Muted,
+            FontSize = NexTypography.Metadata,
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(bindings);
+        return PageScroll(stack);
+    }
+
     private Control BuildHighlightsPage()
     {
         StackPanel stack = PageStack(
-            "Highlights",
-            "Enhance matching server text without removing or rewriting it. Earlier rules take precedence when matches overlap.");
+            "Output Rules",
+            "Presentation rules operate on immutable output frames and never rewrite semantic parsing input.");
 
         Border rules = SectionCard("Highlight rules", "Literal and regular-expression matches can override foreground color and add emphasis. ANSI styling remains intact outside the matched text.");
         StackPanel body = (StackPanel)rules.Child!;
@@ -369,6 +464,21 @@ public sealed class SettingsWorkspace : UserControl
         add.Click += (_, _) => AddHighlightEditor(new TranscriptHighlightRule("", "#FFD166"));
         body.Children.Add(add);
         stack.Children.Add(rules);
+
+        Border transformations = SectionCard(
+            "Transformations",
+            "Typed display-only rules. Gag hides presentation only; substitution never changes semantic source text; regex execution is bounded.");
+        StackPanel transformationBody = (StackPanel)transformations.Child!;
+        transformationBody.Children.Add(_outputRuleRows);
+        Button addRule = SecondaryButton("Add Output Rule");
+        addRule.HorizontalAlignment = HorizontalAlignment.Left;
+        addRule.Click += (_, _) => AddOutputRuleEditor(new OutputTransformationRule(
+            Guid.NewGuid().ToString("N"),
+            "New rule",
+            "",
+            Actions: [new OutputRuleAction(OutputRuleActionKind.Highlight, Foreground: "#FFD166", Bold: true)]));
+        transformationBody.Children.Add(addRule);
+        stack.Children.Add(transformations);
         return PageScroll(stack);
     }
 
@@ -404,17 +514,6 @@ public sealed class SettingsWorkspace : UserControl
         addAlias.Click += (_, _) => AddAliasEditor(new CommandAlias("", ""));
         aliasBody.Children.Add(addAlias);
         stack.Children.Add(aliases);
-
-        Border keyBindings = SectionCard(
-            "Key bindings",
-            "Bind a gesture to a MUD command. Use Primary for Command on macOS / Ctrl elsewhere, or explicit Ctrl, Command, Alt/Option, Shift, and F-keys.");
-        StackPanel keyBindingBody = (StackPanel)keyBindings.Child!;
-        keyBindingBody.Children.Add(_keyBindingRows);
-        Button addKeyBinding = SecondaryButton("Add Key Binding");
-        addKeyBinding.HorizontalAlignment = HorizontalAlignment.Left;
-        addKeyBinding.Click += (_, _) => AddKeyBindingEditor(new CommandKeyBinding("Primary+1", "look"));
-        keyBindingBody.Children.Add(addKeyBinding);
-        stack.Children.Add(keyBindings);
 
         Border triggers = SectionCard("Triggers", "Match complete server-output lines and send a command. Regex commands may use $1-$9 capture groups. Trigger matching never gags or rewrites output.");
         StackPanel triggerBody = (StackPanel)triggers.Child!;
@@ -693,12 +792,30 @@ public sealed class SettingsWorkspace : UserControl
         _autoLogSessions.IsChecked = _runtime.Settings.AutoLogSessions;
         _slurpTelemetryPrompt.IsChecked = _runtime.Settings.SlurpTelemetryPrompt;
         _commandSeparator.Text = _runtime.Settings.CommandSeparator;
+        InputPreferences inputPreferences = _runtime.Settings.Input ?? new InputPreferences();
+        _historyMaximum.Text = inputPreferences.HistoryMaximumEntries.ToString();
+        _persistHistory.IsChecked = inputPreferences.PersistHistory;
+        _deduplicateHistory.IsChecked = inputPreferences.DeduplicateConsecutiveHistory;
+        _completionEnabled.IsChecked = inputPreferences.CompletionEnabled;
+        _completionTokenLimit.Text = inputPreferences.CompletionTokenLimit.ToString();
+        _localEcho.IsChecked = inputPreferences.LocalEcho;
+        OutputPreferences outputPreferences = _runtime.Settings.Output ?? new OutputPreferences();
+        _timestampMode.SelectedItem = outputPreferences.TimestampMode;
+        _scrollbackMaximum.Text = outputPreferences.ScrollbackMaximumEntries.ToString();
+        _splitOutputEnabled.IsChecked = outputPreferences.SplitOutputEnabled;
+        _notifyWhenUnfocused.IsChecked = outputPreferences.NotifyWhenUnfocused;
         _logFormat.SelectedItem = _runtime.Settings.LogFormat;
         _highlightRows.Children.Clear();
         _highlightEditors.Clear();
         foreach (TranscriptHighlightRule rule in _runtime.Settings.HighlightRules ?? Array.Empty<TranscriptHighlightRule>())
         {
             AddHighlightEditor(rule);
+        }
+        _outputRuleRows.Children.Clear();
+        _outputRuleEditors.Clear();
+        foreach (OutputTransformationRule rule in _runtime.Settings.OutputRules ?? Array.Empty<OutputTransformationRule>())
+        {
+            AddOutputRuleEditor(rule);
         }
         _aliasRows.Children.Clear();
         _aliasEditors.Clear();
@@ -856,9 +973,46 @@ public sealed class SettingsWorkspace : UserControl
             return;
         }
         IReadOnlyList<TranscriptHighlightRule>? highlightRules = ReadHighlightRules();
-        if (highlightRules is null)
+        IReadOnlyList<OutputTransformationRule>? outputRules = ReadOutputRules();
+        if (highlightRules is null || outputRules is null)
         {
             SelectPage(SettingsPage.Highlights);
+            return;
+        }
+        if (!int.TryParse(_historyMaximum.Text, out int historyMaximum) || historyMaximum is < 1 or > 10000)
+        {
+            _validation.Text = "History entries must be between 1 and 10,000.";
+            SelectPage(SettingsPage.General);
+            return;
+        }
+        if (!int.TryParse(_completionTokenLimit.Text, out int completionTokenLimit) || completionTokenLimit is < 100 or > 50000)
+        {
+            _validation.Text = "Completion token index must be between 100 and 50,000 entries.";
+            SelectPage(SettingsPage.General);
+            return;
+        }
+        if (!int.TryParse(_scrollbackMaximum.Text, out int scrollbackMaximum) || scrollbackMaximum is < 250 or > 100000)
+        {
+            _validation.Text = "Scrollback entries must be between 250 and 100,000.";
+            SelectPage(SettingsPage.General);
+            return;
+        }
+        InputPreferences inputPreferences = new(
+            historyMaximum,
+            _persistHistory.IsChecked == true,
+            _deduplicateHistory.IsChecked == true,
+            _completionEnabled.IsChecked == true,
+            completionTokenLimit,
+            _localEcho.IsChecked == true);
+        OutputPreferences outputPreferences = new(
+            _timestampMode.SelectedItem is TimestampRenderMode timestampMode ? timestampMode : TimestampRenderMode.Off,
+            scrollbackMaximum,
+            _splitOutputEnabled.IsChecked == true,
+            _notifyWhenUnfocused.IsChecked == true);
+        IReadOnlyList<CommandKeyBinding>? keyBindings = ReadKeyBindings();
+        if (keyBindings is null)
+        {
+            SelectPage(SettingsPage.Keybindings);
             return;
         }
         IReadOnlyList<CommandAlias>? aliases = ReadAliases();
@@ -866,8 +1020,7 @@ public sealed class SettingsWorkspace : UserControl
         IReadOnlyList<GameRule>? gameRules = ReadGameRules();
         IReadOnlyList<AutomationWorkflow>? workflows = ReadWorkflows();
         IReadOnlyList<CommandTimer>? timers = ReadTimers();
-        IReadOnlyList<CommandKeyBinding>? keyBindings = ReadKeyBindings();
-        if (aliases is null || triggers is null || gameRules is null || workflows is null || timers is null || keyBindings is null)
+        if (aliases is null || triggers is null || gameRules is null || workflows is null || timers is null)
         {
             SelectPage(SettingsPage.Automation);
             return;
@@ -1012,6 +1165,11 @@ public sealed class SettingsWorkspace : UserControl
                 _slurpTelemetryPrompt.IsChecked == true,
                 commandSeparator,
                 highlightRules,
+                _runtime.CancellationToken).ConfigureAwait(true);
+            await _runtime.SaveInteractionSettingsAsync(
+                inputPreferences,
+                outputPreferences,
+                outputRules,
                 _runtime.CancellationToken).ConfigureAwait(true);
             await _runtime.SaveConvenienceSettingsAsync(
                 logFormat,
@@ -1272,24 +1430,59 @@ public sealed class SettingsWorkspace : UserControl
 
     private void AddKeyBindingEditor(CommandKeyBinding binding)
     {
+        TextBox name = Field();
+        name.Text = binding.Name ?? string.Empty;
+        name.PlaceholderText = "Name";
+        name.Width = 130;
         TextBox gesture = Field();
         gesture.Text = binding.Gesture;
         gesture.PlaceholderText = "Primary+1, Command+K, F5";
-        gesture.Width = 170;
+        gesture.Width = 165;
+        ComboBox context = new()
+        {
+            ItemsSource = Enum.GetValues<KeybindingContext>(),
+            SelectedItem = binding.Context,
+            MinWidth = 95
+        };
+        ComboBox action = new()
+        {
+            ItemsSource = Enum.GetValues<KeybindingActionKind>(),
+            SelectedItem = binding.Action,
+            MinWidth = 135
+        };
         TextBox command = Field();
         command.Text = binding.Command;
-        command.PlaceholderText = "Command to send";
+        command.PlaceholderText = "Command / pane / action value";
+        TextBox priority = Field();
+        priority.Text = binding.Priority.ToString();
+        priority.Width = 70;
+        priority.PlaceholderText = "Priority";
         CheckBox enabled = new() { Content = "Enabled", IsChecked = binding.Enabled, Foreground = TextForeground };
 
-        Grid row = new() { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 8 };
-        row.Children.Add(gesture);
-        Grid.SetColumn(command, 1); row.Children.Add(command);
-        Grid.SetColumn(enabled, 2); row.Children.Add(enabled);
-        Button remove = SecondaryButton("Remove");
-        Grid.SetColumn(remove, 3); row.Children.Add(remove);
+        Grid top = new() { ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 8 };
+        top.Children.Add(name);
+        Grid.SetColumn(gesture, 1); top.Children.Add(gesture);
+        Grid.SetColumn(context, 2); top.Children.Add(context);
+        Grid.SetColumn(action, 3); top.Children.Add(action);
+        Button remove = SecondaryButton("Remove"); Grid.SetColumn(remove, 4); top.Children.Add(remove);
+        Grid detail = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 8 };
+        detail.Children.Add(command);
+        Grid.SetColumn(priority, 1); detail.Children.Add(priority);
+        Grid.SetColumn(enabled, 2); detail.Children.Add(enabled);
 
-        Border container = EditorContainer(row);
-        KeyBindingEditor editor = new() { Gesture = gesture, Command = command, Enabled = enabled };
+        StackPanel content = new() { Spacing = 8 };
+        content.Children.Add(top); content.Children.Add(detail);
+        Border container = EditorContainer(content);
+        KeyBindingEditor editor = new()
+        {
+            Name = name,
+            Gesture = gesture,
+            Command = command,
+            Context = context,
+            Action = action,
+            Priority = priority,
+            Enabled = enabled
+        };
         remove.Click += (_, _) =>
         {
             _keyBindingRows.Children.Remove(container);
@@ -1325,22 +1518,44 @@ public sealed class SettingsWorkspace : UserControl
     private IReadOnlyList<CommandKeyBinding>? ReadKeyBindings()
     {
         List<CommandKeyBinding> bindings = [];
-        HashSet<string> gestures = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> conflictKeys = new(StringComparer.OrdinalIgnoreCase);
         foreach (KeyBindingEditor editor in _keyBindingEditors)
         {
             string gesture = (editor.Gesture.Text ?? string.Empty).Trim();
-            string command = (editor.Command.Text ?? string.Empty).Trim();
-            if (gesture.Length == 0 || command.Length == 0 || !CommandGesture.IsValid(gesture))
+            string value = (editor.Command.Text ?? string.Empty).Trim();
+            string? name = string.IsNullOrWhiteSpace(editor.Name.Text) ? null : editor.Name.Text.Trim();
+            KeybindingContext context = editor.Context.SelectedItem is KeybindingContext selectedContext
+                ? selectedContext
+                : KeybindingContext.Global;
+            if (gesture.Length == 0 || !CommandGesture.IsValid(gesture, context))
             {
-                _validation.Text = "Each key binding needs a valid modified gesture (for example Primary+1, Command+K, Ctrl+Shift+A) or an F-key, plus a command.";
+                _validation.Text = "Each key binding needs a safe gesture. Bare navigation keys are allowed outside Global; character keys require a modifier.";
                 return null;
             }
-            if (!gestures.Add(gesture))
+            if (!int.TryParse(editor.Priority.Text, out int priority) || priority is < -10000 or > 10000)
             {
-                _validation.Text = $"Key binding '{gesture}' is duplicated.";
+                _validation.Text = $"Key binding '{gesture}' has an invalid priority.";
                 return null;
             }
-            bindings.Add(new CommandKeyBinding(gesture, command, editor.Enabled.IsChecked == true));
+            KeybindingActionKind action = editor.Action.SelectedItem is KeybindingActionKind selectedAction
+                ? selectedAction
+                : KeybindingActionKind.SendCommand;
+            bool requiresValue = action is KeybindingActionKind.SendCommand
+                or KeybindingActionKind.RunAutomation
+                or KeybindingActionKind.TogglePane;
+            if (requiresValue && value.Length == 0)
+            {
+                _validation.Text = $"Key binding '{gesture}' needs a value for {action}.";
+                return null;
+            }
+            bool enabled = editor.Enabled.IsChecked == true;
+            string conflictKey = $"{context}:{priority}:{gesture}";
+            if (enabled && !conflictKeys.Add(conflictKey))
+            {
+                _validation.Text = $"Key binding conflict: {gesture} in {context} with priority {priority}.";
+                return null;
+            }
+            bindings.Add(new CommandKeyBinding(gesture, value, enabled, name, context, action, priority));
         }
         return bindings;
     }
@@ -1488,6 +1703,154 @@ public sealed class SettingsWorkspace : UserControl
         return timers;
     }
 
+    private void AddOutputRuleEditor(OutputTransformationRule rule)
+    {
+        TextBox name = Field();
+        name.Text = rule.Name;
+        name.PlaceholderText = "Rule name";
+        name.Width = 150;
+        TextBox pattern = Field();
+        pattern.Text = rule.Pattern;
+        pattern.PlaceholderText = "Text or regex";
+        ComboBox matchType = new()
+        {
+            ItemsSource = Enum.GetValues<OutputRuleMatchType>(),
+            SelectedItem = rule.MatchType,
+            MinWidth = 100
+        };
+        OutputRuleAction initialAction = rule.EffectiveActions.FirstOrDefault()
+            ?? new OutputRuleAction(OutputRuleActionKind.Highlight, Foreground: "#FFD166", Bold: true);
+        ComboBox action = new()
+        {
+            ItemsSource = Enum.GetValues<OutputRuleActionKind>(),
+            SelectedItem = initialAction.Kind,
+            MinWidth = 110
+        };
+        TextBox value = Field();
+        value.Text = initialAction.Kind == OutputRuleActionKind.Highlight
+            ? initialAction.Foreground ?? "#FFD166"
+            : initialAction.Text ?? string.Empty;
+        value.PlaceholderText = "Color / replacement / message";
+        TextBox priority = Field();
+        priority.Text = rule.Priority.ToString();
+        priority.Width = 70;
+        priority.PlaceholderText = "Priority";
+        CheckBox enabled = new() { Content = "Enabled", IsChecked = rule.Enabled, Foreground = TextForeground };
+        CheckBox caseSensitive = new() { Content = "Case sensitive", IsChecked = rule.CaseSensitive, Foreground = TextForeground };
+
+        Grid top = new() { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 8 };
+        top.Children.Add(name);
+        Grid.SetColumn(pattern, 1); top.Children.Add(pattern);
+        Grid.SetColumn(matchType, 2); top.Children.Add(matchType);
+        Button remove = SecondaryButton("Remove"); Grid.SetColumn(remove, 3); top.Children.Add(remove);
+
+        Grid detail = new() { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 8 };
+        detail.Children.Add(action);
+        Grid.SetColumn(value, 1); detail.Children.Add(value);
+        Grid.SetColumn(priority, 2); detail.Children.Add(priority);
+        StackPanel toggles = new() { Orientation = Orientation.Horizontal, Spacing = 14 };
+        toggles.Children.Add(enabled); toggles.Children.Add(caseSensitive);
+
+        StackPanel content = new() { Spacing = 8 };
+        content.Children.Add(top); content.Children.Add(detail); content.Children.Add(toggles);
+        Border container = EditorContainer(content);
+        OutputRuleEditor editor = new()
+        {
+            Id = string.IsNullOrWhiteSpace(rule.Id) ? Guid.NewGuid().ToString("N") : rule.Id,
+            Name = name,
+            Pattern = pattern,
+            MatchType = matchType,
+            Action = action,
+            Value = value,
+            Priority = priority,
+            CaseSensitive = caseSensitive,
+            Enabled = enabled,
+            PreservedActions = rule.EffectiveActions.Skip(1).ToArray()
+        };
+        remove.Click += (_, _) =>
+        {
+            _outputRuleRows.Children.Remove(container);
+            _outputRuleEditors.Remove(editor);
+        };
+        _outputRuleEditors.Add(editor);
+        _outputRuleRows.Children.Add(container);
+    }
+
+    private IReadOnlyList<OutputTransformationRule>? ReadOutputRules()
+    {
+        List<OutputTransformationRule> rules = [];
+        HashSet<string> ids = new(StringComparer.OrdinalIgnoreCase);
+        foreach (OutputRuleEditor editor in _outputRuleEditors)
+        {
+            string name = (editor.Name.Text ?? string.Empty).Trim();
+            string pattern = (editor.Pattern.Text ?? string.Empty).Trim();
+            if (name.Length == 0 || pattern.Length == 0)
+            {
+                _validation.Text = "Each output rule needs a name and a pattern.";
+                return null;
+            }
+            if (!int.TryParse(editor.Priority.Text, out int priority) || priority is < -10000 or > 10000)
+            {
+                _validation.Text = $"Output rule '{name}' has an invalid priority.";
+                return null;
+            }
+            OutputRuleMatchType matchType = editor.MatchType.SelectedItem is OutputRuleMatchType selectedMatch
+                ? selectedMatch
+                : OutputRuleMatchType.Substring;
+            if (matchType == OutputRuleMatchType.Regex)
+            {
+                if (pattern.Length > 4096)
+                {
+                    _validation.Text = $"Output rule '{name}' regex is too large.";
+                    return null;
+                }
+                try
+                {
+                    RegexOptions options = RegexOptions.CultureInvariant;
+                    if (editor.CaseSensitive.IsChecked != true) options |= RegexOptions.IgnoreCase;
+                    _ = new Regex(pattern, options, TimeSpan.FromMilliseconds(100));
+                }
+                catch (ArgumentException exception)
+                {
+                    _validation.Text = $"Invalid output regex '{pattern}': {exception.Message}";
+                    return null;
+                }
+            }
+
+            OutputRuleActionKind actionKind = editor.Action.SelectedItem is OutputRuleActionKind selectedAction
+                ? selectedAction
+                : OutputRuleActionKind.Highlight;
+            string value = (editor.Value.Text ?? string.Empty).Trim();
+            OutputRuleAction action;
+            if (actionKind == OutputRuleActionKind.Highlight)
+            {
+                if (!IsHexColor(value))
+                {
+                    _validation.Text = $"Output highlight color '{value}' must be #RRGGBB.";
+                    return null;
+                }
+                action = new OutputRuleAction(actionKind, Foreground: value.ToUpperInvariant(), Bold: true);
+            }
+            else
+            {
+                action = new OutputRuleAction(actionKind, Text: value);
+            }
+
+            string id = ids.Add(editor.Id) ? editor.Id : Guid.NewGuid().ToString("N");
+            OutputRuleAction[] actions = [action, .. editor.PreservedActions];
+            rules.Add(new OutputTransformationRule(
+                id,
+                name,
+                pattern,
+                matchType,
+                editor.CaseSensitive.IsChecked == true,
+                priority,
+                editor.Enabled.IsChecked == true,
+                actions));
+        }
+        return rules;
+    }
+
     private void AddHighlightEditor(TranscriptHighlightRule rule)
     {
         TextBox pattern = Field();
@@ -1539,7 +1902,8 @@ public sealed class SettingsWorkspace : UserControl
             Bold = bold,
             Underline = underline,
             CaseSensitive = caseSensitive,
-            Enabled = enabled
+            Enabled = enabled,
+            PreservedActions = rule.EffectiveActions.Skip(1).ToArray()
         };
         remove.Click += (_, _) =>
         {

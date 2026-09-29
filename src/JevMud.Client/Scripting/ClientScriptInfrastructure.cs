@@ -323,13 +323,13 @@ public sealed class ClientScriptCommands : IScriptCommands
                 if (_navigationAuthority is null || !_navigationAuthority.IsOwnedBy(request.RouteExecutionId))
                     return new ScriptCommandResult(request.ActionId ?? Guid.NewGuid(), false, "Mapper route does not own navigation authority.");
             }
-            else if (_navigationAuthority?.IsHeld == true && request.Origin != ScriptCommandOrigin.User)
+            else if (_navigationAuthority?.IsHeld == true && request.Origin is not (ScriptCommandOrigin.User or ScriptCommandOrigin.Keybinding))
             {
                 return new ScriptCommandResult(request.ActionId ?? Guid.NewGuid(), false, "Mapper route currently owns autonomous navigation.");
             }
         }
 
-        if (request.Origin == ScriptCommandOrigin.User)
+        if (request.Origin is ScriptCommandOrigin.User or ScriptCommandOrigin.Keybinding)
         {
             if (_navigationAuthority?.IsHeld == true && NavigationCommandClassifier.IsMovementCommand(request.Command))
                 await _navigationAuthority.RequestManualMovementAsync(cancellationToken).ConfigureAwait(false);
@@ -347,7 +347,7 @@ public sealed class ClientScriptCommands : IScriptCommands
         long stateVersion = request.ExpectedStateVersion ?? _state.Current.Version;
         Guid actionId = request.ActionId ?? Guid.NewGuid();
         JevDomain? domain = null;
-        DecisionSource source = request.Origin == ScriptCommandOrigin.User
+        DecisionSource source = request.Origin is ScriptCommandOrigin.User or ScriptCommandOrigin.Keybinding
             ? DecisionSource.Human
             : DecisionSource.Rules;
         if (request.Origin == ScriptCommandOrigin.Jev)
@@ -368,7 +368,7 @@ public sealed class ClientScriptCommands : IScriptCommands
             _scheduler.UtcNow,
             new SendCommandAction(request.Command, request.Sensitive),
             new CommandProvenance(
-                MapOrigin(request.Origin),
+                MapOrigin(request),
                 request.OwnerId,
                 request.OwnerName,
                 request.Reason,
@@ -434,15 +434,24 @@ public sealed class ClientScriptCommands : IScriptCommands
         }
     }
 
-    private static CommandOrigin MapOrigin(ScriptCommandOrigin origin) => origin switch
+    private static CommandOrigin MapOrigin(ScriptCommandRequest request)
     {
-        ScriptCommandOrigin.User => CommandOrigin.User,
-        ScriptCommandOrigin.Automation => CommandOrigin.Automation,
-        ScriptCommandOrigin.Jev => CommandOrigin.Jev,
-        ScriptCommandOrigin.Mapper => CommandOrigin.Mapper,
-        ScriptCommandOrigin.Script => CommandOrigin.Script,
-        _ => CommandOrigin.System
-    };
+        if (request.Origin == ScriptCommandOrigin.Automation &&
+            string.Equals(request.AutomationType, "Alias", StringComparison.OrdinalIgnoreCase))
+            return CommandOrigin.Alias;
+
+        return request.Origin switch
+        {
+            ScriptCommandOrigin.User => CommandOrigin.User,
+            ScriptCommandOrigin.Alias => CommandOrigin.Alias,
+            ScriptCommandOrigin.Keybinding => CommandOrigin.Keybinding,
+            ScriptCommandOrigin.Automation => CommandOrigin.Automation,
+            ScriptCommandOrigin.Jev => CommandOrigin.Jev,
+            ScriptCommandOrigin.Mapper => CommandOrigin.Mapper,
+            ScriptCommandOrigin.Script => CommandOrigin.Script,
+            _ => CommandOrigin.System
+        };
+    }
 }
 
 public sealed class ClientScriptMapperHost : IScriptMapper

@@ -1,7 +1,9 @@
 using System.Threading.Channels;
 using JevMud.Adapters.Avendar;
 using JevMud.Client.Automation;
+using JevMud.Client.Commands;
 using JevMud.Client.Knowledge;
+using JevMud.Client.Interaction;
 using JevMud.Client.Navigation;
 using JevMud.Client.Settings;
 using JevMud.Client.Secrets;
@@ -130,6 +132,15 @@ public sealed class JevMudRuntime : IAsyncDisposable
             async (query, cancellationToken) =>
                 await Navigator.NavigateToQueryAsync(query, cancellationToken).ConfigureAwait(false),
             compiledAutomation: AutomationCompiler);
+        InputCommands = new LocalCommandHandler(this);
+        InputAliases = new AutomationAliasResolver(AutomationCompiler, () => Automation.Variables);
+        Interaction = new ClientInteractionRuntime(
+            () => Settings,
+            Events.SubscribeLossless(),
+            InputAliases,
+            InputCommands,
+            new KnowledgeCommandHistoryPersistence(Knowledge),
+            () => State.Current);
     }
 
     public EventPipeline Events { get; }
@@ -149,8 +160,11 @@ public sealed class JevMudRuntime : IAsyncDisposable
     public AvendarGameAdapter Avendar { get; }
     public JevDecisionCoordinator JevCoordinator { get; }
     public ClientAutomationService Automation { get; }
+    public LocalCommandHandler InputCommands { get; }
+    public IInputAliasResolver InputAliases { get; }
     public AutomationRuntimeCompiler AutomationCompiler { get; }
     public WorldKnowledgeStore Knowledge { get; }
+    public ClientInteractionRuntime Interaction { get; }
     public AutoMoveService Navigator { get; }
     public ClientSettingsStore SettingsStore { get; }
     public ISecretStore SecretStore { get; }
@@ -179,6 +193,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
             }), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Client automation", Automation.RunAsync), CancellationToken.None));
+        _workers.Add(Task.Run(() => RunWorkerAsync("Interaction output pipeline", Interaction.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("World knowledge", Knowledge.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Mapper movement coordinator", MovementCoordinator.RunAsync), CancellationToken.None));
         _workers.Add(Task.Run(() => RunWorkerAsync("Mapper route control", Navigator.RunAsync), CancellationToken.None));
@@ -192,6 +207,8 @@ public sealed class JevMudRuntime : IAsyncDisposable
         try
         {
             Settings = loaded;
+            Interaction.Configure(Settings);
+            await Interaction.Input.RestoreHistoryAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -316,7 +333,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts,
                 Eor: protocols.Eor),
             ClientName: "NexMUD",
-            ClientVersion: "0.26.5");
+            ClientVersion: "0.27.0");
     }
 
     public async Task SaveSubsystemSettingsAsync(
@@ -409,6 +426,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 CommandSeparator = commandSeparator,
                 HighlightRules = highlightRules.ToArray()
             };
+            Interaction.Configure(Settings);
             await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -440,8 +458,36 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 Timers = timers.ToArray(),
                 KeyBindings = keyBindings.ToArray()
             };
+            Interaction.Configure(Settings);
             await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
             await AutomationCompiler.ReloadAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
+    public async Task SaveInteractionSettingsAsync(
+        InputPreferences input,
+        OutputPreferences output,
+        IReadOnlyList<OutputTransformationRule> outputRules,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(outputRules);
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                Input = input,
+                Output = output,
+                OutputRules = outputRules.ToArray()
+            };
+            Interaction.Configure(Settings);
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

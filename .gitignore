@@ -1,2 +1,4 @@
 .DS_Store
 artifacts/
+src/*/bin/
+src/*/obj/

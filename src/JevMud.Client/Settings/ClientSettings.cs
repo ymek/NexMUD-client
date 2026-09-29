@@ -28,7 +28,10 @@ public sealed record ClientSettings(
     ProtocolPreferences? Protocols = null,
     MapperPreferences? Mapper = null,
     bool JevEnabled = true,
-    string CommandSeparator = ";")
+    string CommandSeparator = ";",
+    InputPreferences? Input = null,
+    OutputPreferences? Output = null,
+    IReadOnlyList<OutputTransformationRule>? OutputRules = null)
 {
     public static ClientSettings Default { get; } = new(
         JevPreset.Off,

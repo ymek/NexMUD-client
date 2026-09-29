@@ -1,4 +1,19 @@
-# NexMUD 0.26.5
+# NexMUD 0.27.0
+
+## Input, keybinding, and output transformation architecture
+
+- `ClientInteractionRuntime` is the interaction composition root. `InputPipeline`, `CommandHistoryService`, `CompletionService`, `KeybindingService`, `OutputFrameFactory`, `OutputTransformationService`, `OutputFrameJournal`, and `WorldBuffer` are application services independent of Avalonia controls.
+- Manual input records history before deterministic escaped-separator tokenization, resolves Automation aliases before unmatched commands enter `LocalCommandHandler`, and preserves explicit origin through `ScriptCommandRequest` / central command dispatch. Existing provenance enum values remain fixed; Alias and Keybinding append new values.
+- History is bounded/session-local and optionally persists through `WorldKnowledgeStore`. Completion is incremental and bounded, preserving MUD-style apostrophes/hyphens/underscores and merging recent output/history with typed state/alias providers.
+- Keybindings persist as typed definitions with context/action/priority/enabled state. Resolution prefers the active context then Global, reports equal-priority collisions, and rejects unsafe bare character bindings in text-entry contexts.
+- Incoming `GameTextReceived` remains the semantic/raw source. The independent display branch creates immutable `OutputFrame` records and performs prompt presentation, capture, substitution, highlight, gag, and notification processing without mutating the source frame or Core event stream.
+- Regex rules enforce a 100 ms match timeout and 4096-character pattern limit. Rule failures and view/notification subscriber failures are isolated from the output worker. Highlight spans are calculated over full rendered text so ANSI run boundaries do not prevent a match.
+- `WorldBuffer` is the bounded logical scrollback source for Avalonia and TUI. Search supports case sensitivity and bounded regex; split-output uses the same buffer; timestamps/local echo remain metadata/provenance rather than injected server text.
+- The Avalonia World view now incrementally projects `WorldBuffer`, preserves user scroll position, exposes new-output return-to-live affordance, and rebuilds only from bounded logical history. Search runs off the UI thread.
+- Settings persist Input/Output preferences, context-aware keybindings, and typed output transformation rules. Existing legacy highlight rules remain supported through the same transformation engine.
+- Regression tests cover input ordering/history, completion, keybinding resolution/conflicts, source/rendered separation, ANSI-spanning highlights, replay, local echo, rule failure isolation, scrollback bounds/search, settings round-trip, and provenance compatibility.
+- Architecture contract: `docs/architecture/NexMUD-input-keybinding-output-transformation-architecture.md`. Mapper and Jev behavior are not migrated in this slice.
+- SemVer release: 0.27.0. macOS build: 27000.
 
 ## Jint public continuation-pump correction
 

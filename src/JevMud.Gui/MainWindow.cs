@@ -13,6 +13,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using JevMud.Adapters.Avendar;
 using JevMud.Client.Commands;
+using JevMud.Client.Interaction;
 using JevMud.Client.Logging;
 using JevMud.Client.Knowledge;
 using JevMud.Client.Presentation;
@@ -25,6 +26,7 @@ using JevMud.Contracts.Jev;
 using JevMud.Contracts.State;
 using JevMud.Contracts.Transport;
 using JevMud.Core.Events;
+using JevMud.Scripting.Host;
 using JevMud.Transport.Text;
 
 namespace JevMud.Gui;
@@ -81,27 +83,13 @@ public sealed class MainWindow : Window
     private MapperRoomMetadata? _currentRoomMetadata;
     private string? _currentRoomMetadataId;
     private CancellationTokenSource? _roomMetadataCts;
-    private readonly LocalCommandHandler _commands;
     private readonly ChannelReader<EventEnvelope> _events;
     private readonly ChannelReader<StateSnapshot> _snapshots;
     private readonly CancellationTokenSource _cts = new();
     private CancellationTokenSource? _nawsResizeCts;
-    private readonly AnsiTextParser _ansi = new();
-    private readonly AvendarPromptDisplayFilter _promptDisplayFilter = new();
-    private readonly TranscriptLineEndingNormalizer _displayLineEndings = new();
-    private TranscriptHighlighter _highlighter;
     private readonly TranscriptLogWriter _logWriter = new();
-    private readonly List<string> _history = [];
-    private readonly List<AnsiTextSegment> _transcriptSegments = [];
-    private readonly Dictionary<string, long> _completionTokenRecency = new(StringComparer.OrdinalIgnoreCase);
-    private long _completionTokenSequence;
     private const int RenderedTranscriptSegmentLimit = 2_500;
     private const int RenderedTranscriptHighWatermark = 3_250;
-    private const int CompletionTokenLimit = 6_000;
-    private List<string> _completionCandidates = [];
-    private string? _completionHead;
-    private string? _completionTail;
-    private int _completionIndex = -1;
 
     private readonly SelectableTextBlock _gameText = new() { Inlines = new InlineCollection() };
     private readonly ScrollViewer _gameScroll = new();
@@ -121,6 +109,7 @@ public sealed class MainWindow : Window
     private readonly TextBlock _notification = new();
     private readonly TextBlock _status = new();
     private readonly Button _jumpLive = new() { Content = "Return to live", IsVisible = false };
+    private readonly Button _newOutputIndicator = new() { Content = "New output ↓", IsVisible = false };
     private readonly Button _logButton = new() { MinHeight = 38 };
     private readonly Button _jevToggle = new();
 
@@ -149,6 +138,8 @@ public sealed class MainWindow : Window
     private readonly ColumnDefinition _workspaceColumn = new();
     private readonly GridSplitter _workspaceSplitter = new();
     private readonly TextBox _searchQuery = new();
+    private readonly CheckBox _searchCaseSensitive = new() { Content = "Case sensitive" };
+    private readonly CheckBox _searchRegex = new() { Content = "Regex" };
     private readonly StackPanel _searchResults = new() { Spacing = 7 };
     private double _preferredRailWidth = 360;
     private double _preferredLiveHeight = 190;
@@ -167,17 +158,15 @@ public sealed class MainWindow : Window
     private string? _jevExecutionStatus;
     private bool _jevEvaluationInProgress;
     private ToolView _activeTool = ToolView.Context;
-    private int _historyIndex;
     private bool _followTail = true;
-    private bool _slurpTelemetryPrompt;
+    private int _unseenOutputCount;
+    private CancellationTokenSource? _searchCts;
 
     public MainWindow(JevMudRuntime runtime)
     {
         _runtime = runtime;
-        _commands = new LocalCommandHandler(runtime);
         _events = runtime.Events.SubscribeLossless();
         _snapshots = runtime.State.Subscribe(capacity: 8);
-        _highlighter = new TranscriptHighlighter(runtime.Settings.HighlightRules);
         _mapperWorkspace = new MapperWorkspace(
             runtime,
             ShowSettingsAsync,
@@ -195,6 +184,9 @@ public sealed class MainWindow : Window
         _characterWorkspace = new CharacterInventoryWorkspace(ResolveItemInspection, SubmitCommandAsync);
         _roomContextPanel = new RoomContextPanel(SubmitCommandAsync, () => ShowTool(ToolView.Map));
         _runtime.Knowledge.MapperKnowledgeChanged += HandleKnowledgeChanged;
+        _runtime.Interaction.World.Appended += HandleWorldBufferAppended;
+        _runtime.Interaction.NotificationRequested += HandleOutputNotification;
+        _runtime.Interaction.RuleDiagnostic += HandleOutputRuleDiagnostic;
         WorkspacePreferences workspace = runtime.Settings.Workspace ?? new WorkspacePreferences();
         _preferredRailWidth = workspace.DockWidth;
         _preferredLiveHeight = workspace.LiveSplitHeight;
@@ -223,7 +215,6 @@ public sealed class MainWindow : Window
         {
             _ = Task.Run(() => ConsumeEventsAsync(_cts.Token));
             _ = Task.Run(() => ConsumeStateAsync(_cts.Token));
-            _ = RestoreCommandHistoryAsync();
             RenderState(_runtime.State.Current);
             UpdateNavigationDensity();
             _command.Focus();
@@ -231,6 +222,11 @@ public sealed class MainWindow : Window
         Closed += (_, _) =>
         {
             _runtime.Knowledge.MapperKnowledgeChanged -= HandleKnowledgeChanged;
+            _runtime.Interaction.World.Appended -= HandleWorldBufferAppended;
+            _runtime.Interaction.NotificationRequested -= HandleOutputNotification;
+            _runtime.Interaction.RuleDiagnostic -= HandleOutputRuleDiagnostic;
+            _searchCts?.Cancel();
+            _searchCts?.Dispose();
             NexMudTheme.AccentChanged -= RestyleCommandInput;
             DeactivateWorkspace(_activeTool);
             _mapperWorkspace.Dispose();
@@ -598,14 +594,29 @@ public sealed class MainWindow : Window
             bool followsTail = distance < 24;
             if (_followTail && !followsTail)
             {
-                ActivateSplitView();
+                if ((_runtime.Settings.Output ?? new OutputPreferences()).SplitOutputEnabled)
+                    ActivateSplitView();
+                else
+                    _followTail = false;
             }
             else if (!_followTail && followsTail)
             {
                 ReturnToLive();
             }
         };
-        historyPanel.Child = _gameScroll;
+        Grid historyGrid = new();
+        historyGrid.Children.Add(_gameScroll);
+        _newOutputIndicator.HorizontalAlignment = HorizontalAlignment.Right;
+        _newOutputIndicator.VerticalAlignment = VerticalAlignment.Top;
+        _newOutputIndicator.Margin = new Thickness(0, 8, 18, 0);
+        _newOutputIndicator.Padding = new Thickness(9, 5);
+        _newOutputIndicator.Background = NexMudTheme.RaisedSurfaceGradient;
+        _newOutputIndicator.Foreground = NexMudTheme.AccentBright;
+        _newOutputIndicator.BorderBrush = NexMudTheme.AntiqueBrass;
+        _newOutputIndicator.BorderThickness = new Thickness(1);
+        _newOutputIndicator.Click += (_, _) => ReturnToLive();
+        historyGrid.Children.Add(_newOutputIndicator);
+        historyPanel.Child = historyGrid;
         transcript.Children.Add(historyPanel);
 
         _transcriptSplitter.Background = NexMudTheme.BronzeShadow;
@@ -705,6 +716,8 @@ public sealed class MainWindow : Window
     private void ReturnToLive()
     {
         _followTail = true;
+        _unseenOutputCount = 0;
+        _jumpLive.Content = "Return to live";
         if (_liveRow.Height.Value > 0)
         {
             _preferredLiveHeight = _liveRow.Height.Value;
@@ -715,6 +728,7 @@ public sealed class MainWindow : Window
         _liveRow.MinHeight = 0;
         _liveRow.Height = new GridLength(0);
         _liveText.Inlines!.Clear();
+        _newOutputIndicator.IsVisible = false;
         Dispatcher.UIThread.Post(_gameScroll.ScrollToEnd, DispatcherPriority.Background);
         _command.Focus();
     }
@@ -722,8 +736,8 @@ public sealed class MainWindow : Window
     private void RebuildLiveTranscript()
     {
         _liveText.Inlines!.Clear();
-        int start = Math.Max(0, _transcriptSegments.Count - 600);
-        AppendSegments(_liveText, _transcriptSegments.Skip(start));
+        foreach (WorldBufferEntry entry in _runtime.Interaction.World.Tail(600))
+            AppendWorldEntry(_liveText, entry);
     }
 
     private Control BuildContextHud()
@@ -929,7 +943,14 @@ public sealed class MainWindow : Window
             ResetCompletion();
         }
 
-        if (e.Key == Key.Tab && CommandInputPolicy.For(_snapshot.Session.InputMode).AllowCompletion)
+        if (TryDispatchKeyBinding(e, KeybindingContext.Input))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        CommandInputPresentation input = CommandInputPolicy.For(_snapshot.Session.InputMode);
+        if (e.Key == Key.Tab && input.AllowCompletion && (_runtime.Settings.Input ?? new InputPreferences()).CompletionEnabled)
         {
             e.Handled = true;
             CycleCompletion(e.KeyModifiers.HasFlag(KeyModifiers.Shift));
@@ -943,14 +964,14 @@ public sealed class MainWindow : Window
             return;
         }
 
-        if (e.Key == Key.Up && _history.Count > 0 && CommandInputPolicy.For(_snapshot.Session.InputMode).AllowHistory)
+        if (e.Key == Key.Up && input.AllowHistory)
         {
             e.Handled = true;
             NavigateCommandHistory(-1);
             return;
         }
 
-        if (e.Key == Key.Down && _history.Count > 0 && CommandInputPolicy.For(_snapshot.Session.InputMode).AllowHistory)
+        if (e.Key == Key.Down && input.AllowHistory)
         {
             e.Handled = true;
             NavigateCommandHistory(1);
@@ -962,38 +983,32 @@ public sealed class MainWindow : Window
         string text = _command.Text ?? string.Empty;
         SessionInputMode inputMode = _snapshot.Session.InputMode;
         CommandInputPresentation presentation = CommandInputPolicy.For(inputMode);
-        if (CommandInputPolicy.ShouldRecordHistory(inputMode, text))
-        {
-            _history.Add(text);
-            TrimCommandHistory();
-            _historyIndex = _history.Count;
-            bool sentToMud = inputMode == SessionInputMode.Editor || !text.TrimStart().StartsWith(':');
-            _ = PersistCommandHistoryAsync(text, sentToMud);
-        }
-
         if (presentation.ClearAfterSubmit)
-        {
             _command.Text = string.Empty;
-        }
         else
-        {
             _command.SelectAll();
-        }
 
-        await SubmitUserInputAsync(text);
+        await SubmitUserInputAsync(text, InputSourceKind.Keyboard).ConfigureAwait(true);
+
         _command.Focus();
         if (!presentation.ClearAfterSubmit && _command.Text == text)
-        {
             _command.SelectAll();
-        }
     }
 
     private void NavigateCommandHistory(int delta)
     {
-        if (_history.Count == 0 || !CommandInputPolicy.For(_snapshot.Session.InputMode).AllowHistory) return;
-        _historyIndex = Math.Clamp(_historyIndex + delta, 0, _history.Count);
-        _command.Text = _historyIndex == _history.Count ? string.Empty : _history[_historyIndex];
-        _command.CaretIndex = _command.Text?.Length ?? 0;
+        if (!CommandInputPolicy.For(_snapshot.Session.InputMode).AllowHistory) return;
+        string text = _command.Text ?? string.Empty;
+        InputEditResult? edit = delta < 0
+            ? _runtime.Interaction.Editing.HistoryPrevious(new InputBufferSnapshot(
+                text,
+                Math.Clamp(_command.CaretIndex, 0, text.Length),
+                _command.SelectionStart,
+                _command.SelectionEnd))
+            : _runtime.Interaction.Editing.HistoryNext();
+        if (edit is null) return;
+        _command.Text = edit.Text;
+        _command.CaretIndex = edit.CaretIndex;
         _command.Focus();
     }
 
@@ -1006,6 +1021,12 @@ public sealed class MainWindow : Window
                 e.Handled = true;
                 CloseSettingsOverlay(saved: false);
             }
+            return;
+        }
+
+        if (TryDispatchKeyBinding(e))
+        {
+            e.Handled = true;
             return;
         }
 
@@ -1041,264 +1062,170 @@ public sealed class MainWindow : Window
         {
             e.Handled = true;
             ShowCommandPalette();
-            return;
-        }
-
-        if (TryDispatchKeyBinding(e))
-        {
-            e.Handled = true;
         }
     }
 
-    private bool TryDispatchKeyBinding(KeyEventArgs e)
+    private bool TryDispatchKeyBinding(KeyEventArgs e, KeybindingContext? forcedContext = null)
     {
         if (_snapshot.Session.InputMode != SessionInputMode.Normal)
-        {
             return false;
-        }
 
-        CommandKeyBinding? binding = (_runtime.Settings.KeyBindings ?? Array.Empty<CommandKeyBinding>())
-            .FirstOrDefault(candidate => CommandGesture.Matches(candidate, e));
-        if (binding is null)
+        KeybindingContext context = forcedContext ?? (_activeTool == ToolView.Map
+            ? KeybindingContext.Mapper
+            : _command.IsFocused ? KeybindingContext.Input : KeybindingContext.World);
+        KeybindingResolution resolution = _runtime.Interaction.Keybindings.Resolve(
+            context,
+            binding => CommandGesture.Matches(binding, e));
+        if (resolution.HasConflict)
         {
-            return false;
+            ShowClientMessage($"Keybinding conflict for {e.Key} in {context} context.", error: true);
+            return true;
         }
+        if (resolution.Binding is null)
+            return false;
 
-        _ = SubmitCommandAsync(binding.Command);
-        ShowClientMessage($"Hotkey: {binding.Command}");
+        _ = DispatchKeybindingActionAsync(resolution.Binding);
         return true;
+    }
+
+    private async Task DispatchKeybindingActionAsync(CommandKeyBinding binding)
+    {
+        try
+        {
+            switch (binding.Action)
+            {
+                case KeybindingActionKind.SubmitInput:
+                    await SubmitCurrentInputAsync().ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.HistoryPrevious:
+                    NavigateCommandHistory(-1);
+                    break;
+                case KeybindingActionKind.HistoryNext:
+                    NavigateCommandHistory(1);
+                    break;
+                case KeybindingActionKind.CompletionNext:
+                    CycleCompletion(reverse: false);
+                    break;
+                case KeybindingActionKind.CompletionPrevious:
+                    CycleCompletion(reverse: true);
+                    break;
+                case KeybindingActionKind.ClearInput:
+                    _command.Text = string.Empty;
+                    break;
+                case KeybindingActionKind.FocusInput:
+                    _command.Focus();
+                    break;
+                case KeybindingActionKind.ScrollPageUp:
+                    _gameScroll.Offset = new Vector(_gameScroll.Offset.X, Math.Max(0, _gameScroll.Offset.Y - _gameScroll.Viewport.Height));
+                    break;
+                case KeybindingActionKind.ScrollPageDown:
+                    _gameScroll.Offset = new Vector(_gameScroll.Offset.X, Math.Min(_gameScroll.Extent.Height, _gameScroll.Offset.Y + _gameScroll.Viewport.Height));
+                    break;
+                case KeybindingActionKind.ScrollToBottom:
+                    ReturnToLive();
+                    break;
+                case KeybindingActionKind.SearchScrollback:
+                    ShowTool(ToolView.Search);
+                    Dispatcher.UIThread.Post(() => _searchQuery.Focus());
+                    break;
+                case KeybindingActionKind.SendCommand:
+                    await SubmitKeybindingCommandAsync(binding).ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.ToggleJev:
+                    await ToggleJevEnabledAsync().ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.MapperPause:
+                    await _runtime.Navigator.PauseAsync("Paused by keybinding.", _cts.Token).ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.MapperResume:
+                    await _runtime.Navigator.ResumeAsync(_cts.Token).ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.MapperAbort:
+                    await _runtime.Navigator.StopAsync("Aborted by keybinding.", _cts.Token).ConfigureAwait(true);
+                    break;
+                case KeybindingActionKind.TogglePane:
+                    if (Enum.TryParse(binding.Command, true, out ToolView view)) ShowTool(view);
+                    break;
+                case KeybindingActionKind.RunAutomation:
+                    if (string.IsNullOrWhiteSpace(binding.Command) ||
+                        !await _runtime.Automation.RunWorkflowAsync(binding.Command, _cts.Token).ConfigureAwait(true))
+                        throw new InvalidOperationException($"Automation '{binding.Command}' is not available to run.");
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            ShowClientMessage($"Keybinding failed: {exception.Message}", error: true);
+        }
+    }
+
+    private async Task SubmitKeybindingCommandAsync(CommandKeyBinding binding)
+    {
+        InputSubmissionResult submission = await _runtime.Interaction.Input.SubmitAsync(
+            new InputRequest(InputSourceKind.Keybinding, binding.Command ?? string.Empty, DateTimeOffset.Now, Guid.NewGuid()),
+            _snapshot.Session.InputMode,
+            _cts.Token).ConfigureAwait(false);
+        LocalCommandResult? failure = submission.Results.FirstOrDefault(result => !string.IsNullOrWhiteSpace(result.Message));
+        if (!string.IsNullOrWhiteSpace(failure?.Message))
+            ShowClientMessage(failure.Message!);
     }
 
     private static bool HasPrimaryModifier(KeyModifiers modifiers) =>
         modifiers.HasFlag(KeyModifiers.Control) || modifiers.HasFlag(KeyModifiers.Meta);
 
-    private async Task RestoreCommandHistoryAsync()
-    {
-        try
-        {
-            IReadOnlyList<string> persisted = await _runtime.Knowledge.GetRecentCommandsAsync(250, _cts.Token)
-                .ConfigureAwait(false);
-            Dispatcher.UIThread.Post(() =>
-            {
-                string[] current = _history.ToArray();
-                _history.Clear();
-                _history.AddRange(persisted);
-                _history.AddRange(current);
-                TrimCommandHistory();
-                _historyIndex = _history.Count;
-            });
-        }
-        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
-        {
-        }
-        catch
-        {
-            // History persistence is a convenience; command entry must remain available.
-        }
-    }
-
-    private async Task PersistCommandHistoryAsync(string command, bool sentToMud)
-    {
-        try
-        {
-            await _runtime.Knowledge.RecordCommandAsync(command, sentToMud, _cts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
-        {
-        }
-        catch
-        {
-            // A locked/unavailable knowledge database must never block play.
-        }
-    }
-
-    private void TrimCommandHistory()
-    {
-        const int MaxHistory = 500;
-        if (_history.Count > MaxHistory)
-        {
-            _history.RemoveRange(0, _history.Count - MaxHistory);
-        }
-    }
-
-    private void ResetCompletion()
-    {
-        _completionCandidates = [];
-        _completionHead = null;
-        _completionTail = null;
-        _completionIndex = -1;
-    }
+    private void ResetCompletion() => _runtime.Interaction.Editing.ResetCompletion();
 
     private void CycleCompletion(bool reverse)
     {
+        if (!(_runtime.Settings.Input ?? new InputPreferences()).CompletionEnabled) return;
         string text = _command.Text ?? string.Empty;
-        int caret = Math.Clamp(_command.CaretIndex, 0, text.Length);
-
-        if (_completionHead is null || _completionTail is null || _completionCandidates.Count == 0)
-        {
-            int tokenStart = caret;
-            while (tokenStart > 0 && !char.IsWhiteSpace(text[tokenStart - 1]))
-            {
-                tokenStart--;
-            }
-
-            string prefix = text[tokenStart..caret];
-            if (prefix.Length == 0)
-            {
-                return;
-            }
-
-            _completionCandidates = BuildCompletionCandidates(prefix);
-            if (_completionCandidates.Count == 0)
-            {
-                return;
-            }
-
-            _completionHead = text[..tokenStart];
-            _completionTail = text[caret..];
-            _completionIndex = reverse ? _completionCandidates.Count - 1 : 0;
-        }
-        else
-        {
-            _completionIndex = reverse
-                ? (_completionIndex - 1 + _completionCandidates.Count) % _completionCandidates.Count
-                : (_completionIndex + 1) % _completionCandidates.Count;
-        }
-
-        string candidate = _completionCandidates[_completionIndex];
-        _command.Text = _completionHead + candidate + _completionTail;
-        _command.CaretIndex = _completionHead.Length + candidate.Length;
-    }
-
-    private List<string> BuildCompletionCandidates(string prefix)
-    {
-        List<string> values = [];
-        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
-
-        void Add(string? value)
-        {
-            string candidate = value?.Trim() ?? string.Empty;
-            if (candidate.Length > 0 &&
-                candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
-                seen.Add(candidate))
-            {
-                values.Add(candidate);
-            }
-        }
-
-        // Transcript history is the primary completion source. This keeps names and arbitrary
-        // server-provided tokens available even after the room/state snapshot changes.
-        foreach ((string token, _) in _completionTokenRecency
-                     .Where(pair => pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                     .OrderByDescending(pair => pair.Value)
-                     .Take(100))
-        {
-            Add(token);
-        }
-
-        foreach (string command in new[]
-                 {
-                     "look", "consider", "scan", "where", "who", "score", "inventory", "equipment",
-                     "skills", "spells", "flee", "get", "drop", "wear", "remove", "open", "close",
-                     "lock", "unlock", "read", "examine", "drink", "sacrifice", "say", "tell"
-                 })
-        {
-            Add(command);
-        }
-
-        foreach (CommandAlias alias in _runtime.Settings.Aliases ?? Array.Empty<CommandAlias>())
-        {
-            if (alias.Enabled)
-            {
-                Add(alias.Name);
-            }
-        }
-
-        foreach (string direction in _snapshot.Room.Exits.Directions)
-        {
-            Add(direction);
-        }
-
-        foreach (RoomContentObservation entity in _snapshot.Room.Contents)
-        {
-            Add(entity.CanonicalName);
-            foreach (string keyword in entity.TargetKeywords ?? Array.Empty<string>())
-            {
-                Add(keyword);
-            }
-        }
-
-        foreach (SkillState skill in _snapshot.Character.Skills)
-        {
-            Add(skill.Name);
-        }
-        foreach (SpellState spell in _snapshot.Character.Spells)
-        {
-            Add(spell.Name);
-        }
-
-        return values
-            .OrderBy(value => value.Length)
-            .ThenBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private void IndexCompletionText(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return;
-        int start = -1;
-        for (int index = 0; index <= text.Length; index++)
-        {
-            bool tokenChar = index < text.Length && (char.IsLetterOrDigit(text[index]) || text[index] is '\'' or '-' or '_');
-            if (tokenChar)
-            {
-                if (start < 0) start = index;
-                continue;
-            }
-            if (start < 0) continue;
-            int length = index - start;
-            if (length >= 2)
-            {
-                string token = text.Substring(start, length);
-                _completionTokenRecency[token] = ++_completionTokenSequence;
-            }
-            start = -1;
-        }
-
-        if (_completionTokenRecency.Count <= CompletionTokenLimit) return;
-        foreach (string token in _completionTokenRecency
-                     .OrderBy(pair => pair.Value)
-                     .Take(_completionTokenRecency.Count - CompletionTokenLimit)
-                     .Select(pair => pair.Key)
-                     .ToArray())
-        {
-            _completionTokenRecency.Remove(token);
-        }
+        InputEditResult? result = _runtime.Interaction.Editing.Complete(
+            new InputBufferSnapshot(
+                text,
+                Math.Clamp(_command.CaretIndex, 0, text.Length),
+                _command.SelectionStart,
+                _command.SelectionEnd),
+            reverse);
+        if (result is null) return;
+        _command.Text = result.Text;
+        _command.CaretIndex = result.CaretIndex;
     }
 
     private void TrimRenderedTranscriptIfNeeded()
     {
         if (_gameText.Inlines is null || _gameText.Inlines.Count <= RenderedTranscriptHighWatermark) return;
-        _gameText.Inlines.Clear();
-        int start = Math.Max(0, _transcriptSegments.Count - RenderedTranscriptSegmentLimit);
-        AppendSegments(_gameText, _transcriptSegments.Skip(start));
+        RebuildTranscript();
     }
 
     private Control BuildSearchPanel()
     {
         StackPanel stack = ToolStack();
-        _searchQuery.PlaceholderText = "Search server output";
+        _searchQuery.PlaceholderText = "Search rendered scrollback";
         _searchQuery.Background = ConsoleBackground;
         _searchQuery.Foreground = TextForeground;
         _searchQuery.BorderBrush = PanelBorderBrush;
         _searchQuery.TextChanged -= SearchQueryChanged;
         _searchQuery.TextChanged += SearchQueryChanged;
         stack.Children.Add(_searchQuery);
+
+        StackPanel options = new() { Orientation = Orientation.Horizontal, Spacing = 12 };
+        _searchCaseSensitive.Foreground = TextForeground;
+        _searchRegex.Foreground = TextForeground;
+        _searchCaseSensitive.Click -= SearchOptionChanged;
+        _searchRegex.Click -= SearchOptionChanged;
+        _searchCaseSensitive.Click += SearchOptionChanged;
+        _searchRegex.Click += SearchOptionChanged;
+        options.Children.Add(_searchCaseSensitive);
+        options.Children.Add(_searchRegex);
+        stack.Children.Add(options);
         stack.Children.Add(new TextBlock
         {
-            Text = "Search is presentation-only and never changes the transcript.",
+            Text = "Search runs against visible rendered scrollback. Source text and semantic processing are unchanged.",
             Foreground = Muted,
-            FontSize = 10.5,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
         RebuildSearchResults();
@@ -1306,48 +1233,90 @@ public sealed class MainWindow : Window
         return ToolScroll(stack);
     }
 
-    private void SearchQueryChanged(object? sender, TextChangedEventArgs e) => RebuildSearchResults();
+    private void SearchQueryChanged(object? sender, TextChangedEventArgs e) => ScheduleSearchResults();
+    private void SearchOptionChanged(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => ScheduleSearchResults();
 
-    private void RebuildSearchResults()
+    private void RebuildSearchResults() => ScheduleSearchResults(immediate: true);
+
+    private void ScheduleSearchResults(bool immediate = false)
     {
-        _searchResults.Children.Clear();
+        _searchCts?.Cancel();
+        _searchCts?.Dispose();
+        CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _searchCts = cts;
+
         string query = (_searchQuery.Text ?? string.Empty).Trim();
-        if (query.Length == 0)
-        {
-            _searchResults.Children.Add(new TextBlock { Text = "Type to search the current session transcript.", Foreground = Muted });
-            return;
-        }
+        bool caseSensitive = _searchCaseSensitive.IsChecked == true;
+        bool regex = _searchRegex.IsChecked == true;
+        _ = SearchScrollbackAsync(query, caseSensitive, regex, immediate, cts);
+    }
 
-        string text = string.Concat(_transcriptSegments.Select(segment => segment.Text));
-        string[] lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        List<(int Line, string Text)> matches = [];
-        for (int index = 0; index < lines.Length && matches.Count < 100; index++)
+    private async Task SearchScrollbackAsync(
+        string query,
+        bool caseSensitive,
+        bool regex,
+        bool immediate,
+        CancellationTokenSource owner)
+    {
+        try
         {
-            if (lines[index].Contains(query, StringComparison.OrdinalIgnoreCase))
+            if (!immediate) await Task.Delay(90, owner.Token).ConfigureAwait(false);
+            if (query.Length == 0)
             {
-                matches.Add((index + 1, lines[index]));
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!ReferenceEquals(_searchCts, owner)) return;
+                    _searchResults.Children.Clear();
+                    _searchResults.Children.Add(new TextBlock
+                    {
+                        Text = "Type to search the current rendered scrollback.",
+                        Foreground = Muted
+                    });
+                });
+                return;
             }
-        }
 
-        _searchResults.Children.Add(new TextBlock
-        {
-            Text = matches.Count == 100 ? "100+ matches" : $"{matches.Count} match{(matches.Count == 1 ? string.Empty : "es")}",
-            Foreground = Accent,
-            FontWeight = FontWeight.SemiBold
-        });
-        foreach ((int line, string matchText) in matches)
-        {
-            StackPanel result = new() { Spacing = 2 };
-            result.Children.Add(new TextBlock { Text = $"Line {line}", Foreground = Muted, FontSize = 10 });
-            result.Children.Add(new TextBlock
+            IReadOnlyList<WorldBufferSearchResult> matches = await Task.Run(
+                () => _runtime.Interaction.World.Search(
+                    query,
+                    new WorldBufferSearchOptions(caseSensitive, regex, 100)),
+                owner.Token).ConfigureAwait(false);
+
+            Dispatcher.UIThread.Post(() =>
             {
-                Text = matchText.Length > 240 ? matchText[..240] + "…" : matchText,
-                Foreground = TextForeground,
-                FontFamily = UiTheme.Mono,
-                FontSize = 11,
-                TextWrapping = TextWrapping.Wrap
+                if (!ReferenceEquals(_searchCts, owner)) return;
+                _searchResults.Children.Clear();
+                _searchResults.Children.Add(new TextBlock
+                {
+                    Text = matches.Count == 100 ? "100+ matches" : $"{matches.Count} match{(matches.Count == 1 ? string.Empty : "es")}",
+                    Foreground = Accent,
+                    FontWeight = FontWeight.SemiBold
+                });
+                foreach (WorldBufferSearchResult match in matches)
+                {
+                    StackPanel result = new() { Spacing = 2 };
+                    result.Children.Add(new TextBlock
+                    {
+                        Text = match.Timestamp.ToLocalTime().ToString("HH:mm:ss"),
+                        Foreground = Muted,
+                        FontSize = NexTypography.Metadata
+                    });
+                    string preview = match.Text.Replace("\r", string.Empty, StringComparison.Ordinal)
+                        .Replace("\n", " ", StringComparison.Ordinal).Trim();
+                    result.Children.Add(new TextBlock
+                    {
+                        Text = preview.Length > 240 ? preview[..240] + "…" : preview,
+                        Foreground = TextForeground,
+                        FontFamily = UiTheme.Mono,
+                        FontSize = NexTypography.Small,
+                        TextWrapping = TextWrapping.Wrap
+                    });
+                    _searchResults.Children.Add(Card(result, PanelBorderBrush));
+                }
             });
-            _searchResults.Children.Add(Card(result, PanelBorderBrush));
+        }
+        catch (OperationCanceledException) when (owner.IsCancellationRequested)
+        {
         }
     }
 
@@ -1590,21 +1559,29 @@ public sealed class MainWindow : Window
         _ = palette.ShowDialog(this);
     }
 
-    private async Task SubmitUserInputAsync(string input)
+    private async Task SubmitUserInputAsync(string input, InputSourceKind source = InputSourceKind.Keyboard)
     {
-        if (_snapshot.Session.InputMode != SessionInputMode.Normal)
+        try
         {
-            await SubmitCommandAsync(input).ConfigureAwait(false);
-            return;
-        }
+            InputSubmissionResult submission = await _runtime.Interaction.Input.SubmitAsync(
+                new InputRequest(source, input, DateTimeOffset.Now, Guid.NewGuid()),
+                _snapshot.Session.InputMode,
+                _cts.Token).ConfigureAwait(false);
 
-        IReadOnlyList<string> commands = CommandInputExpander.Expand(
-            input,
-            _runtime.Settings.CommandSeparator,
-            aliases: null);
-        foreach (string command in commands)
+            foreach (LocalCommandResult result in submission.Results)
+            {
+                if (!string.IsNullOrWhiteSpace(result.Message))
+                    Dispatcher.UIThread.Post(() => ShowClientMessage(result.Message));
+                if (result.ExitRequested)
+                    Dispatcher.UIThread.Post(Close);
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
         {
-            await SubmitCommandAsync(command).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Dispatcher.UIThread.Post(() => ShowClientMessage($"Command failed: {exception.Message}", error: true));
         }
     }
 
@@ -1612,14 +1589,16 @@ public sealed class MainWindow : Window
     {
         try
         {
-            LocalCommandResult result = await _commands.HandleAsync(command, _cts.Token).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(result.Message))
+            InputSubmissionResult submission = await _runtime.Interaction.Input.SubmitAsync(
+                new InputRequest(InputSourceKind.UiAction, command, DateTimeOffset.Now, Guid.NewGuid()),
+                _snapshot.Session.InputMode,
+                _cts.Token).ConfigureAwait(false);
+            foreach (LocalCommandResult result in submission.Results)
             {
-                Dispatcher.UIThread.Post(() => ShowClientMessage(result.Message));
-            }
-            if (result.ExitRequested)
-            {
-                Dispatcher.UIThread.Post(Close);
+                if (!string.IsNullOrWhiteSpace(result.Message))
+                    Dispatcher.UIThread.Post(() => ShowClientMessage(result.Message));
+                if (result.ExitRequested)
+                    Dispatcher.UIThread.Post(Close);
             }
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
@@ -1790,7 +1769,7 @@ public sealed class MainWindow : Window
         });
         content.Children.Add(new TextBlock
         {
-            Text = "Version 0.26.5",
+            Text = "Version 0.27.0",
             Foreground = UiTheme.Faint,
             FontSize = UiTheme.TextSm
         });
@@ -1825,16 +1804,12 @@ public sealed class MainWindow : Window
                 {
                     case GameTextReceived game:
                         _logWriter.Write(game.Text);
-                        Dispatcher.UIThread.Post(() => AppendGameText(game.Text));
                         break;
                     case ConnectionStateChanged connection:
                         HandleLoggingConnectionState(connection);
                         break;
                     case JevDecisionProduced decision:
                         Dispatcher.UIThread.Post(() => RenderDecision(decision.Decision));
-                        break;
-                    case ActionDispatching action when CommandInputPolicy.ShouldEchoToTranscript(action.Sensitive):
-                        Dispatcher.UIThread.Post(() => AppendCommandEcho(action));
                         break;
                     case ItemIdentified identified:
                         _itemKnowledgeCache[identified.Item.Name] = new ItemKnowledge(
@@ -2045,154 +2020,119 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void AppendCommandEcho(ActionDispatching action)
+    private void HandleWorldBufferAppended(WorldBufferEntry entry)
     {
-        string command = action.Command.Length == 0 ? "<enter>" : action.Command;
-        CommandOrigin origin = action.Provenance?.Origin ?? action.Source switch
+        if (entry.IsGagged) return;
+        Dispatcher.UIThread.Post(() =>
         {
-            DecisionSource.Human => CommandOrigin.User,
-            DecisionSource.Jev or DecisionSource.Hybrid => CommandOrigin.Jev,
-            _ => CommandOrigin.System
-        };
-        string sourcePrefix = origin switch
-        {
-            CommandOrigin.User => "> ",
-            CommandOrigin.Automation => "[Automation] > ",
-            CommandOrigin.Jev => "[Jev] > ",
-            CommandOrigin.Mapper => "[Mapper] > ",
-            CommandOrigin.Script => "[Script] > ",
-            _ => "[System] > "
-        };
-
-        // MUD servers generally do not echo client input. Local echo belongs in the same transcript
-        // surface so human and automated commands are visible in chronological context. Sensitive
-        // input is filtered by the event consumer and is never rendered here.
-        AnsiColor echoColor = origin switch
-        {
-            CommandOrigin.Jev => new AnsiColor(255, 205, 92),
-            CommandOrigin.Automation => new AnsiColor(178, 156, 255),
-            CommandOrigin.Mapper => new AnsiColor(105, 200, 255),
-            CommandOrigin.Script => new AnsiColor(210, 150, 255),
-            CommandOrigin.System => new AnsiColor(255, 224, 128),
-            _ => new AnsiColor(70, 220, 255)
-        };
-        AnsiTextStyle style = AnsiTextStyle.Default with
-        {
-            Foreground = echoColor,
-            Bold = true,
-            Faint = false
-        };
-        AnsiTextSegment segment = new($"{sourcePrefix}{command}\n", style);
-        _transcriptSegments.Add(segment);
-        IndexCompletionText(segment.Text);
-        AppendSegments(_gameText, [segment]);
-        TrimRenderedTranscriptIfNeeded();
-        if (_livePane.IsVisible)
-        {
-            AppendSegments(_liveText, [segment]);
-            Dispatcher.UIThread.Post(_liveScroll.ScrollToEnd, DispatcherPriority.Background);
-        }
-
-        if (_followTail)
-        {
-            Dispatcher.UIThread.Post(_gameScroll.ScrollToEnd, DispatcherPriority.Background);
-        }
-    }
-
-    private void AppendGameText(string text)
-    {
-        string visibleText = _slurpTelemetryPrompt ? _promptDisplayFilter.Process(text) : text;
-        visibleText = _displayLineEndings.Process(visibleText);
-        if (visibleText.Length == 0)
-        {
-            return;
-        }
-
-        IReadOnlyList<AnsiTextSegment> segments = _ansi.Process(visibleText).ToArray();
-        if (segments.Count == 0)
-        {
-            return;
-        }
-
-        _transcriptSegments.AddRange(segments);
-        IndexCompletionText(string.Concat(segments.Select(segment => segment.Text)));
-        AppendSegments(_gameText, segments);
-        TrimRenderedTranscriptIfNeeded();
-        if (_livePane.IsVisible)
-        {
-            AppendSegments(_liveText, segments);
-            Dispatcher.UIThread.Post(_liveScroll.ScrollToEnd, DispatcherPriority.Background);
-        }
-
-        if (_followTail)
-        {
-            Dispatcher.UIThread.Post(_gameScroll.ScrollToEnd, DispatcherPriority.Background);
-        }
-        if (_activeTool == ToolView.Search && !string.IsNullOrWhiteSpace(_searchQuery.Text))
-        {
-            RebuildSearchResults();
-        }
-    }
-
-    private void AppendSegments(SelectableTextBlock target, IEnumerable<AnsiTextSegment> segments)
-    {
-        foreach (AnsiTextSegment segment in segments)
-        {
-            foreach (TranscriptPresentationSegment presented in _highlighter.Apply(segment))
+            AppendWorldEntry(entry);
+            if (!_followTail)
             {
-                if (presented.Text.Length == 0)
-                {
-                    continue;
-                }
-                target.Inlines!.Add(CreateTranscriptRun(presented));
+                _unseenOutputCount++;
+                _jumpLive.Content = $"Return to live • {_unseenOutputCount} new";
             }
+            if (_activeTool == ToolView.Search && !string.IsNullOrWhiteSpace(_searchQuery.Text))
+                ScheduleSearchResults();
+        });
+    }
+
+    private void AppendWorldEntry(WorldBufferEntry entry)
+    {
+        AppendWorldEntry(_gameText, entry);
+        TrimRenderedTranscriptIfNeeded();
+        if (_livePane.IsVisible)
+        {
+            AppendWorldEntry(_liveText, entry);
+            Dispatcher.UIThread.Post(_liveScroll.ScrollToEnd, DispatcherPriority.Background);
+        }
+        if (_followTail)
+        {
+            _newOutputIndicator.IsVisible = false;
+            Dispatcher.UIThread.Post(_gameScroll.ScrollToEnd, DispatcherPriority.Background);
+        }
+        else
+        {
+            _newOutputIndicator.IsVisible = true;
         }
     }
 
-    private static Run CreateTranscriptRun(TranscriptPresentationSegment segment)
+    private void AppendWorldEntry(SelectableTextBlock target, WorldBufferEntry entry)
+    {
+        string timestamp = FormatTimestamp(entry.Timestamp);
+        if (timestamp.Length > 0)
+        {
+            target.Inlines!.Add(new Run(timestamp)
+            {
+                Foreground = NexMudTheme.Faint,
+                FontWeight = FontWeight.Normal
+            });
+        }
+        foreach (WorldStyledRun run in entry.StyledRuns)
+        {
+            if (run.Text.Length == 0) continue;
+            target.Inlines!.Add(CreateTranscriptRun(run));
+        }
+    }
+
+    private string FormatTimestamp(DateTimeOffset timestamp)
+    {
+        TimestampRenderMode mode = (_runtime.Settings.Output ?? new OutputPreferences()).TimestampMode;
+        DateTimeOffset local = timestamp.ToLocalTime();
+        return mode switch
+        {
+            TimestampRenderMode.Time => $"[{local:HH:mm:ss}] ",
+            TimestampRenderMode.TimeWithMilliseconds => $"[{local:HH:mm:ss.fff}] ",
+            TimestampRenderMode.DateTime => $"[{local:yyyy-MM-dd HH:mm:ss}] ",
+            _ => string.Empty
+        };
+    }
+
+    private static Run CreateTranscriptRun(WorldStyledRun segment)
     {
         AnsiTextStyle style = segment.AnsiStyle;
         IBrush foreground = SegmentForeground(style);
         IBrush? background = SegmentBackground(style);
         if (style.Reverse)
-        {
             (foreground, background) = (background ?? ConsoleBackground, foreground);
-        }
 
-        if (segment.Highlight is not null)
-        {
-            foreground = Brush(segment.Highlight.Foreground);
-        }
+        OutputPresentationStyle? overlay = segment.Override;
+        if (!string.IsNullOrWhiteSpace(overlay?.Foreground)) foreground = Brush(overlay.Foreground);
+        if (!string.IsNullOrWhiteSpace(overlay?.Background)) background = Brush(overlay.Background);
 
-        bool bold = style.Bold || segment.Highlight?.Bold == true;
-        bool underline = style.Underline || segment.Highlight?.Underline == true;
+        bool bold = style.Bold || overlay?.Bold == true;
+        bool underline = style.Underline || overlay?.Underline == true;
         Run run = new(segment.Text)
         {
             Foreground = foreground,
             Background = background,
             FontWeight = bold ? FontWeight.Bold : FontWeight.Normal,
-            FontStyle = style.Italic ? FontStyle.Italic : FontStyle.Normal
+            FontStyle = style.Italic || overlay?.Italic == true ? FontStyle.Italic : FontStyle.Normal
         };
-        if (underline)
-        {
-            run.TextDecorations = TextDecorations.Underline;
-        }
+        if (underline) run.TextDecorations = TextDecorations.Underline;
         return run;
     }
 
     private void RebuildTranscript()
     {
         _gameText.Inlines!.Clear();
-        int start = Math.Max(0, _transcriptSegments.Count - RenderedTranscriptSegmentLimit);
-        AppendSegments(_gameText, _transcriptSegments.Skip(start));
-        if (_livePane.IsVisible)
-        {
-            RebuildLiveTranscript();
-        }
+        foreach (WorldBufferEntry entry in _runtime.Interaction.World.Tail(RenderedTranscriptSegmentLimit))
+            AppendWorldEntry(_gameText, entry);
+        if (_livePane.IsVisible) RebuildLiveTranscript();
         if (_followTail)
-        {
             Dispatcher.UIThread.Post(_gameScroll.ScrollToEnd, DispatcherPriority.Background);
-        }
+    }
+
+    private void HandleOutputNotification(OutputNotification notification)
+    {
+        Dispatcher.UIThread.Post(() =>
+            ShowClientMessage(notification.Beep ? $"Sound alert: {notification.Message}" : notification.Message));
+    }
+
+    private void HandleOutputRuleDiagnostic(OutputRuleDiagnostic diagnostic)
+    {
+        Dispatcher.UIThread.Post(() => ShowClientMessage(
+            $"Output rule {diagnostic.RuleId}: {diagnostic.Message}",
+            error: true));
     }
 
     private void HandleLoggingConnectionState(ConnectionStateChanged connection)
@@ -2386,11 +2326,6 @@ public sealed class MainWindow : Window
         string connectionHost = connected ? state.Session.Host ?? _runtime.Settings.Host : _runtime.Settings.Host;
         int connectionPort = connected ? state.Session.Port ?? _runtime.Settings.Port : _runtime.Settings.Port;
         RenderConnectionAction(connected, connectionHost, connectionPort);
-        if (!connected)
-        {
-            _displayLineEndings.Reset();
-        }
-
         CommandInputPresentation inputPresentation = CommandInputPolicy.For(state.Session.InputMode);
         CommandInputTransitionPresentation inputTransition = CommandInputPolicy.Transition(previousInputMode, state.Session.InputMode);
         _command.PasswordChar = inputPresentation.PasswordChar;
@@ -4170,16 +4105,10 @@ public sealed class MainWindow : Window
 
     private void ApplyUiSettings()
     {
-        bool slurpChanged = _slurpTelemetryPrompt != _runtime.Settings.SlurpTelemetryPrompt;
-        _slurpTelemetryPrompt = _runtime.Settings.SlurpTelemetryPrompt;
-        if (slurpChanged)
-        {
-            _promptDisplayFilter.Reset();
-        }
+        _runtime.Interaction.Configure(_runtime.Settings);
         double transcriptFontSize = NormalizeTranscriptFontSize(_runtime.Settings.TranscriptFontSize);
         ApplyTranscriptMetrics(_gameText, transcriptFontSize);
         ApplyTranscriptMetrics(_liveText, transcriptFontSize);
-        _highlighter = new TranscriptHighlighter(_runtime.Settings.HighlightRules);
         RebuildTranscript();
         RenderLoggingState();
         if (_runtime.Settings.AutoLogSessions &&

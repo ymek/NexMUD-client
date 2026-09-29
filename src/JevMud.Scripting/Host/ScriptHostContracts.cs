@@ -8,12 +8,14 @@ namespace JevMud.Scripting.Host;
 
 public enum ScriptCommandOrigin
 {
-    User,
-    Automation,
-    Jev,
-    Mapper,
-    Script,
-    System
+    User = 0,
+    Automation = 1,
+    Jev = 2,
+    Mapper = 3,
+    Script = 4,
+    System = 5,
+    Alias = 6,
+    Keybinding = 7
 }
 
 public sealed record ScriptCommandRequest(

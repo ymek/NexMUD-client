@@ -3,13 +3,14 @@ using JevMud.Scripting.Host;
 using JevMud.Contracts.Transport;
 using JevMud.Contracts.State;
 using JevMud.Client.Runtime;
+using JevMud.Client.Interaction;
 using JevMud.Core.Jev;
 
 namespace JevMud.Client.Commands;
 
 public sealed record LocalCommandResult(bool ExitRequested, string? Message = null);
 
-public sealed class LocalCommandHandler
+public sealed class LocalCommandHandler : IInputCommandDispatcher
 {
     private readonly JevMudRuntime _runtime;
 
@@ -18,27 +19,27 @@ public sealed class LocalCommandHandler
         _runtime = runtime;
     }
 
-    public async Task<LocalCommandResult> HandleAsync(string input, CancellationToken cancellationToken = default)
+    public Task<LocalCommandResult> HandleAsync(string input, CancellationToken cancellationToken = default) =>
+        DispatchAsync(input, InputSourceKind.Keyboard, _runtime.State.Current.Session.InputMode, cancellationToken);
+
+    public async Task<LocalCommandResult> DispatchAsync(
+        string input,
+        InputSourceKind source,
+        SessionInputMode inputMode,
+        CancellationToken cancellationToken = default)
     {
-        SessionInputMode inputMode = _runtime.State.Current.Session.InputMode;
         bool directInput = inputMode is SessionInputMode.LoginName or SessionInputMode.LoginPassword or SessionInputMode.Editor;
         string command = directInput ? input : input.TrimEnd();
 
         if (directInput)
         {
-            await QueueMudCommandAsync(command, cancellationToken).ConfigureAwait(false);
+            await QueueMudCommandAsync(command, source, cancellationToken).ConfigureAwait(false);
             return new LocalCommandResult(false);
         }
 
         if (!command.StartsWith(':'))
         {
-            if (await _runtime.AutomationCompiler.TryHandleAliasAsync(
-                    command,
-                    _runtime.Automation.Variables,
-                    cancellationToken).ConfigureAwait(false))
-                return new LocalCommandResult(false);
-
-            await QueueMudCommandAsync(command, cancellationToken).ConfigureAwait(false);
+            await QueueMudCommandAsync(command, source, cancellationToken).ConfigureAwait(false);
             return new LocalCommandResult(false);
         }
 
@@ -103,24 +104,51 @@ public sealed class LocalCommandHandler
         if (parts.Length == 2 && string.Equals(parts[1], "prompt", StringComparison.OrdinalIgnoreCase))
         {
             const string telemetryPrompt = "prompt [J|%h/%H|%m/%M|%v/%V|%x|%X|%s|%r|%e|%T|%d]";
-            await QueueMudCommandAsync(telemetryPrompt, cancellationToken).ConfigureAwait(false);
+            await QueueMudCommandAsync(telemetryPrompt, InputSourceKind.UiAction, cancellationToken).ConfigureAwait(false);
             return new LocalCommandResult(false, "Avendar telemetry prompt requested for this character.");
         }
 
         return new LocalCommandResult(false, "Usage: :avendar prompt");
     }
 
-    private async Task QueueMudCommandAsync(string command, CancellationToken cancellationToken)
+    private async Task QueueMudCommandAsync(string command, InputSourceKind source, CancellationToken cancellationToken)
     {
         StateSnapshot state = _runtime.State.Current;
         bool sensitive = state.Session.InputMode == SessionInputMode.LoginPassword;
+        ScriptCommandOrigin origin = source switch
+        {
+            InputSourceKind.Keybinding => ScriptCommandOrigin.Keybinding,
+            InputSourceKind.Automation => ScriptCommandOrigin.Automation,
+            InputSourceKind.Script => ScriptCommandOrigin.Script,
+            InputSourceKind.Mapper => ScriptCommandOrigin.Mapper,
+            InputSourceKind.Jev => ScriptCommandOrigin.Jev,
+            _ => ScriptCommandOrigin.User
+        };
+        string ownerId = origin switch
+        {
+            ScriptCommandOrigin.Keybinding => "keybinding",
+            ScriptCommandOrigin.Automation => "automation-input",
+            ScriptCommandOrigin.Script => "script-input",
+            ScriptCommandOrigin.Mapper => "mapper-input",
+            ScriptCommandOrigin.Jev => "jev-input",
+            _ => "user"
+        };
+        string ownerName = origin switch
+        {
+            ScriptCommandOrigin.Keybinding => "Keybinding",
+            ScriptCommandOrigin.Automation => "Automation",
+            ScriptCommandOrigin.Script => "Script",
+            ScriptCommandOrigin.Mapper => "Mapper",
+            ScriptCommandOrigin.Jev => "Jev",
+            _ => "User"
+        };
         ScriptCommandResult result = await _runtime.ScriptCommands.SendAsync(
             new ScriptCommandRequest(
                 command,
-                ScriptCommandOrigin.User,
-                "user",
-                "User",
-                "User command",
+                origin,
+                ownerId,
+                ownerName,
+                $"{ownerName} command",
                 Sensitive: sensitive,
                 ExpectedStateVersion: state.Version),
             cancellationToken).ConfigureAwait(false);

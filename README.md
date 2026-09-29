@@ -1,4 +1,18 @@
-# NexMUD Client v0.26.5
+# NexMUD Client v0.27.0
+
+## v0.27.0 - Input, keybinding, and output transformation architecture
+
+- Introduced a first-class interaction layer instead of UI-local command/transcript behavior. Manual input now flows through typed history, command tokenization, Automation alias resolution, and central command dispatch while preserving User/Alias/Keybinding provenance.
+- Added session-local command history with optional SQLite persistence, in-progress-buffer restoration, bounded retention, configurable de-duplication, and no generated-command pollution.
+- Added incremental Tab/Shift-Tab completion over recent rendered output, manual history, aliases, exits, room contents, inventory/equipment, skills, and spells. MUD identifiers preserve apostrophes, hyphens, and underscores.
+- Added typed, persisted, context-aware keybindings with deterministic priority/fallback, explicit conflict detection, safe text-entry behavior, and application actions for history/completion, scroll/search, commands, Automation, Jev toggle, panes, and Mapper pause/resume/abort.
+- Introduced immutable `OutputFrame` source records, a bounded raw/source journal, deterministic display-only transformation rules, and a bounded logical `WorldBuffer`. Semantic parsing/Automation continue to consume the original event stream; gag/substitution cannot rewrite Core meaning.
+- Added output highlight, gag, substitution, structured regex capture, notify/beep hooks, bounded-regex diagnostics, ANSI-composed rendering, timestamp metadata, provenance-styled local echo, rendered scrollback search, scroll-lock/new-output affordance, and split-output projection over the same logical buffer.
+- Avalonia and TUI now project the shared `WorldBuffer`; they no longer own raw-output transformation. Avalonia input delegates history/completion/alias/dispatch behavior to interaction services rather than maintaining parallel state.
+- Added Settings sections for Input/Output, Keybindings, and Output Rules plus persisted configuration for separator/history/completion/local echo/timestamps/scrollback/split behavior/rules. Multi-action rule data remains preserved by the editor.
+- Added regression coverage for escaped command separators, history restoration/isolation, completion cycling, keybinding conflicts, source-vs-rendered separation, gag/substitute/capture/highlight behavior, ANSI-run-spanning highlights, replay determinism, local echo metadata, output-rule fault isolation, buffer subscriber isolation, bounded scrollback/search, settings persistence, and provenance enum compatibility.
+- Added the architecture contract at `docs/architecture/NexMUD-input-keybinding-output-transformation-architecture.md`. Jev behavior is intentionally unchanged.
+- SemVer release: 0.27.0. macOS build: 27000.
 
 ## v0.26.5 - Jint public continuation-pump correction
 

@@ -65,26 +65,25 @@ public sealed class AnsiConsoleView : View
 
     public void AppendAnsi(string text)
     {
-        if (string.IsNullOrEmpty(text))
-        {
-            return;
-        }
+        if (string.IsNullOrEmpty(text)) return;
+        AppendSegments(_ansi.Process(text));
+    }
 
-        foreach (AnsiTextSegment segment in _ansi.Process(text))
+    public void AppendSegments(IEnumerable<AnsiTextSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        bool appended = false;
+        foreach (AnsiTextSegment segment in segments)
         {
+            appended = true;
             foreach (Rune rune in segment.Text.EnumerateRunes())
             {
-                if (rune.Value == '\r')
-                {
-                    continue;
-                }
-
+                if (rune.Value == '\r') continue;
                 if (rune.Value == '\n')
                 {
                     _logicalLines.Add([]);
                     continue;
                 }
-
                 if (rune.Value == '\b')
                 {
                     RemoveLastRune();
@@ -94,6 +93,7 @@ public sealed class AnsiConsoleView : View
                 _logicalLines[^1].Add(new StyledRune(rune, segment.Style));
             }
         }
+        if (!appended) return;
 
         while (_logicalLines.Count > MaxLogicalLines)
         {

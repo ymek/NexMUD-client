@@ -8,9 +8,12 @@ internal static class CommandGesture
     private const KeyModifiers RelevantModifiers =
         KeyModifiers.Control | KeyModifiers.Meta | KeyModifiers.Alt | KeyModifiers.Shift;
 
-    public static bool IsValid(string text) =>
+    public static bool IsValid(string text) => IsValid(text, KeybindingContext.Global);
+
+    public static bool IsValid(string text, KeybindingContext context) =>
         TryParse(text, out Key key, out KeyModifiers modifiers, out bool primary) &&
-        (primary || modifiers != KeyModifiers.None || IsFunctionKey(key));
+        (primary || modifiers != KeyModifiers.None || IsFunctionKey(key) ||
+         (context != KeybindingContext.Global && IsNonTextNavigationKey(key)));
 
     public static bool Matches(CommandKeyBinding binding, KeyEventArgs e)
     {
@@ -132,4 +135,10 @@ internal static class CommandGesture
         return name.Length >= 2 && name[0] == 'F' &&
                int.TryParse(name[1..], out int number) && number is >= 1 and <= 24;
     }
+
+    private static bool IsNonTextNavigationKey(Key key) => key is
+        Key.Tab or Key.Enter or Key.Escape or
+        Key.Up or Key.Down or Key.Left or Key.Right or
+        Key.PageUp or Key.PageDown or Key.Home or Key.End or
+        Key.Insert or Key.Delete or Key.Back;
 }

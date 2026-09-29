@@ -5,7 +5,10 @@ using JevMud.Contracts.Jev;
 using JevMud.Contracts.State;
 using JevMud.Core.Events;
 using JevMud.Client.Commands;
+using JevMud.Client.Interaction;
 using JevMud.Client.Runtime;
+using JevMud.Client.Settings;
+using JevMud.Transport.Text;
 using Terminal.Gui.App;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
@@ -18,7 +21,6 @@ public sealed class MainWindow : Runnable
     private const int MaxEventLines = 200;
 
     private readonly JevMudRuntime _runtime;
-    private readonly LocalCommandHandler _commands;
     private readonly ChannelReader<EventEnvelope> _events;
     private readonly ChannelReader<StateSnapshot> _snapshots;
     private readonly CancellationTokenSource _viewCts = new();
@@ -46,9 +48,10 @@ public sealed class MainWindow : Runnable
     public MainWindow(JevMudRuntime runtime)
     {
         _runtime = runtime;
-        _commands = new LocalCommandHandler(runtime);
         _events = runtime.Events.SubscribeLossless();
         _snapshots = runtime.State.Subscribe();
+        _runtime.Interaction.World.Appended += HandleWorldBufferAppended;
+        _runtime.Interaction.RuleDiagnostic += HandleOutputRuleDiagnostic;
 
         Title = "NexMUD";
         SetScheme(UiTheme.Panel);
@@ -122,7 +125,9 @@ public sealed class MainWindow : Runnable
             Y = Pos.AnchorEnd(1),
             Width = Dim.Fill(),
             Height = 1,
-            CanFocus = true
+            CanFocus = true,
+            HistoryPrevious = current => _runtime.Interaction.History.Previous(current),
+            HistoryNext = () => _runtime.Interaction.History.Next()
         };
         _input.SetScheme(UiTheme.Input);
         _input.Accepted += (_, _) => SubmitInput();
@@ -200,24 +205,11 @@ public sealed class MainWindow : Runnable
     private void SubmitInput()
     {
         string input = _input.Text?.ToString() ?? string.Empty;
-        if (_lastSnapshot.Session.InputMode != SessionInputMode.LoginPassword)
-        {
-            _input.Record(input);
-        }
         _input.Text = string.Empty;
         RefreshHeader();
 
-        IReadOnlyList<string> commands = _lastSnapshot.Session.InputMode == SessionInputMode.Normal
-            ? CommandInputExpander.Expand(input, _runtime.Settings.CommandSeparator, aliases: null)
-            : [input];
-        foreach (string command in commands)
-        {
-            if (!_submittedCommands.Writer.TryWrite(command))
-            {
-                AppendSystemMessage("Command queue is unavailable.");
-                break;
-            }
-        }
+        if (!_submittedCommands.Writer.TryWrite(input))
+            AppendSystemMessage("Command queue is unavailable.");
     }
 
     private async Task ConsumeCommandsAsync(CancellationToken cancellationToken)
@@ -228,18 +220,19 @@ public sealed class MainWindow : Runnable
             {
                 try
                 {
-                    LocalCommandResult result = await _commands.HandleAsync(input, cancellationToken).ConfigureAwait(false);
-                    if (!string.IsNullOrWhiteSpace(result.Message))
+                    InputSubmissionResult submission = await _runtime.Interaction.Input.SubmitAsync(
+                        new InputRequest(InputSourceKind.Keyboard, input, DateTimeOffset.Now, Guid.NewGuid()),
+                        _lastSnapshot.Session.InputMode,
+                        cancellationToken).ConfigureAwait(false);
+                    foreach (LocalCommandResult result in submission.Results)
                     {
-                        AppendSystemMessage(result.Message);
-                    }
+                        if (!string.IsNullOrWhiteSpace(result.Message))
+                            AppendSystemMessage(result.Message);
 
-                    if (result.ExitRequested)
-                    {
-                        IApplication? app = App;
-                        if (app is not null)
+                        if (result.ExitRequested)
                         {
-                            app.Invoke(app.RequestStop);
+                            IApplication? app = App;
+                            if (app is not null) app.Invoke(app.RequestStop);
                         }
                     }
                 }
@@ -266,9 +259,6 @@ public sealed class MainWindow : Runnable
             {
                 switch (envelope.Payload)
                 {
-                    case GameTextReceived text:
-                        AppendGameText(text.Text);
-                        break;
                     case JevDecisionProduced decision:
                         _lastDecision = decision.Decision;
                         App?.Invoke(() => RenderDecision(decision.Decision));
@@ -322,13 +312,58 @@ public sealed class MainWindow : Runnable
         }
     }
 
-    private void AppendGameText(string text)
+    private void HandleOutputRuleDiagnostic(OutputRuleDiagnostic diagnostic) =>
+        AppendSystemMessage($"Output rule {diagnostic.RuleId}: {diagnostic.Message}");
+
+    private void HandleWorldBufferAppended(WorldBufferEntry entry)
     {
+        if (entry.IsGagged) return;
         App?.Invoke(() =>
         {
-            _gameView.AppendAnsi(text);
+            List<AnsiTextSegment> segments = [];
+            string timestamp = FormatTimestamp(entry.Timestamp);
+            if (timestamp.Length > 0)
+                segments.Add(new AnsiTextSegment(timestamp, AnsiTextStyle.Default with { Faint = true }));
+            foreach (WorldStyledRun run in entry.StyledRuns)
+                segments.Add(new AnsiTextSegment(run.Text, ApplyOverride(run.AnsiStyle, run.Override)));
+            _gameView.AppendSegments(segments);
             RefreshHeader();
         });
+    }
+
+    private string FormatTimestamp(DateTimeOffset timestamp)
+    {
+        DateTimeOffset local = timestamp.ToLocalTime();
+        return (_runtime.Settings.Output ?? new OutputPreferences()).TimestampMode switch
+        {
+            TimestampRenderMode.Time => $"[{local:HH:mm:ss}] ",
+            TimestampRenderMode.TimeWithMilliseconds => $"[{local:HH:mm:ss.fff}] ",
+            TimestampRenderMode.DateTime => $"[{local:yyyy-MM-dd HH:mm:ss}] ",
+            _ => string.Empty
+        };
+    }
+
+    private static AnsiTextStyle ApplyOverride(AnsiTextStyle style, OutputPresentationStyle? overlay)
+    {
+        if (overlay is null) return style;
+        return style with
+        {
+            Foreground = ParseColor(overlay.Foreground) ?? style.Foreground,
+            Background = ParseColor(overlay.Background) ?? style.Background,
+            Bold = style.Bold || overlay.Bold,
+            Italic = style.Italic || overlay.Italic,
+            Underline = style.Underline || overlay.Underline
+        };
+    }
+
+    private static AnsiColor? ParseColor(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length != 7 || value[0] != '#') return null;
+        return byte.TryParse(value.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out byte red) &&
+               byte.TryParse(value.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out byte green) &&
+               byte.TryParse(value.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out byte blue)
+            ? new AnsiColor(red, green, blue)
+            : null;
     }
 
     private void AppendEventLine(string line)
@@ -696,6 +731,8 @@ public sealed class MainWindow : Runnable
     {
         if (disposing)
         {
+            _runtime.Interaction.World.Appended -= HandleWorldBufferAppended;
+            _runtime.Interaction.RuleDiagnostic -= HandleOutputRuleDiagnostic;
             _submittedCommands.Writer.TryComplete();
             _viewCts.Cancel();
             _viewCts.Dispose();
