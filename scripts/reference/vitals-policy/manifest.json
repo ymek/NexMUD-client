@@ -1,0 +1,15 @@
+{
+  "id": "nexmud.reference.vitals-policy",
+  "name": "NexMUD Reference Vitals Policy",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "entrypoint": "main.ts",
+  "ownerKind": "System",
+  "runtimeProfile": "InternalTrusted",
+  "permissions": [
+    "events.subscribe",
+    "state.read",
+    "commands.send",
+    "log.write"
+  ]
+}

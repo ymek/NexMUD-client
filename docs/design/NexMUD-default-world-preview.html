@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1536px;height:960px;background:#05070a;color:#E6DDC6;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+body{padding:18px;background:radial-gradient(circle at 70% 0%,#121923 0,#07090d 42%,#040609 100%)}
+.app{height:924px;border:2px solid #33271A;border-radius:9px;background:#090B0F;padding:2px;box-shadow:0 18px 55px #000b}
+.inner{height:100%;border:1px solid #73512B;border-radius:6px;overflow:hidden;background:#090B0F}
+.top{height:52px;background:#14202C;border-bottom:2px solid #73512B;display:grid;grid-template-columns:auto 1fr auto;align-items:center;padding:0 14px;gap:18px}
+.brand{font-size:22px;font-weight:750;letter-spacing:.3px;white-space:nowrap}.brand .gem{color:#D4A85B;margin-right:9px}.nav{display:flex;align-items:stretch;justify-content:center;height:100%}.nav span{display:flex;align-items:center;padding:0 11px;color:#A6AFB8;font-size:13px;font-weight:650;border-bottom:2px solid transparent}.nav .active{color:#F0BC67;background:#091018;border-bottom-color:#D4A85B}.actions{display:flex;align-items:center;gap:7px}.pill,.tool{border:1px solid #273746;background:#091018;border-radius:4px;padding:7px 10px;font-size:11px;color:#A6AFB8;white-space:nowrap}.pill{color:#22C55E}.layout{height:842px;display:grid;grid-template-columns:1fr 8px 410px;padding:12px 12px 8px 12px}.splitter{background:#33271A}.worldFrame,.panelFrame{border:2px solid #33271A;border-radius:7px;background:#090B0F;padding:2px}.worldInner,.panelInner{height:100%;border:1px solid #73512B;border-radius:4px;overflow:hidden;background:#0E1822}.worldInner{display:grid;grid-template-rows:49px 1fr 59px}.worldHeader{background:#14202C;border-bottom:1px solid #73512B;display:flex;justify-content:space-between;align-items:center;padding:0 13px}.worldTitle{font-size:20px;font-weight:760}.worldTitle .icon{color:#D4A85B;margin-right:9px}.live{color:#22C55E;font-size:10px;margin-left:12px;font-weight:700}.worldHeader .mini{display:flex;gap:7px}.worldHeader button,.quick button{border:1px solid #273746;background:#091018;color:#A6AFB8;border-radius:4px;padding:7px 10px;font-size:11px}.transcript{background:#060B10;padding:14px 16px;font-family:Menlo,Monaco,monospace;font-size:14px;line-height:1.42;overflow:hidden;color:#E6DDC6;position:relative}.transcript:after{content:"";position:absolute;right:7px;top:12px;width:4px;height:120px;background:#D4A85B;border-radius:3px;opacity:.9}.cmd{background:#14202C;border-top:1px solid #73512B;display:grid;grid-template-columns:auto 1fr 40px 40px 98px;gap:8px;align-items:center;padding:8px 10px}.prompt{font-family:Menlo,monospace;font-size:25px;color:#22D4BF;font-weight:800}.input{height:40px;border:1px solid #22D4BF;border-radius:4px;background:#091018;color:#A6AFB8;display:flex;align-items:center;padding:0 13px;font-family:Menlo,monospace;font-size:15px}.cmd button{height:40px;border:1px solid #273746;border-radius:4px;background:#091018;color:#A6AFB8;font-size:16px}.cmd .send{background:#D4A85B;border-color:#F0BC67;color:#111;font-weight:800;font-size:13px}.rail{margin-left:10px;overflow:hidden;padding-right:1px}.panelFrame{height:auto;margin-bottom:9px}.panelInner{height:auto}.panelHeader{height:40px;background:#14202C;border-bottom:1px solid #73512B;display:flex;align-items:center;padding:0 11px;font-size:14px;font-weight:800}.panelHeader .glyph{color:#D4A85B;margin-right:8px}.content{padding:11px}.hero{display:grid;grid-template-columns:70px 1fr;gap:12px;align-items:center}.sigil{width:68px;height:68px;border:1px solid #73512B;border-radius:5px;background:#091018;display:flex;align-items:center;justify-content:center;color:#D4A85B;font-size:30px}.name{font-size:22px;font-weight:800}.identity{font-size:11.5px;color:#A6AFB8;margin-top:4px}.micro{font-size:10px;color:#74808C;text-transform:uppercase;font-weight:700;letter-spacing:.4px}.xpHead{display:flex;justify-content:space-between;margin-top:12px;align-items:center}.xptext{font-size:10.5px}.bar{height:12px;border:1px solid #273746;background:#060B10;margin-top:5px;overflow:hidden;border-radius:2px}.fill{height:100%}.xpfill{width:70%;background:#D4A85B}.hp{width:100%;background:#EF5A5A}.ma{width:78%;background:#38BDF8}.mv{width:92%;background:#38D58A}.vitals{border:1px solid #273746;background:#091018;border-radius:4px;padding:8px 9px;margin-top:11px}.vrow{display:grid;grid-template-columns:34px 1fr 70px;gap:8px;align-items:center;margin:6px 0;font-size:11.5px}.vrow b{font-size:11.5px}.val{text-align:right;font-weight:650}.states,.attrs{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px}.attrs{grid-template-columns:repeat(3,1fr)}.cell{border:1px solid #273746;background:#091018;border-radius:4px;padding:7px 8px;font-size:11px}.cell .value{font-size:12px;font-weight:750;margin-top:3px}.attrs .cell{display:flex;justify-content:space-between;align-items:center;margin:0}.ok{color:#22C55E}.cyan{color:#22D4BF}.roomTitle{font-size:18px;font-weight:800}.meta{font-size:11.5px;color:#A6AFB8;margin-top:4px}.exits{display:flex;gap:6px;margin-top:7px}.exit{border:1px solid #273746;background:#091018;border-radius:4px;padding:6px 10px;font-size:11px;font-weight:800}.entities{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px}.entity,.intel{border:1px solid #273746;background:#091018;border-radius:4px;padding:8px;font-size:10.5px}.entity b{font-size:11.5px}.entity div{color:#A6AFB8;margin-top:4px;line-height:1.35}.intelgrid{display:grid;grid-template-columns:2fr 1fr;gap:7px;margin-top:8px}.intel li{color:#A6AFB8;margin:4px 0;padding:0;list-style:none}.intel li:before{content:"•";color:#D4A85B;margin-right:6px}.quick{margin-top:10px}.quick .buttons{display:flex;gap:6px;margin-top:6px}.gold{color:#F0BC67}.cyantext{color:#22D4BF}.red{color:#EF5A5A}.muted{color:#A6AFB8}.room{color:#F0BC67;font-weight:700}.cmdtxt{color:#22D4BF;font-weight:700}
+</style>
+</head>
+<body>
+<div class="app"><div class="inner">
+  <div class="top">
+    <div class="brand"><span class="gem">◆</span>NexMUD</div>
+    <div class="nav"><span class="active">World</span><span>Character</span><span>Abilities</span><span>Codex</span><span>Map</span><span>Automation</span><span>Scripting</span><span>Jev</span></div>
+    <div class="actions"><span class="pill">Connected</span><span class="tool">⌘K</span><span class="tool">Log</span><span class="tool">Jev OFF</span><span class="tool">Settings</span></div>
+  </div>
+  <div class="layout">
+    <div class="worldFrame"><div class="worldInner">
+      <div class="worldHeader"><div class="worldTitle"><span class="icon">◎</span>World <span class="live">LIVE</span></div><div class="mini"><button>Search</button><button>Live</button></div></div>
+      <div class="transcript">
+        <div class="cmdtxt">› look</div>
+        <div class="room">The Bar in the Adventurer's Lounge</div>
+        <div>&nbsp;</div>
+        <div>The lower level of the School of Heroes serves as a gathering place for</div>
+        <div>young adventurers, as well as an entry point to the Hall of Trials and Tower</div>
+        <div>of Testing. This space, however, is known as the Adventurer's Lounge, which</div>
+        <div>is a large, open expanse. This corner of the lounge is arranged with chairs</div>
+        <div>and couches much like the rest, with a large, well-worn area rug in the middle.</div>
+        <div><span class="gold">Notably, a well-polished bar stands against the south wall, and an additional</span></div>
+        <div><span class="gold">hallway leads to the east.</span> The lounge continues to the north and west.</div>
+        <div>&nbsp;</div>
+        <div>A small sign sits on the end of the bar.</div>
+        <div>&nbsp;</div>
+        <div>[Exits: <span class="cyantext">north east west</span>]</div>
+        <div>An aelin rogue mutters under his breath as he looks at a menu.</div>
+        <div>A tall, outgoing alatharya woman polishes the bar.</div>
+        <div>&nbsp;</div>
+        <div class="cmdtxt">› drink</div>
+        <div>You drink water from a small fountain.</div>
+        <div>You are full.</div>
+        <div>Your thirst is quenched.</div>
+        <div>&nbsp;</div>
+        <div class="cmdtxt">› attack goblin</div>
+        <div>You lunge at the cave goblin with your dagger!</div>
+        <div>You slash the goblin for <span class="red">12 damage.</span></div>
+        <div>The cave goblin snarls and swings at you!</div>
+        <div>The cave goblin misses.</div>
+      </div>
+      <div class="cmd"><div class="prompt">›</div><div class="input">Enter a command…</div><button>↑</button><button>↓</button><button class="send">Send ›</button></div>
+    </div></div>
+    <div class="splitter"></div>
+    <div class="rail">
+      <div class="panelFrame"><div class="panelInner"><div class="panelHeader"><span class="glyph">◆</span>CHARACTER</div><div class="content">
+        <div class="hero"><div class="sigil">◆</div><div><div class="name">Valen</div><div class="identity">Level 12 · Rogue · Human</div></div></div>
+        <div class="xpHead"><span class="micro">Level progress</span><span class="xptext">XP 12,647 · 5,353 to level · 70%</span></div><div class="bar"><div class="fill xpfill"></div></div>
+        <div class="vitals"><div class="vrow"><b>HP</b><div class="bar"><div class="fill hp"></div></div><div class="val">195/195</div></div><div class="vrow"><b>MA</b><div class="bar"><div class="fill ma"></div></div><div class="val">148/148</div></div><div class="vrow"><b>MV</b><div class="bar"><div class="fill mv"></div></div><div class="val">280/280</div></div></div>
+        <div class="states"><div class="cell"><span class="micro">Position</span><div class="value">standing</div></div><div class="cell"><span class="micro">Combat</span><div class="value ok">CLEAR</div></div><div class="cell"><span class="micro">Target</span><div class="value">-</div></div><div class="cell"><span class="micro">Jev</span><div class="value muted">OFF</div></div></div>
+        <div class="micro" style="margin-top:10px">Attributes</div><div class="attrs"><div class="cell"><span class="micro">STR</span><b>12</b></div><div class="cell"><span class="micro">DEX</span><b>18</b></div><div class="cell"><span class="micro">CON</span><b>14</b></div><div class="cell"><span class="micro">INT</span><b>13</b></div><div class="cell"><span class="micro">WIS</span><b>11</b></div><div class="cell"><span class="micro">CHA</span><b>10</b></div></div>
+      </div></div></div>
+      <div class="panelFrame"><div class="panelInner"><div class="panelHeader"><span class="glyph">◇</span>ROOM / CONTEXT</div><div class="content">
+        <div class="roomTitle">The Bar in the Adventurer's Lounge</div><div class="meta">School of Heroes · Ground Level</div>
+        <div class="micro" style="margin-top:10px">Exits</div><div class="exits"><span class="exit">N</span><span class="exit">E</span><span class="exit">W</span></div>
+        <div class="entities"><div class="entity"><b>People (2)</b><div>• an aelin rogue<br>• a tall alatharya woman</div></div><div class="entity"><b>Objects (0)</b><div>None visible</div></div><div class="entity"><b>Fixtures (1)</b><div>• a small sign</div></div></div>
+        <div class="intelgrid"><div class="intel"><div class="micro">Recent observations</div><ul><li>sign observed</li><li>rogue muttering</li><li>bartender polishing bar</li></ul></div><div class="intel"><div class="micro">Room memory</div><div style="margin-top:7px">Visits&nbsp; 18</div><div>Routes&nbsp; 3</div><div class="muted" style="margin-top:5px">Last observed 9/26/2026</div></div></div>
+        <div class="quick"><div class="micro">Quick actions</div><div class="buttons"><button>Look</button><button>Exits</button><button>Scan</button><button>Inventory</button><button>Map</button></div></div>
+      </div></div></div>
+    </div>
+  </div>
+</div></div>
+</body></html>

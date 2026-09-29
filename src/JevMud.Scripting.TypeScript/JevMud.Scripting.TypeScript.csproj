@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../JevMud.Scripting/JevMud.Scripting.csproj" />
+  </ItemGroup>
+</Project>

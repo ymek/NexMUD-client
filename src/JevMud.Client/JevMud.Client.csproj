@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../JevMud.Adapters/JevMud.Adapters.csproj" />
+    <ProjectReference Include="../JevMud.Contracts/JevMud.Contracts.csproj" />
+    <ProjectReference Include="../JevMud.Core/JevMud.Core.csproj" />
+    <ProjectReference Include="../JevMud.Transport/JevMud.Transport.csproj" />
+    <ProjectReference Include="../JevMud.Jev/JevMud.Jev.csproj" />
+    <ProjectReference Include="../JevMud.Scripting/JevMud.Scripting.csproj" />
+    <ProjectReference Include="../JevMud.Scripting.Jint/JevMud.Scripting.Jint.csproj" />
+  </ItemGroup>
+</Project>
