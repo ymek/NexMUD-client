@@ -1,4 +1,5 @@
 using Avalonia.Input;
+using JevMud.Client.Interaction;
 using JevMud.Client.Settings;
 
 namespace JevMud.Gui;

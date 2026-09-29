@@ -121,7 +121,8 @@ public static class Program
         await RunAsync("avendar stream recovers from unterminated telemetry", AvendarStreamRecoversFromUnterminatedTelemetry);
         await RunAsync("prompt display filter slurps fragmented telemetry only", PromptDisplayFilterSlurpsFragmentedTelemetry);
         await RunAsync("transcript highlighter preserves text", TranscriptHighlighterPreservesText);
-        await RunAsync("transcript display normalizes CRLF without double spacing", TranscriptDisplayNormalizesCrLf);
+        await RunAsync("transcript display normalizes terminal line endings without double spacing", TranscriptDisplayNormalizesCrLf);
+        await RunAsync("transcript typography uses fixed terminal density", TranscriptTypographyUsesFixedTerminalDensity);
         await RunAsync("transcript logger writes verbatim server text", TranscriptLoggerWritesVerbatimServerText);
         await RunAsync("transcript logger supports plain and json formats", TranscriptLoggerSupportsPlainAndJsonFormats);
         await RunAsync("command aliases expand positional arguments", CommandAliasesExpandArguments);
@@ -133,6 +134,7 @@ public static class Program
         await RunAsync("interaction completion preserves MUD names and reverses stable cycle", InteractionCompletionPreservesMudNames);
         await RunAsync("interaction keybindings resolve context and expose conflicts", InteractionKeybindingsResolveContextAndConflicts);
         await RunAsync("output transformation preserves source while substituting highlighting and gagging", OutputTransformationPreservesSourceData);
+        await RunAsync("output preserves terminal line structure across chunks", OutputPreservesTerminalLineStructure);
         await RunAsync("output highlighting spans ANSI run boundaries", OutputHighlightSpansAnsiRuns);
         await RunAsync("world buffer subscribers cannot fault output processing", WorldBufferSubscriberFailureIsIsolated);
         await RunAsync("interaction replay produces deterministic rendered output", InteractionReplayIsDeterministic);
@@ -2374,13 +2376,32 @@ public static class Program
     {
         TranscriptLineEndingNormalizer normalizer = new();
         Assert.Equal("one\ntwo\n", normalizer.Process("one\r\ntwo\r\n"));
+        Assert.Equal("three\nfour\n", normalizer.Process("three\n\rfour\n\r"));
 
         TranscriptLineEndingNormalizer fragmented = new();
         Assert.Equal("one", fragmented.Process("one\r"));
         Assert.Equal("\ntwo\n", fragmented.Process("\ntwo\r\n"));
 
-        TranscriptLineEndingNormalizer bareCarriageReturn = new();
-        Assert.Equal("one\rtwo", bareCarriageReturn.Process("one\rtwo"));
+        TranscriptLineEndingNormalizer fragmentedLfCr = new();
+        Assert.Equal("one\n", fragmentedLfCr.Process("one\n"));
+        Assert.Equal("two\n", fragmentedLfCr.Process("\rtwo\n\r"));
+
+        TranscriptLineEndingNormalizer explicitBlankLine = new();
+        Assert.Equal("one\n\ntwo\n", explicitBlankLine.Process("one\n\r\n\rtwo\n\r"));
+
+        TranscriptLineEndingNormalizer nvtCarriageReturn = new();
+        Assert.Equal("onetwo", nvtCarriageReturn.Process("one\r\0two"));
+        return Task.CompletedTask;
+    }
+
+    private static Task TranscriptTypographyUsesFixedTerminalDensity()
+    {
+        Assert.Equal(14d, NexTranscriptTypography.DefaultFontSize);
+        Assert.Equal(16d, NexTranscriptTypography.LineHeight(14));
+        Assert.Equal(320d, NexTranscriptTypography.HeightForRows(20, 14));
+        Assert.True(
+            NexTranscriptTypography.LineHeight(14) / 14 is >= 1.10 and <= 1.20,
+            "Transcript line-height ratio must remain terminal-dense.");
         return Task.CompletedTask;
     }
 
@@ -2628,6 +2649,20 @@ public static class Program
         Assert.True(runtime.SourceFrames.Find(gagged.SourceFrameId) is not null, "Gagging destroyed the source output frame.");
         Assert.False(runtime.World.Snapshot().Any(entry => entry.EntryId == gagged.EntryId), "Gagged entry leaked into visible scrollback.");
         Assert.True(runtime.World.Snapshot(includeGagged: true).Any(entry => entry.EntryId == gagged.EntryId), "Gagged entry was not retained as logical source-linked scrollback metadata.");
+        return Task.CompletedTask;
+    }
+
+    private static Task OutputPreservesTerminalLineStructure()
+    {
+        ClientInteractionRuntime runtime = new(() => ClientSettings.Default);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        runtime.ProcessServerOutput("line one", now);
+        runtime.ProcessServerOutput(" continued\n\rline two\n\r", now.AddMilliseconds(1));
+        runtime.ProcessServerOutput("foo\n\r\n\rbar\n\r", now.AddMilliseconds(2));
+
+        string rendered = string.Concat(runtime.World.Snapshot().Select(entry => entry.RenderedText));
+        Assert.Equal("line one continued\nline two\nfoo\n\nbar\n", rendered);
         return Task.CompletedTask;
     }
 
@@ -3881,7 +3916,7 @@ public static class Program
         try
         {
             ClientSettingsStore store = new(path);
-            Assert.Equal(11d, ClientSettings.Default.TranscriptFontSize);
+            Assert.Equal(14d, ClientSettings.Default.TranscriptFontSize);
 
             await store.SaveAsync(ClientSettings.Default with { TranscriptFontSize = 8 });
             ClientSettings compact = await store.LoadAsync();

@@ -100,7 +100,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
         searchRow.Children.Add(_search);
 
         _summary.Foreground = UiTheme.Faint;
-        _summary.FontSize = NexTypography.Small;
+        _summary.FontSize = NexTypography.Metadata;
         _summary.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(_summary, 1);
         searchRow.Children.Add(_summary);
@@ -123,12 +123,12 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
         header.Children.Add(categories);
 
         _context.Foreground = UiTheme.Muted;
-        _context.FontSize = NexTypography.Small;
+        _context.FontSize = NexTypography.Metadata;
         _context.TextTrimming = TextTrimming.CharacterEllipsis;
         header.Children.Add(_context);
 
         _status.Foreground = UiTheme.Faint;
-        _status.FontSize = NexTypography.Small;
+        _status.FontSize = NexTypography.Metadata;
         _status.IsVisible = false;
         header.Children.Add(_status);
         root.Children.Add(header);
@@ -198,7 +198,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
         {
             Text = entry.Subtitle ?? entry.Kind.ToString(),
             Foreground = UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextTrimming = TextTrimming.CharacterEllipsis
         });
         row.Children.Add(identity);
@@ -206,7 +206,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
         {
             Text = $"×{entry.ObservationCount:N0}",
             Foreground = UiTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             VerticalAlignment = VerticalAlignment.Center
         };
         Grid.SetColumn(observations, 1);
@@ -424,7 +424,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
     {
         StackPanel panel = new() { Margin = new Thickness(0, 5), Spacing = 1 };
         panel.Children.Add(new TextBlock { Text = value.ToString("N0"), Foreground = UiTheme.Text, FontSize = NexTypography.SectionTitle, FontWeight = FontWeight.SemiBold });
-        panel.Children.Add(new TextBlock { Text = label, Foreground = UiTheme.Faint, FontSize = NexTypography.Small });
+        panel.Children.Add(new TextBlock { Text = label, Foreground = UiTheme.Faint, FontSize = NexTypography.Metadata });
         return panel;
     }
 
@@ -435,7 +435,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
         {
             Text = detail.Title,
             Foreground = UiTheme.Text,
-            FontSize = NexTypography.InspectionTitle,
+            FontSize = NexTypography.SectionTitle,
             FontWeight = FontWeight.SemiBold,
             TextWrapping = TextWrapping.Wrap
         });
@@ -448,7 +448,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
                 detail.LastSeenAt is DateTimeOffset lastSeen ? $"last {lastSeen.ToLocalTime():g}" : null
             }.Where(value => !string.IsNullOrWhiteSpace(value))),
             Foreground = UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
 
@@ -469,7 +469,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
             foreach ((string key, string value) in detail.Fields.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
             {
                 Grid row = new() { ColumnDefinitions = new ColumnDefinitions("140,*"), ColumnSpacing = 10 };
-                row.Children.Add(new TextBlock { Text = key, Foreground = UiTheme.Faint, FontSize = NexTypography.Small });
+                row.Children.Add(new TextBlock { Text = key, Foreground = UiTheme.Faint, FontSize = NexTypography.Metadata });
                 TextBlock valueText = new() { Text = value, Foreground = UiTheme.Text, FontSize = NexTypography.Body, TextWrapping = TextWrapping.Wrap };
                 Grid.SetColumn(valueText, 1);
                 row.Children.Add(valueText);
@@ -480,7 +480,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
 
         if (detail.RelatedItems.Count > 0)
         {
-            content.Children.Add(new TextBlock { Text = "Observed loot", Foreground = UiTheme.Muted, FontSize = NexTypography.Small, FontWeight = FontWeight.SemiBold });
+            content.Children.Add(new TextBlock { Text = "Observed loot", Foreground = UiTheme.Muted, FontSize = NexTypography.Metadata, FontWeight = FontWeight.SemiBold });
             foreach (CodexRelatedItem item in detail.RelatedItems.OrderByDescending(item => item.LastSeenAt).ThenBy(item => item.ItemName, StringComparer.OrdinalIgnoreCase))
             {
                 Grid row = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8, MinHeight = 28 };
@@ -502,7 +502,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
                 {
                     Text = $"×{item.ObservationCount:N0}",
                     Foreground = UiTheme.Faint,
-                    FontSize = NexTypography.Small,
+                    FontSize = NexTypography.Metadata,
                     VerticalAlignment = VerticalAlignment.Center
                 });
                 Button open = new() { Content = "Open", Padding = new Thickness(7, 2), MinHeight = 24 };
@@ -522,7 +522,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
             {
                 Text = mobSources ? "Known MOB sources" : "Known locations",
                 Foreground = UiTheme.Muted,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.SemiBold
             });
             foreach (CodexLocation location in detail.Locations.OrderByDescending(item => item.LastSeenAt).Take(24))
@@ -545,7 +545,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
                         $"×{location.ObservationCount:N0}"
                     }.Where(value => !string.IsNullOrWhiteSpace(value))),
                     Foreground = UiTheme.Faint,
-                    FontSize = NexTypography.Small
+                    FontSize = NexTypography.Metadata
                 });
                 row.Children.Add(identity);
                 Button route = new() { Content = "Route", Padding = new Thickness(7, 2), MinHeight = 26 };
@@ -565,7 +565,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
 
         if (!string.IsNullOrWhiteSpace(detail.RawText))
         {
-            content.Children.Add(new TextBlock { Text = "Raw reference", Foreground = UiTheme.Muted, FontSize = NexTypography.Small, FontWeight = FontWeight.SemiBold });
+            content.Children.Add(new TextBlock { Text = "Raw reference", Foreground = UiTheme.Muted, FontSize = NexTypography.Metadata, FontWeight = FontWeight.SemiBold });
             content.Children.Add(new TextBox
             {
                 Text = detail.RawText,
@@ -575,7 +575,7 @@ internal sealed class CodexWorkspace : UserControl, IDisposable
                 MinHeight = 120,
                 MaxHeight = 300,
                 FontFamily = UiTheme.Mono,
-                FontSize = NexTypography.Mono,
+                FontSize = NexTypography.Monospace,
                 Background = UiTheme.Console,
                 Foreground = UiTheme.Muted
             });

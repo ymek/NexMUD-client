@@ -73,24 +73,17 @@ internal static class NexMudTheme
     public static readonly FontFamily Display = new("Georgia, Charter, Times New Roman, serif");
     public static readonly FontFamily Interface = new("Inter, SF Pro Text, Helvetica Neue, sans-serif");
     public static readonly FontFamily Mono = new("Menlo, SFMono-Regular, Consolas, monospace");
-    public static readonly FontFamily Terminal = new("Bitstream Vera Sans Mono, DejaVu Sans Mono, Monaco, Menlo, SFMono-Regular, Consolas, monospace");
+    public static readonly FontFamily Terminal = ResolveTerminalFont();
 
-    public const double BrandText = 25;
-    public const double MajorSectionText = 19;
-    public const double CharacterNameText = 19;
-    public const double RoomTitleText = 17;
-    public const double NavigationText = 13;
-    public const double BodyText = 13;
-    public const double SecondaryText = 11.5;
-    public const double TranscriptText = 11;
-    public const double CommandText = 15;
-
-    public const double Space4 = 4;
-    public const double Space8 = 8;
-    public const double Space12 = 12;
-    public const double Space16 = 16;
-    public const double Space24 = 24;
-    public const double Space32 = 32;
+    public const double BrandText = NexTypography.Display;
+    public const double MajorSectionText = NexTypography.SectionTitle;
+    public const double CharacterNameText = NexTypography.SectionTitle;
+    public const double RoomTitleText = NexTypography.SectionTitle;
+    public const double NavigationText = NexTypography.CompactData;
+    public const double BodyText = NexTypography.Body;
+    public const double SecondaryText = NexTypography.Metadata;
+    public const double TranscriptText = NexTranscriptTypography.DefaultFontSize;
+    public const double CommandText = NexTranscriptTypography.DefaultFontSize;
 
     public static NexAccentTheme CurrentAccent { get; private set; } = NexAccentTheme.EmberBrass;
     public static event Action? AccentChanged;
@@ -107,15 +100,21 @@ internal static class NexMudTheme
         app.Resources["NexMud.Base.RaisedSurface"] = RaisedSurface;
         app.Resources["NexMud.Base.Parchment"] = Parchment;
         app.Resources["NexMud.Base.Brass"] = AntiqueBrass;
-        app.Resources["NexTypography.Display"] = NexTypography.Display;
-        app.Resources["NexTypography.SectionTitle"] = NexTypography.SectionTitle;
-        app.Resources["NexTypography.Body"] = NexTypography.Body;
-        app.Resources["NexTypography.BodyStrong"] = NexTypography.BodyStrong;
-        app.Resources["NexTypography.Metadata"] = NexTypography.Metadata;
-        app.Resources["NexTypography.Small"] = NexTypography.Small;
-        app.Resources["NexTypography.Mono"] = NexTypography.Mono;
-        app.Resources["NexTypography.Hud"] = NexTypography.Hud;
-        app.Resources["NexTypography.HudStrong"] = NexTypography.HudStrong;
+        app.Resources["Transcript.FontSize"] = NexTranscriptTypography.DefaultFontSize;
+        app.Resources["Transcript.LineHeight"] = NexTranscriptTypography.LineHeight(NexTranscriptTypography.DefaultFontSize);
+        app.Resources["Typography.Display"] = NexTypography.Display;
+        app.Resources["Typography.SectionTitle"] = NexTypography.SectionTitle;
+        app.Resources["Typography.Body"] = NexTypography.Body;
+        app.Resources["Typography.BodyStrong"] = NexTypography.BodyStrong;
+        app.Resources["Typography.Metadata"] = NexTypography.Metadata;
+        app.Resources["Typography.Compact"] = NexTypography.CompactData;
+        app.Resources["Typography.Mono"] = NexTypography.Monospace;
+        app.Resources["Typography.Hud"] = NexTypography.Hud;
+        app.Resources["Typography.HudStrong"] = NexTypography.HudStrong;
+        app.Resources["Spacing.Micro"] = NexSpacing.Micro;
+        app.Resources["Spacing.Tight"] = NexSpacing.Tight;
+        app.Resources["Spacing.Normal"] = NexSpacing.Normal;
+        app.Resources["Spacing.Section"] = NexSpacing.Section;
         ApplyAccent(app, NexAccentTheme.EmberBrass);
     }
 
@@ -160,27 +159,75 @@ internal static class NexMudTheme
         }
     }
 
+    private static FontFamily ResolveTerminalFont()
+    {
+        if (OperatingSystem.IsMacOS()) return new FontFamily("Menlo");
+        if (OperatingSystem.IsWindows()) return new FontFamily("Consolas");
+        return new FontFamily("DejaVu Sans Mono");
+    }
+
     private static IBrush Brush(string hex) => new SolidColorBrush(Color.Parse(hex));
 }
 
 /// <summary>
-/// Semantic typography tokens for the dense gameplay surfaces. Controls consume roles rather
-/// than inventing local font sizes so Character, inspection, inventory, and HUD stay coherent.
+/// Application-wide typography roles. Keep component code on these semantic roles instead of
+/// inventing local micro-font sizes or applying one global line-height policy to every surface.
 /// </summary>
 internal static class NexTypography
 {
-    public const double Display = 22;
-    public const double SectionTitle = 16;
+    public const double Display = 24;
+    public const double SectionTitle = 17;
     public const double Body = 13.5;
     public const double BodyStrong = 14;
-    public const double Metadata = 12;
-    public const double Small = 11;
-    public const double Mono = 12;
+    public const double Metadata = 11.5;
+    public const double CompactData = 12.5;
+    public const double Monospace = 13;
     public const double Hud = 12.5;
     public const double HudStrong = 13.5;
-    public const double PaperDollSlot = 11;
-    public const double PaperDollItem = 13;
-    public const double InspectionTitle = 19;
+
+    public const double CompactLineHeightRatio = 1.2;
+    public const double BodyLineHeightRatio = 1.3;
+    public const double ProseLineHeightRatio = 1.4;
+}
+
+internal static class NexSpacing
+{
+    public const double Micro = 2;
+    public const double Tight = 4;
+    public const double Normal = 8;
+    public const double Section = 12;
+}
+
+/// <summary>
+/// Terminal typography is intentionally independent from normal UI typography. A single
+/// platform-native monospace face, zero tracking, and a fixed line grid prevent ANSI runs,
+/// network chunk boundaries, and font fallback metrics from changing row geometry.
+/// </summary>
+internal static class NexTranscriptTypography
+{
+    public const double DefaultFontSize = 14;
+    public const double MinimumFontSize = 8;
+    public const double MaximumFontSize = 24;
+    public const double LineHeightRatio = 8d / 7d;
+
+    public static double NormalizeFontSize(double fontSize) =>
+        Math.Clamp(fontSize, MinimumFontSize, MaximumFontSize);
+
+    public static double LineHeight(double fontSize) =>
+        Math.Round(NormalizeFontSize(fontSize) * LineHeightRatio, 2);
+
+    public static double HeightForRows(int rows, double fontSize) =>
+        Math.Max(0, rows) * LineHeight(fontSize);
+
+    public static void Apply(SelectableTextBlock text, double fontSize)
+    {
+        double normalized = NormalizeFontSize(fontSize);
+        text.FontFamily = NexMudTheme.Terminal;
+        text.FontSize = normalized;
+        text.LineHeight = LineHeight(normalized);
+        text.LineSpacing = 0;
+        text.LetterSpacing = 0;
+    }
 }
 
 internal static class NexApprovedAssets
@@ -475,7 +522,7 @@ internal sealed class NexCountBadge : Border
         {
             Text = count.ToString(),
             Foreground = NexMudTheme.Parchment,
-            FontSize = 10.5,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.Bold
         };
     }
@@ -515,7 +562,7 @@ internal class NexResourceBar : UserControl
         };
 
         _value.Foreground = NexMudTheme.Parchment;
-        _value.FontSize = height >= 18 ? NexTypography.HudStrong : NexTypography.Small;
+        _value.FontSize = height >= 18 ? NexTypography.HudStrong : NexTypography.Metadata;
         _value.FontWeight = FontWeight.Bold;
         _value.HorizontalAlignment = HorizontalAlignment.Center;
         _value.VerticalAlignment = VerticalAlignment.Center;
@@ -567,11 +614,11 @@ internal sealed class NexStatusCell : UserControl
         {
             Text = label.ToUpperInvariant(),
             Foreground = NexMudTheme.Faint,
-            FontSize = 10.5,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.SemiBold
         });
         ValueText.Foreground = NexMudTheme.Parchment;
-        ValueText.FontSize = 12.5;
+        ValueText.FontSize = NexTypography.CompactData;
         ValueText.FontWeight = FontWeight.SemiBold;
         ValueText.TextTrimming = TextTrimming.CharacterEllipsis;
         text.Children.Add(ValueText);
@@ -591,7 +638,7 @@ internal sealed class NexAttributeCell : UserControl
         {
             Text = name,
             Foreground = NexMudTheme.Muted,
-            FontSize = 11,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.Bold,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -601,7 +648,7 @@ internal sealed class NexAttributeCell : UserControl
         {
             Text = value,
             Foreground = NexMudTheme.Parchment,
-            FontSize = 12.5,
+            FontSize = NexTypography.CompactData,
             FontWeight = FontWeight.SemiBold,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
@@ -623,7 +670,7 @@ internal sealed class NexEntityGroup : UserControl
         {
             Text = title.ToUpperInvariant(),
             Foreground = NexMudTheme.Parchment,
-            FontSize = 11.5,
+            FontSize = NexTypography.CompactData,
             FontWeight = FontWeight.Bold
         };
         Grid.SetColumn(label, 1);
@@ -639,7 +686,7 @@ internal sealed class NexEntityGroup : UserControl
             {
                 Text = "None visible",
                 Foreground = NexMudTheme.Faint,
-                FontSize = 11.5
+                FontSize = NexTypography.CompactData
             });
         }
         else
@@ -650,7 +697,7 @@ internal sealed class NexEntityGroup : UserControl
                 {
                     Text = $"• {entity.Description}",
                     Foreground = NexMudTheme.Muted,
-                    FontSize = 11.5,
+                    FontSize = NexTypography.CompactData,
                     TextWrapping = TextWrapping.Wrap
                 });
             }
@@ -660,7 +707,7 @@ internal sealed class NexEntityGroup : UserControl
                 {
                     Text = $"+{entities.Count - 4} more",
                     Foreground = NexMudTheme.Cyan,
-                    FontSize = 11.5
+                    FontSize = NexTypography.CompactData
                 });
             }
         }
@@ -679,7 +726,7 @@ internal sealed class NexQuickAction : Button
         BorderBrush = NexMudTheme.Divider;
         BorderThickness = new Thickness(1);
         CornerRadius = new CornerRadius(2);
-        FontSize = 11.5;
+        FontSize = NexTypography.CompactData;
         Content = IconLabel(icon, label, NexMudTheme.Muted, 14);
     }
 
@@ -696,7 +743,7 @@ internal sealed class NexQuickAction : Button
         {
             Text = label,
             Foreground = NexMudTheme.Parchment,
-            FontSize = 11.5,
+            FontSize = NexTypography.CompactData,
             FontWeight = FontWeight.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
         });
@@ -708,15 +755,15 @@ internal sealed class NexPrimaryButton : Button
 {
     public NexPrimaryButton(string label, NexIconKind icon)
     {
-        MinHeight = 42;
-        MinWidth = 104;
-        Padding = new Thickness(13, 7);
+        MinHeight = 34;
+        MinWidth = 88;
+        Padding = new Thickness(10, 4);
         Background = NexMudTheme.MetalGradient;
         Foreground = NexMudTheme.Parchment;
         BorderBrush = NexMudTheme.AccentBright;
         BorderThickness = new Thickness(2, 1, 2, 2);
         CornerRadius = new CornerRadius(2);
-        Content = NexQuickAction.IconLabel(icon, label, NexMudTheme.AccentBright, 17);
+        Content = NexQuickAction.IconLabel(icon, label, NexMudTheme.AccentBright, 15);
     }
 }
 
@@ -731,8 +778,8 @@ internal sealed class NexCommandBar : UserControl
             Background = NexMudTheme.MetalGradient,
             BorderBrush = NexMudTheme.BronzeShadow,
             BorderThickness = new Thickness(0, 1, 0, 0),
-            Padding = new Thickness(7, 5),
-            MinHeight = 50,
+            Padding = new Thickness(5, 3),
+            MinHeight = 40,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Child = child
         };
@@ -764,8 +811,8 @@ internal sealed class NexNavItem : Button
 
     public NexNavItem(string label, NexIconKind icon)
     {
-        MinHeight = 44;
-        Padding = new Thickness(8, 7);
+        MinHeight = 40;
+        Padding = new Thickness(NexSpacing.Normal, NexSpacing.Tight);
         CornerRadius = new CornerRadius(0);
         BorderThickness = new Thickness(0, 0, 0, 3);
         Background = Brushes.Transparent;
@@ -796,7 +843,9 @@ internal sealed class NexNavItem : Button
     public void SetCompact(bool compact)
     {
         _label.IsVisible = !compact;
-        Padding = compact ? new Thickness(9, 7) : new Thickness(8, 7);
+        Padding = compact
+            ? new Thickness(9, NexSpacing.Tight)
+            : new Thickness(NexSpacing.Normal, NexSpacing.Tight);
     }
 
     public void SetActive(bool active)

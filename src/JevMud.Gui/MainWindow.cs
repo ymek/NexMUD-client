@@ -346,8 +346,8 @@ public sealed class MainWindow : Window
             Background = NexMudTheme.RaisedSurfaceGradient,
             BorderBrush = NexMudTheme.BronzeShadow,
             BorderThickness = new Thickness(0, 0, 0, 1),
-            Padding = new Thickness(10, 4),
-            MinHeight = 50
+            Padding = new Thickness(10, NexSpacing.Micro),
+            MinHeight = 44
         };
 
         Grid grid = new()
@@ -375,7 +375,7 @@ public sealed class MainWindow : Window
             Text = "Nex",
             Foreground = NexMudTheme.Parchment,
             FontFamily = NexMudTheme.Display,
-            FontSize = 23,
+            FontSize = NexTypography.Display,
             FontWeight = FontWeight.Bold
         });
         wordmark.Children.Add(new TextBlock
@@ -383,7 +383,7 @@ public sealed class MainWindow : Window
             Text = "MUD",
             Foreground = NexMudTheme.AccentBright,
             FontFamily = NexMudTheme.Display,
-            FontSize = 23,
+            FontSize = NexTypography.Display,
             FontWeight = FontWeight.Bold
         });
         brand.Children.Add(wordmark);
@@ -425,7 +425,7 @@ public sealed class MainWindow : Window
         _connect.Padding = new Thickness(9, 4);
         _connect.CornerRadius = new CornerRadius(2);
         _connect.BorderThickness = new Thickness(1);
-        _connect.FontSize = 10.5;
+        _connect.FontSize = NexTypography.Metadata;
         _connect.FontWeight = FontWeight.SemiBold;
         _connect.Click += async (_, _) => await ToggleConnectionAsync();
         actions.Children.Add(_connect);
@@ -454,7 +454,7 @@ public sealed class MainWindow : Window
         _jevToggle.MinHeight = 34;
         _jevToggle.Padding = new Thickness(8, 4);
         _jevToggle.CornerRadius = new CornerRadius(2);
-        _jevToggle.FontSize = 10.5;
+        _jevToggle.FontSize = NexTypography.Metadata;
         _jevToggle.FontWeight = FontWeight.SemiBold;
         _jevToggle.BorderThickness = new Thickness(1);
         _jevToggle.Click += async (_, _) => await ToggleJevEnabledAsync();
@@ -494,7 +494,7 @@ public sealed class MainWindow : Window
             MinHeight = 25,
             Padding = new Thickness(6, 2),
             CornerRadius = new CornerRadius(1),
-            FontSize = 10,
+            FontSize = NexTypography.Metadata,
             Background = Brushes.Transparent,
             Foreground = Muted,
             BorderBrush = Brushes.Transparent,
@@ -510,7 +510,7 @@ public sealed class MainWindow : Window
         button.MinHeight = 25;
         button.Padding = new Thickness(6, 2);
         button.CornerRadius = new CornerRadius(1);
-        button.FontSize = 10.5;
+        button.FontSize = NexTypography.Metadata;
         button.FontWeight = FontWeight.SemiBold;
         button.Background = Brushes.Transparent;
         button.Foreground = Muted;
@@ -527,7 +527,7 @@ public sealed class MainWindow : Window
             MinHeight = 34,
             Padding = new Thickness(8, 4),
             CornerRadius = new CornerRadius(2),
-            FontSize = 11.5,
+            FontSize = NexTypography.CompactData,
             Background = NexMudTheme.RaisedSurfaceGradient,
             Foreground = NexMudTheme.Muted,
             BorderBrush = NexMudTheme.Divider,
@@ -543,7 +543,7 @@ public sealed class MainWindow : Window
         button.MinHeight = 38;
         button.Padding = new Thickness(8, 5);
         button.CornerRadius = new CornerRadius(2);
-        button.FontSize = 11.5;
+        button.FontSize = NexTypography.CompactData;
         button.FontWeight = FontWeight.SemiBold;
         button.Background = NexMudTheme.RaisedSurfaceGradient;
         button.Foreground = NexMudTheme.Muted;
@@ -584,7 +584,7 @@ public sealed class MainWindow : Window
             Padding = new Thickness(0)
         };
         ConfigureTranscriptText(_gameText);
-        _gameScroll.Content = _gameText;
+        _gameScroll.Content = TranscriptTextHost(_gameText);
         _gameScroll.Background = NexMudTheme.DeepConsole;
         _gameScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         _gameScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
@@ -646,7 +646,7 @@ public sealed class MainWindow : Window
         {
             Text = "LIVE OUTPUT",
             Foreground = NexMudTheme.AccentBright,
-            FontSize = 11.5,
+            FontSize = NexTypography.CompactData,
             FontWeight = FontWeight.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
         });
@@ -658,7 +658,7 @@ public sealed class MainWindow : Window
         liveGrid.Children.Add(liveHeader);
 
         ConfigureTranscriptText(_liveText);
-        _liveScroll.Content = _liveText;
+        _liveScroll.Content = TranscriptTextHost(_liveText);
         _liveScroll.Background = NexMudTheme.DeepConsole;
         _liveScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         _liveScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
@@ -671,30 +671,26 @@ public sealed class MainWindow : Window
         return transcript;
     }
 
-    private static double NormalizeTranscriptFontSize(double fontSize) => Math.Clamp(fontSize, 8, 24);
-
-    private static double TranscriptLineHeight(double fontSize) => Math.Round(fontSize, 2);
-
-    private static void ApplyTranscriptMetrics(SelectableTextBlock text, double fontSize)
-    {
-        text.FontSize = fontSize;
-        text.LineHeight = TranscriptLineHeight(fontSize);
-        text.LineSpacing = 0;
-    }
-
     private void ConfigureTranscriptText(SelectableTextBlock text)
     {
-        double fontSize = NormalizeTranscriptFontSize(_runtime.Settings.TranscriptFontSize);
-        text.FontFamily = NexMudTheme.Terminal;
-        ApplyTranscriptMetrics(text, fontSize);
+        NexTranscriptTypography.Apply(text, _runtime.Settings.TranscriptFontSize);
         text.Foreground = NexMudTheme.Parchment;
         text.Background = NexMudTheme.DeepConsole;
         text.TextWrapping = TextWrapping.NoWrap;
-        text.Margin = new Thickness(7, 3, 7, 4);
-        // A MUD transcript is a terminal character grid, not body copy. The row
-        // advance intentionally matches the configured em size: no body-copy leading.
-        // This lets adjacent ASCII rows form continuous signs, maps, and tables.
+        text.Margin = new Thickness(0);
+        text.Padding = new Thickness(0);
     }
+
+    private static Border TranscriptTextHost(SelectableTextBlock text) => new()
+    {
+        Background = NexMudTheme.DeepConsole,
+        Padding = new Thickness(
+            NexSpacing.Tight,
+            0,
+            NexSpacing.Tight,
+            0),
+        Child = text
+    };
 
     private void ActivateSplitView()
     {
@@ -750,7 +746,7 @@ public sealed class MainWindow : Window
         Grid grid = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         StackPanel location = new() { Spacing = 1 };
         _locationLabel.Foreground = TextForeground;
-        _locationLabel.FontSize = NexTypography.InspectionTitle;
+        _locationLabel.FontSize = NexTypography.SectionTitle;
         _locationLabel.FontWeight = FontWeight.SemiBold;
         _subLocationLabel.Foreground = Muted;
         _subLocationLabel.FontSize = NexTypography.Metadata;
@@ -830,7 +826,7 @@ public sealed class MainWindow : Window
 
         Grid rail = new()
         {
-            RowDefinitions = new RowDefinitions("Auto,4,*"),
+            RowDefinitions = new RowDefinitions("Auto,2,*"),
             Margin = new Thickness(0),
             Background = NexMudTheme.ApplicationBackground
         };
@@ -875,7 +871,7 @@ public sealed class MainWindow : Window
         Grid commandGrid = new()
         {
             ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
-            ColumnSpacing = 8
+            ColumnSpacing = 6
         };
 
         TextBlock prompt = new()
@@ -883,10 +879,10 @@ public sealed class MainWindow : Window
             Text = ">",
             Foreground = NexMudTheme.AccentBright,
             FontFamily = NexMudTheme.Mono,
-            FontSize = 18,
+            FontSize = NexMudTheme.CommandText,
             FontWeight = FontWeight.Bold,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(3, 0, 0, 0)
+            Margin = new Thickness(2, 0, 0, 0)
         };
         commandGrid.Children.Add(prompt);
 
@@ -895,11 +891,11 @@ public sealed class MainWindow : Window
         _command.BorderBrush = NexMudTheme.AccentPrimary;
         _command.BorderThickness = new Thickness(1);
         _command.CornerRadius = new CornerRadius(2);
-        _command.Padding = new Thickness(13, 8);
+        _command.Padding = new Thickness(9, 4);
         _command.FontFamily = NexMudTheme.Mono;
         _command.FontSize = NexMudTheme.CommandText;
         _command.PlaceholderText = "Enter a command…";
-        _command.MinHeight = 40;
+        _command.MinHeight = 32;
         _command.KeyDown += CommandKeyDown;
         Grid.SetColumn(_command, 1);
         commandGrid.Children.Add(_command);
@@ -925,11 +921,11 @@ public sealed class MainWindow : Window
             Margin = new Thickness(14, 0, 14, 6)
         };
         _notification.Foreground = NexMudTheme.AccentPrimary;
-        _notification.FontSize = 10.5;
+        _notification.FontSize = NexTypography.Metadata;
         _notification.TextTrimming = TextTrimming.CharacterEllipsis;
         footer.Children.Add(_notification);
         _status.Foreground = NexMudTheme.Faint;
-        _status.FontSize = 10.5;
+        _status.FontSize = NexTypography.Metadata;
         _status.HorizontalAlignment = HorizontalAlignment.Right;
         Grid.SetColumn(_status, 1);
         footer.Children.Add(_status);
@@ -1308,7 +1304,7 @@ public sealed class MainWindow : Window
                         Text = preview.Length > 240 ? preview[..240] + "…" : preview,
                         Foreground = TextForeground,
                         FontFamily = UiTheme.Mono,
-                        FontSize = NexTypography.Small,
+                        FontSize = NexTypography.Metadata,
                         TextWrapping = TextWrapping.Wrap
                     });
                     _searchResults.Children.Add(Card(result, PanelBorderBrush));
@@ -1343,7 +1339,7 @@ public sealed class MainWindow : Window
             BorderBrush = PanelBorderBrush,
             BorderThickness = new Thickness(1),
             Padding = new Thickness(12, 10),
-            FontSize = 15
+            FontSize = NexTypography.BodyStrong
         };
 
         StackPanel results = new() { Spacing = 2 };
@@ -1443,21 +1439,21 @@ public sealed class MainWindow : Window
                 {
                     Text = command.Category,
                     Foreground = selected ? Accent : Muted,
-                    FontSize = 9.5,
+                    FontSize = NexTypography.Metadata,
                     FontWeight = FontWeight.SemiBold
                 });
                 copy.Children.Add(new TextBlock
                 {
                     Text = command.Label,
                     Foreground = TextForeground,
-                    FontSize = 14,
+                    FontSize = NexTypography.BodyStrong,
                     FontWeight = FontWeight.SemiBold
                 });
                 copy.Children.Add(new TextBlock
                 {
                     Text = command.Description,
                     Foreground = Muted,
-                    FontSize = 11,
+                    FontSize = NexTypography.Body,
                     TextWrapping = TextWrapping.Wrap
                 });
                 row.Children.Add(copy);
@@ -1467,7 +1463,7 @@ public sealed class MainWindow : Window
                     {
                         Text = command.Shortcut,
                         Foreground = Muted,
-                        FontSize = 10.5,
+                        FontSize = NexTypography.Metadata,
                         VerticalAlignment = VerticalAlignment.Center,
                         Margin = new Thickness(18, 0, 0, 0)
                     };
@@ -1532,14 +1528,14 @@ public sealed class MainWindow : Window
         {
             Text = "COMMAND PALETTE",
             Foreground = Accent,
-            FontSize = 10,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.Bold
         });
         heading.Children.Add(new TextBlock
         {
             Text = "Navigate, inspect, and act without leaving the command line.",
             Foreground = Muted,
-            FontSize = 11
+            FontSize = NexTypography.Metadata
         });
 
         Grid root = new()
@@ -1654,8 +1650,8 @@ public sealed class MainWindow : Window
         double height = _gameScroll.Bounds.Height;
         if (!double.IsFinite(width) || !double.IsFinite(height) || width <= 0 || height <= 0) return;
 
-        double fontSize = NormalizeTranscriptFontSize(_runtime.Settings.TranscriptFontSize);
-        double lineHeight = TranscriptLineHeight(fontSize);
+        double fontSize = NexTranscriptTypography.NormalizeFontSize(_runtime.Settings.TranscriptFontSize);
+        double lineHeight = NexTranscriptTypography.LineHeight(fontSize);
         ushort columns = checked((ushort)Math.Clamp((int)Math.Floor(width / (fontSize * 0.62)), 20, 500));
         ushort rows = checked((ushort)Math.Clamp((int)Math.Floor(height / lineHeight), 5, 200));
 
@@ -1764,12 +1760,12 @@ public sealed class MainWindow : Window
         {
             Text = "NexMUD",
             Foreground = TextForeground,
-            FontSize = 28,
+            FontSize = NexTypography.Display,
             FontWeight = FontWeight.SemiBold
         });
         content.Children.Add(new TextBlock
         {
-            Text = "Version 0.27.0",
+            Text = "Version 0.27.1",
             Foreground = UiTheme.Faint,
             FontSize = UiTheme.TextSm
         });
@@ -2064,6 +2060,7 @@ public sealed class MainWindow : Window
             target.Inlines!.Add(new Run(timestamp)
             {
                 Foreground = NexMudTheme.Faint,
+                FontFamily = NexMudTheme.Terminal,
                 FontWeight = FontWeight.Normal
             });
         }
@@ -2103,6 +2100,7 @@ public sealed class MainWindow : Window
         bool underline = style.Underline || overlay?.Underline == true;
         Run run = new(segment.Text)
         {
+            FontFamily = NexMudTheme.Terminal,
             Foreground = foreground,
             Background = background,
             FontWeight = bold ? FontWeight.Bold : FontWeight.Normal,
@@ -2581,7 +2579,7 @@ public sealed class MainWindow : Window
     {
         Text = text,
         Foreground = Muted,
-        FontSize = NexTypography.Small,
+        FontSize = NexTypography.Metadata,
         FontWeight = FontWeight.SemiBold
     };
 
@@ -2656,7 +2654,7 @@ public sealed class MainWindow : Window
             {
                 Text = string.Join("  ·  ", roomMeta),
                 Foreground = Muted,
-                FontSize = NexTypography.Small
+                FontSize = NexTypography.Metadata
             });
         }
         stack.Children.Add(roomHeading);
@@ -2711,7 +2709,7 @@ public sealed class MainWindow : Window
                 {
                     Text = $"Last observed {lastSeen.ToLocalTime():g}",
                     Foreground = UiTheme.Faint,
-                    FontSize = NexTypography.Small
+                    FontSize = NexTypography.Metadata
                 });
             }
             stack.Children.Add(SectionBlock("Room memory", roomMemory));
@@ -2724,7 +2722,7 @@ public sealed class MainWindow : Window
         {
             button.MinHeight = 22;
             button.Padding = new Thickness(5, 2);
-            button.FontSize = NexTypography.Small;
+            button.FontSize = NexTypography.Metadata;
             quick.Children.Add(button);
         }
         stack.Children.Add(SectionBlock("Actions", quick));
@@ -2755,7 +2753,7 @@ public sealed class MainWindow : Window
         {
             Text = RoomEntityLabel(entity.Kind),
             Foreground = UiTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
         });
@@ -2784,7 +2782,7 @@ public sealed class MainWindow : Window
                 Button button = CommandButton(label, command);
                 button.MinHeight = 20;
                 button.Padding = new Thickness(4, 1);
-                button.FontSize = NexTypography.Small;
+                button.FontSize = NexTypography.Metadata;
                 actions.Children.Add(button);
             }
 
@@ -2845,14 +2843,14 @@ public sealed class MainWindow : Window
             {
                 Text = DirectionLabel(exit.Direction),
                 Foreground = Accent,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.SemiBold
             });
             TextBlock destinationText = new()
             {
                 Text = destination,
                 Foreground = Muted,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             Grid.SetColumn(destinationText, 1);
@@ -2872,7 +2870,7 @@ public sealed class MainWindow : Window
         {
             Text = target,
             Foreground = TextForeground,
-            FontSize = NexTypography.InspectionTitle,
+            FontSize = NexTypography.SectionTitle,
             FontWeight = FontWeight.SemiBold,
             TextWrapping = TextWrapping.Wrap
         });
@@ -2932,13 +2930,13 @@ public sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         });
         Button refreshSkills = CommandButton("Refresh skills", "skills");
-        refreshSkills.FontSize = NexTypography.Small;
+        refreshSkills.FontSize = NexTypography.Metadata;
         refreshSkills.Padding = new Thickness(5, 2);
         refreshSkills.MinHeight = 22;
         Grid.SetColumn(refreshSkills, 1);
         actions.Children.Add(refreshSkills);
         Button refreshSpells = CommandButton("Refresh spells", "spells");
-        refreshSpells.FontSize = NexTypography.Small;
+        refreshSpells.FontSize = NexTypography.Metadata;
         refreshSpells.Padding = new Thickness(5, 2);
         refreshSpells.MinHeight = 22;
         Grid.SetColumn(refreshSpells, 2);
@@ -3150,14 +3148,14 @@ public sealed class MainWindow : Window
             Text = "Typed choices over explicit state; application policy remains deterministic.",
             Foreground = Muted,
             TextWrapping = TextWrapping.Wrap,
-            FontSize = NexTypography.Small
+            FontSize = NexTypography.Metadata
         });
         heading.Children.Add(title);
         TextBlock status = new()
         {
             Text = !_runtime.Authority.Enabled ? "DISABLED" : _runtime.DecisionEngine is null ? "OFFLINE" : "ONLINE",
             Foreground = !_runtime.Authority.Enabled || _runtime.DecisionEngine is null ? Muted : Success,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.SemiBold,
             VerticalAlignment = VerticalAlignment.Top
         };
@@ -3182,7 +3180,7 @@ public sealed class MainWindow : Window
                    $"{memory.Rooms:N0} known rooms · {memory.CombatEvents:N0} combat events",
             Foreground = UiTheme.Faint,
             TextWrapping = TextWrapping.Wrap,
-            FontSize = NexTypography.Small
+            FontSize = NexTypography.Metadata
         });
         policy.Children.Add(new TextBlock
         {
@@ -3312,7 +3310,7 @@ public sealed class MainWindow : Window
         {
             Text = FormatJevAction(decision.Selected.Action),
             Foreground = Accent,
-            FontSize = NexTypography.InspectionTitle,
+            FontSize = NexTypography.SectionTitle,
             FontWeight = FontWeight.SemiBold,
             TextWrapping = TextWrapping.Wrap
         });
@@ -3488,7 +3486,7 @@ public sealed class MainWindow : Window
         {
             Text = $"v{decision.StateVersion} · {decision.Latency.TotalMilliseconds:0} ms · {decision.Model}",
             Foreground = Muted,
-            FontSize = NexTypography.Small
+            FontSize = NexTypography.Metadata
         });
         Grid.SetColumn(body, 1);
         row.Children.Add(body);
@@ -3624,7 +3622,7 @@ public sealed class MainWindow : Window
             {
                 Text = $"L{group.Key}",
                 Foreground = UiTheme.Faint,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             });
@@ -3654,7 +3652,7 @@ public sealed class MainWindow : Window
             {
                 Text = $"+ {future.Count - shownCount:N0} later abilities across {groups.Length - shown.Length:N0} levels",
                 Foreground = Muted,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 Margin = new Thickness(0, 5, 0, 0)
             });
         }
@@ -3684,7 +3682,7 @@ public sealed class MainWindow : Window
             {
                 Text = domain.ToString(),
                 Foreground = UiTheme.Faint,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 TextTrimming = TextTrimming.CharacterEllipsis
             });
         }
@@ -3796,12 +3794,12 @@ public sealed class MainWindow : Window
         foreach ((string key, string value) in fields.OrderBy(pair => pair.Key))
         {
             Grid fact = new() { ColumnDefinitions = new ColumnDefinitions("82,*"), ColumnSpacing = 7 };
-            fact.Children.Add(new TextBlock { Text = key, Foreground = Muted, FontSize = NexTypography.Small });
+            fact.Children.Add(new TextBlock { Text = key, Foreground = Muted, FontSize = NexTypography.Metadata });
             TextBlock fieldValue = new()
             {
                 Text = value,
                 Foreground = TextForeground,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 TextWrapping = TextWrapping.Wrap
             };
             Grid.SetColumn(fieldValue, 1);
@@ -4106,9 +4104,9 @@ public sealed class MainWindow : Window
     private void ApplyUiSettings()
     {
         _runtime.Interaction.Configure(_runtime.Settings);
-        double transcriptFontSize = NormalizeTranscriptFontSize(_runtime.Settings.TranscriptFontSize);
-        ApplyTranscriptMetrics(_gameText, transcriptFontSize);
-        ApplyTranscriptMetrics(_liveText, transcriptFontSize);
+        double transcriptFontSize = NexTranscriptTypography.NormalizeFontSize(_runtime.Settings.TranscriptFontSize);
+        NexTranscriptTypography.Apply(_gameText, transcriptFontSize);
+        NexTranscriptTypography.Apply(_liveText, transcriptFontSize);
         RebuildTranscript();
         RenderLoggingState();
         if (_runtime.Settings.AutoLogSessions &&
@@ -4137,7 +4135,7 @@ public sealed class MainWindow : Window
         Foreground = TextForeground,
         BorderBrush = Brushes.Transparent,
         BorderThickness = new Thickness(0),
-        FontSize = 11
+        FontSize = NexTypography.Metadata
     };
 
     private static Button AccentButton(string label) => new()
@@ -4296,7 +4294,7 @@ public sealed class MainWindow : Window
             {
                 Text = badge,
                 Foreground = Muted,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 VerticalAlignment = VerticalAlignment.Center
             };
             Grid.SetColumn(count, 1);
@@ -4337,7 +4335,7 @@ public sealed class MainWindow : Window
             {
                 Text = label,
                 Foreground = Muted,
-                FontSize = NexTypography.Small
+                FontSize = NexTypography.Metadata
             });
             metric.Children.Add(new TextBlock
             {
@@ -4462,7 +4460,7 @@ public sealed class MainWindow : Window
         {
             Text = label,
             Foreground = Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
         });
@@ -4541,7 +4539,7 @@ public sealed class MainWindow : Window
         CornerRadius = new CornerRadius(2),
         Padding = new Thickness(6, 2),
         HorizontalAlignment = HorizontalAlignment.Left,
-        Child = new TextBlock { Text = text, Foreground = brush, FontSize = NexTypography.Small }
+        Child = new TextBlock { Text = text, Foreground = brush, FontSize = NexTypography.Metadata }
     };
 
     private static Control BuildHudReadout(string name, TextBlock value, double minWidth)
@@ -4642,7 +4640,7 @@ public sealed class MainWindow : Window
         Foreground = TextForeground,
         BorderBrush = PanelBorderBrush,
         FontFamily = UiTheme.Mono,
-        FontSize = NexTypography.Mono
+        FontSize = NexTypography.Monospace
     };
 
     private static string? EntityTarget(RoomContentObservation entity)

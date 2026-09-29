@@ -277,7 +277,7 @@ internal sealed class CharacterHudPanel : UserControl
     private readonly TextBlock _weight = new();
     private readonly StackPanel _loadout = new() { Spacing = 2 };
     private readonly TextBlock _conditions = new();
-    private readonly StackPanel _observedDetails = new() { Spacing = 5 };
+    private readonly StackPanel _observedDetails = new() { Spacing = NexSpacing.Tight };
 
     public CharacterHudPanel(Func<string, string?, ItemInspectionData> inspectionResolver)
     {
@@ -324,7 +324,7 @@ internal sealed class CharacterHudPanel : UserControl
 
     private Control Build()
     {
-        StackPanel body = new() { Spacing = 5 };
+        StackPanel body = new() { Spacing = NexSpacing.Tight };
 
         StackPanel identity = new() { Spacing = 1 };
         _name.Foreground = NexMudTheme.Parchment;
@@ -336,7 +336,7 @@ internal sealed class CharacterHudPanel : UserControl
         _identity.FontSize = NexTypography.Body;
         _identity.TextWrapping = TextWrapping.Wrap;
         _alignment.Foreground = NexMudTheme.AccentBright;
-        _alignment.FontSize = NexTypography.Small;
+        _alignment.FontSize = NexTypography.Metadata;
         identity.Children.Add(_name);
         identity.Children.Add(_identity);
         identity.Children.Add(_alignment);
@@ -390,14 +390,14 @@ internal sealed class CharacterHudPanel : UserControl
         {
             Text = "LOADOUT",
             Foreground = NexMudTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.SemiBold
         });
         loadout.Children.Add(_loadout);
         _observedDetails.Children.Add(loadout);
 
         _conditions.Foreground = NexMudTheme.Warning;
-        _conditions.FontSize = NexTypography.Small;
+        _conditions.FontSize = NexTypography.Metadata;
         _conditions.TextWrapping = TextWrapping.Wrap;
         _observedDetails.Children.Add(_conditions);
         body.Children.Add(_observedDetails);
@@ -406,7 +406,7 @@ internal sealed class CharacterHudPanel : UserControl
         {
             Background = NexMudTheme.PrimarySurfaceGradient,
             BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 6),
+            Padding = new Thickness(6, 4),
             Child = body
         };
     }
@@ -429,19 +429,19 @@ internal sealed class CharacterHudPanel : UserControl
             {
                 Text = "Equipment not observed",
                 Foreground = NexMudTheme.Faint,
-                FontSize = NexTypography.Small
+                FontSize = NexTypography.Metadata
             });
             return;
         }
 
         foreach (CharacterEquipmentViewModel item in important)
         {
-            Grid row = new() { ColumnDefinitions = new ColumnDefinitions("54,*"), ColumnSpacing = 6, MinHeight = 26 };
+            Grid row = new() { ColumnDefinitions = new ColumnDefinitions("54,*"), ColumnSpacing = 6, MinHeight = 20 };
             row.Children.Add(new TextBlock
             {
                 Text = item.Slot,
                 Foreground = NexMudTheme.Faint,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 VerticalAlignment = VerticalAlignment.Center
             });
             Button value = new()
@@ -483,7 +483,7 @@ internal sealed class CharacterHudPanel : UserControl
         {
             Text = name,
             Foreground = NexMudTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.Bold,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -510,7 +510,7 @@ internal sealed class CharacterHudPanel : UserControl
         {
             Text = label,
             Foreground = NexMudTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             VerticalAlignment = VerticalAlignment.Center
         });
         value.Foreground = NexMudTheme.Parchment;
@@ -547,8 +547,8 @@ internal sealed class RoomContextPanel : UserControl
     private readonly TextBlock _metadata = new();
     private readonly WrapPanel _exits = new();
     private readonly TextBlock _emptyEntities = new();
-    private readonly StackPanel _entityGroups = new() { Spacing = 7 };
-    private readonly StackPanel _observations = new() { Spacing = 4 };
+    private readonly StackPanel _entityGroups = new() { Spacing = NexSpacing.Tight };
+    private readonly StackPanel _observations = new() { Spacing = NexSpacing.Tight };
     private readonly TextBlock _memorySummary = new();
     private readonly TextBlock _lastSeen = new();
 
@@ -646,9 +646,9 @@ internal sealed class RoomContextPanel : UserControl
     private Control Build()
     {
         Grid shell = new() { RowDefinitions = new RowDefinitions("*,Auto") };
-        StackPanel body = new() { Spacing = 8 };
+        StackPanel body = new() { Spacing = NexSpacing.Tight };
 
-        StackPanel roomIdentity = new() { Spacing = 3 };
+        StackPanel roomIdentity = new() { Spacing = NexSpacing.Micro };
         _roomName.Foreground = NexMudTheme.Parchment;
         _roomName.FontFamily = NexMudTheme.Display;
         _roomName.FontSize = NexMudTheme.RoomTitleText;
@@ -673,23 +673,23 @@ internal sealed class RoomContextPanel : UserControl
 
         _emptyEntities.Text = "No visible entities observed";
         _emptyEntities.Foreground = NexMudTheme.Faint;
-        _emptyEntities.FontSize = NexTypography.Body;
+        _emptyEntities.FontSize = NexTypography.CompactData;
         _emptyEntities.TextWrapping = TextWrapping.Wrap;
         body.Children.Add(_entityGroups);
         body.Children.Add(_emptyEntities);
 
-        StackPanel observations = new() { Spacing = 4 };
+        StackPanel observations = new() { Spacing = NexSpacing.Micro };
         observations.Children.Add(SectionLabel("RECENT", NexIconKind.History));
         observations.Children.Add(_observations);
         body.Children.Add(observations);
 
-        StackPanel memory = new() { Spacing = 4 };
+        StackPanel memory = new() { Spacing = NexSpacing.Micro };
         memory.Children.Add(SectionLabel("MEMORY", NexIconKind.Codex));
         _memorySummary.Foreground = NexMudTheme.Muted;
-        _memorySummary.FontSize = NexTypography.Body;
+        _memorySummary.FontSize = NexTypography.CompactData;
         _memorySummary.TextWrapping = TextWrapping.Wrap;
         _lastSeen.Foreground = NexMudTheme.Faint;
-        _lastSeen.FontSize = NexTypography.Small;
+        _lastSeen.FontSize = NexTypography.Metadata;
         memory.Children.Add(_memorySummary);
         memory.Children.Add(_lastSeen);
         body.Children.Add(memory);
@@ -725,7 +725,7 @@ internal sealed class RoomContextPanel : UserControl
         {
             Background = NexMudTheme.PrimarySurfaceGradient,
             BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 6),
+            Padding = new Thickness(6, 4),
             Child = shell
         };
     }
@@ -783,7 +783,7 @@ internal sealed class RoomContextPanel : UserControl
     {
         if (entities.Count == 0) return;
 
-        StackPanel section = new() { Spacing = 5 };
+        StackPanel section = new() { Spacing = NexSpacing.Tight };
         Grid header = new() { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 6 };
         header.Children.Add(NexMudIcons.Create(icon, 13, NexMudTheme.AccentPrimary));
         TextBlock label = new()
@@ -807,7 +807,7 @@ internal sealed class RoomContextPanel : UserControl
             {
                 Text = $"• {entity.Description}",
                 Foreground = NexMudTheme.Muted,
-                FontSize = NexTypography.Body,
+                FontSize = NexTypography.CompactData,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(19, 0, 0, 0)
             };
@@ -819,7 +819,7 @@ internal sealed class RoomContextPanel : UserControl
             {
                 Text = $"+{entities.Count - 6} more",
                 Foreground = NexMudTheme.Cyan,
-                FontSize = NexTypography.Body,
+                FontSize = NexTypography.CompactData,
                 Margin = new Thickness(19, 0, 0, 0)
             });
         }

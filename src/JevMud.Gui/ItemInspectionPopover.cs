@@ -81,7 +81,7 @@ internal static class ItemInspectionPopover
             Text = displayName,
             Foreground = NexMudTheme.Parchment,
             FontFamily = NexMudTheme.Display,
-            FontSize = compact ? NexTypography.SectionTitle : NexTypography.InspectionTitle,
+            FontSize = compact ? NexTypography.SectionTitle : NexTypography.SectionTitle,
             FontWeight = FontWeight.Bold,
             TextWrapping = TextWrapping.Wrap
         });
@@ -103,7 +103,7 @@ internal static class ItemInspectionPopover
             {
                 Text = "No identify or Codex details observed yet.",
                 Foreground = NexMudTheme.Faint,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 TextWrapping = TextWrapping.Wrap
             });
             return compact ? Wrap(content) : content;
@@ -177,7 +177,7 @@ internal static class ItemInspectionPopover
                 {
                     Text = $"+{modifiers.Length - modifierLimit} more",
                     Foreground = NexMudTheme.Faint,
-                    FontSize = NexTypography.Small
+                    FontSize = NexTypography.Metadata
                 });
             }
         }
@@ -202,7 +202,7 @@ internal static class ItemInspectionPopover
         {
             Text = observation,
             Foreground = NexMudTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             Margin = new Thickness(0, compact ? 1 : 3, 0, 0)
         });
 
@@ -305,7 +305,7 @@ internal static class ItemInspectionPopover
             {
                 Text = label.ToUpperInvariant(),
                 Foreground = NexMudTheme.Faint,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.Bold
             });
             text.Children.Add(new TextBlock
@@ -380,7 +380,7 @@ internal static class ItemInspectionPopover
                     Text = flag,
                     Foreground = NexMudTheme.Muted,
                     FontFamily = NexMudTheme.Mono,
-                    FontSize = NexTypography.Small
+                    FontSize = NexTypography.Metadata
                 }
             });
         }

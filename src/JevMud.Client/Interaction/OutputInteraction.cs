@@ -808,6 +808,7 @@ public sealed class ClientInteractionRuntime
 internal sealed class DisplayLineEndingNormalizer
 {
     private bool _pendingCarriageReturn;
+    private bool _lastOutputWasLineFeed;
 
     public string Process(string text)
     {
@@ -816,20 +817,88 @@ internal sealed class DisplayLineEndingNormalizer
         int index = 0;
         if (_pendingCarriageReturn)
         {
-            if (text[0] == '\n') { output.Append('\n'); index = 1; }
-            else output.Append('\r');
+            if (text[0] == '\n')
+            {
+                AppendLineFeed(output);
+                index = 1;
+            }
+            else if (text[0] == '\0')
+            {
+                index = 1;
+                _lastOutputWasLineFeed = false;
+            }
+            else
+            {
+                // A bare CR is a carriage-return operation, not a vertical line
+                // advance. Static transcript rendering cannot overprint an existing
+                // row, so consuming it is closer to terminal semantics than letting
+                // Avalonia interpret it as another line break.
+                _lastOutputWasLineFeed = false;
+            }
             _pendingCarriageReturn = false;
         }
         for (; index < text.Length; index++)
         {
             char value = text[index];
-            if (value != '\r') { output.Append(value); continue; }
-            if (index + 1 >= text.Length) { _pendingCarriageReturn = true; continue; }
-            if (text[index + 1] == '\n') { output.Append('\n'); index++; continue; }
-            output.Append('\r');
+            if (value == '\n')
+            {
+                AppendLineFeed(output);
+                continue;
+            }
+
+            if (value != '\r')
+            {
+                output.Append(value);
+                _lastOutputWasLineFeed = false;
+                continue;
+            }
+
+            // Diku/Merc-derived MUDs commonly emit LFCR ("\n\r") rather than
+            // conventional CRLF. A terminal treats the CR as returning to column
+            // zero on the row already advanced by LF. A text control treats both
+            // characters as line breaks, which creates an invented blank row after
+            // every server line. Consume the CR when it follows an emitted LF.
+            if (_lastOutputWasLineFeed)
+            {
+                _lastOutputWasLineFeed = false;
+                continue;
+            }
+
+            if (index + 1 >= text.Length)
+            {
+                _pendingCarriageReturn = true;
+                continue;
+            }
+
+            if (text[index + 1] == '\n')
+            {
+                AppendLineFeed(output);
+                index++;
+                continue;
+            }
+
+            if (text[index + 1] == '\0')
+            {
+                // NVT CR NUL is a carriage return with no vertical movement.
+                index++;
+                _lastOutputWasLineFeed = false;
+                continue;
+            }
+
+            _lastOutputWasLineFeed = false;
         }
         return output.ToString();
     }
 
-    public void Reset() => _pendingCarriageReturn = false;
+    public void Reset()
+    {
+        _pendingCarriageReturn = false;
+        _lastOutputWasLineFeed = false;
+    }
+
+    private void AppendLineFeed(StringBuilder output)
+    {
+        output.Append('\n');
+        _lastOutputWasLineFeed = true;
+    }
 }

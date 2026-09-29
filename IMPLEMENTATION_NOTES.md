@@ -1,3 +1,17 @@
+# NexMUD 0.27.1
+
+## Terminal typography and transcript density correction
+
+- `NexTranscriptTypography` is now the single owner of transcript font normalization, fixed row height, zero line spacing, zero tracking, and the 20-row density sanity check. The default is 14 px with a 16 px row grid; the existing 8-24 px preference remains supported.
+- The World transcript remains one `SelectableTextBlock` with inline ANSI runs. `WorldBufferEntry` boundaries do not create controls, margins, padding, or newlines, so network chunking cannot invent vertical separation. Explicit server blank lines remain byte-for-byte display structure after CRLF normalization.
+- Transcript inset belongs to a containing `Border`, not the text control. Timestamp and ANSI/highlight `Run` instances share the same terminal family, preventing per-span font selection from changing terminal geometry.
+- The terminal face is selected once per platform: Menlo on macOS, Consolas on Windows, and DejaVu Sans Mono elsewhere. This avoids mixed fallback metrics while preserving monospaced ASCII alignment and bold width.
+- `NexTypography` now exposes only the application-wide semantic roles: Display, SectionTitle, Body, BodyStrong, Metadata, CompactData, Monospace, Hud, and HudStrong. `NexSpacing` centralizes Micro, Tight, Normal, and Section spacing. Matching application resources are installed at startup.
+- Remaining numeric micro-fonts in the Avalonia UI were replaced with semantic roles. Top navigation is slightly tighter and the right gameplay rail uses compact entity/loadout rhythm without changing its content or hierarchy.
+- Regression coverage asserts 14/16 terminal metrics, a 320 px height for 20 default rows, and preservation of adjacent chunks plus explicit blank lines. Static verification enforces the terminal family, typography resources, and synchronized NAWS/render row sizing.
+- Design contract: `docs/design/NexMUD-typography-transcript-density-pass.md`. No parser, protocol, semantic-state, command-dispatch, Automation, Mapper, or Jev behavior changed.
+- SemVer release: 0.27.1. macOS build: 27001.
+
 # NexMUD 0.27.0
 
 ## Input, keybinding, and output transformation architecture

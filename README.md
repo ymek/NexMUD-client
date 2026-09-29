@@ -1,4 +1,17 @@
-# NexMUD Client v0.27.0
+# NexMUD Client v0.27.1
+
+## v0.27.1 - Terminal typography and transcript density correction
+
+- Reworked World transcript typography around an explicit terminal line grid: new profiles default to 14 px text with a 16 px row height, zero added line spacing, and zero letter spacing while retaining the existing 8-24 px user range.
+- Replaced the transcript fallback-family stack with one platform-selected monospace face per OS (Menlo on macOS, Consolas on Windows, DejaVu Sans Mono elsewhere) so ANSI weight/style runs cannot select inconsistent base font metrics.
+- Kept the transcript as one continuous selectable inline surface and moved viewport inset spacing to the containing host. Network frame boundaries add no layout spacing; only server-provided newlines create terminal rows, and explicit blank lines remain intact.
+- Timestamp and ANSI/highlight runs now use the same terminal font family. Highlighting, local echo, split output, searching, selection, logging, prompt slurp, and scrolling retain their existing behavior and share the same row geometry.
+- Centralized the application typography roles (Display, Section title, Body, Body strong, Metadata, Compact data, Monospace, HUD, HUD strong) and Micro/Tight/Normal/Section spacing resources. Removed remaining functional 8-10 px text from the Avalonia surface.
+- Tightened navigation and gameplay-rail rhythm without changing information architecture. Loadout rows now target a 20 px compact row and entity lists use compact-data typography.
+- Added regression coverage for the 20-row transcript density target and for preserving server line structure across independent network chunks, including explicit blank lines.
+- Added the design contract at `docs/design/NexMUD-typography-transcript-density-pass.md`. Parser behavior, ANSI semantics, command handling, HUD structure, navigation structure, and Jev behavior are unchanged.
+- SemVer release: 0.27.1. macOS build: 27001.
+
 
 ## v0.27.0 - Input, keybinding, and output transformation architecture
 

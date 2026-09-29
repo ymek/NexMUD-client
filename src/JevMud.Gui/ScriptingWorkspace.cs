@@ -59,7 +59,7 @@ internal sealed class ScriptingWorkspace : UserControl
             TextWrapping = TextWrapping.Wrap
         });
         _status.Foreground = UiTheme.Cyan;
-        _status.FontSize = NexTypography.Small;
+        _status.FontSize = NexTypography.Metadata;
         heading.Children.Add(_status);
         root.Children.Add(heading);
 
@@ -133,14 +133,14 @@ internal sealed class ScriptingWorkspace : UserControl
             {
                 Text = module.Id.Value,
                 Foreground = UiTheme.Faint,
-                FontSize = NexTypography.Small
+                FontSize = NexTypography.Metadata
             });
             row.Children.Add(identity);
             TextBlock state = new()
             {
                 Text = module.CancellationRequested ? "STOPPING" : module.Loaded ? "RUNNING" : "STOPPED",
                 Foreground = module.CancellationRequested ? UiTheme.Warning : module.Loaded ? UiTheme.Success : UiTheme.Muted,
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };

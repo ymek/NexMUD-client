@@ -147,7 +147,7 @@ internal sealed class AutomationWorkspace : UserControl
         _summary.FontSize = NexTypography.Body;
         _summary.Foreground = UiTheme.Muted;
         header.Children.Add(_summary);
-        _status.FontSize = NexTypography.Small;
+        _status.FontSize = NexTypography.Metadata;
         _status.Foreground = UiTheme.Muted;
         header.Children.Add(_status);
         root.Children.Add(header);
@@ -225,7 +225,7 @@ internal sealed class AutomationWorkspace : UserControl
         {
             Text = item.StartsWhen,
             Foreground = UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
         row.Children.Add(identity);
@@ -252,7 +252,7 @@ internal sealed class AutomationWorkspace : UserControl
                     AutomationAvailability.Ready => UiTheme.Text,
                     _ => UiTheme.Muted
                 },
-                FontSize = NexTypography.Small,
+                FontSize = NexTypography.Metadata,
                 FontWeight = FontWeight.Bold
             }
         };
@@ -293,7 +293,7 @@ internal sealed class AutomationWorkspace : UserControl
         {
             Text = item.StatusExplanation,
             Foreground = item.Availability == AutomationAvailability.Disabled ? UiTheme.Warning : UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap
         });
         titleRow.Children.Add(title);
@@ -334,7 +334,7 @@ internal sealed class AutomationWorkspace : UserControl
                 {
                     Text = (index + 1).ToString(),
                     Foreground = UiTheme.Faint,
-                    FontSize = NexTypography.Small,
+                    FontSize = NexTypography.Metadata,
                     VerticalAlignment = VerticalAlignment.Top,
                     Margin = new Thickness(0, 2, 0, 0)
                 });
@@ -606,7 +606,7 @@ internal sealed class AutomationWorkspace : UserControl
     {
         Text = title,
         Foreground = UiTheme.Muted,
-        FontSize = NexTypography.Small,
+        FontSize = NexTypography.Metadata,
         FontWeight = FontWeight.Bold
     };
 
@@ -619,7 +619,7 @@ internal sealed class AutomationWorkspace : UserControl
         {
             Text = item,
             Foreground = UiTheme.Text,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(6, 3)
         }, true);
@@ -632,7 +632,7 @@ internal sealed class AutomationWorkspace : UserControl
         {
             Text = title,
             Foreground = UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.Bold,
             Margin = new Thickness(8, 7, 8, 6)
         });

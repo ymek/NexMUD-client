@@ -1,4 +1,5 @@
 using JevMud.Client.Commands;
+using JevMud.Client.Presentation;
 using JevMud.Client.Settings;
 using JevMud.Contracts.State;
 
@@ -396,6 +397,12 @@ public sealed class CompletionService
                 _cycleIndex = reverse
                     ? (_cycleIndex - 1 + _cycle.Count) % _cycle.Count
                     : (_cycleIndex + 1) % _cycle.Count;
+            }
+
+            if (_cycleHead is null || _cycleTail is null)
+            {
+                ResetCycleCore();
+                return null;
             }
 
             string candidate = _cycle[_cycleIndex];

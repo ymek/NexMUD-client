@@ -192,7 +192,7 @@ internal sealed class MapperViewport : Control
                 if (!LineMayBeVisible(origin, end, bounds, 50)) continue;
                 context.DrawLine(new Pen(UiTheme.Faint, 1), origin, end);
                 string marker = offset.Level > 0 ? "UP ?" : offset.Level < 0 ? "DN ?" : "?";
-                DrawText(context, marker, new Point(end.X + 2, end.Y + 2), NexTypography.Small, UiTheme.Faint);
+                DrawText(context, marker, new Point(end.X + 2, end.Y + 2), NexTypography.Metadata, UiTheme.Faint);
             }
         }
 
@@ -242,7 +242,7 @@ internal sealed class MapperViewport : Control
             IBrush primary = current ? Brushes.Black : UiTheme.Text;
             IBrush secondary = current ? Brushes.Black : node.Avoid || node.Disconnected ? UiTheme.Danger : UiTheme.Muted;
             DrawText(context, Ellipsize(node.Label, 24), new Point(nodeBounds.X + 8, nodeBounds.Y + 8), NexTypography.Metadata, primary);
-            DrawText(context, Ellipsize(node.Meta, 27), new Point(nodeBounds.X + 8, nodeBounds.Y + 34), NexTypography.Small, secondary);
+            DrawText(context, Ellipsize(node.Meta, 27), new Point(nodeBounds.X + 8, nodeBounds.Y + 34), NexTypography.Metadata, secondary);
         }
     }
 
@@ -308,14 +308,14 @@ internal sealed class MapperViewport : Control
             _ => null
         };
         string text = string.IsNullOrWhiteSpace(state) ? direction : $"{direction} {state}";
-        DrawText(context, text, new Point(marker.X + 4, marker.Y - 13), NexTypography.Small, brush);
+        DrawText(context, text, new Point(marker.X + 4, marker.Y - 13), NexTypography.Metadata, brush);
 
         if (edge.DoorState is ExitDoorState.Closed or ExitDoorState.Locked)
         {
             Rect door = new(marker.X - 6, marker.Y - 6, 12, 12);
             context.DrawRectangle(UiTheme.Console, new Pen(brush, 1.4), door, 1, 1);
             if (edge.DoorState == ExitDoorState.Locked)
-                DrawText(context, "L", new Point(marker.X - 3.4, marker.Y - 6.4), NexTypography.Small, brush);
+                DrawText(context, "L", new Point(marker.X - 3.4, marker.Y - 6.4), NexTypography.Metadata, brush);
         }
         else if (edge.Traversability == ExitTraversability.Blocked)
         {
@@ -620,12 +620,12 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         _room.FontWeight = FontWeight.SemiBold;
         identityPanel.Children.Add(_room);
         _graphStatus.Foreground = UiTheme.Muted;
-        _graphStatus.FontSize = NexTypography.Small;
+        _graphStatus.FontSize = NexTypography.Metadata;
         _graphStatus.Text = "Map idle";
         identityPanel.Children.Add(_graphStatus);
         current.Children.Add(identityPanel);
         _navigationStatus.Foreground = UiTheme.Muted;
-        _navigationStatus.FontSize = NexTypography.Small;
+        _navigationStatus.FontSize = NexTypography.Metadata;
         _navigationStatus.FontWeight = FontWeight.SemiBold;
         _navigationStatus.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(_navigationStatus, 1);
@@ -635,7 +635,7 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         {
             Text = "Exit labels show direction · U/D are portal links, not global floors · □ closed · L locked · × blocked · ? unexplored",
             Foreground = UiTheme.Faint,
-            FontSize = NexTypography.Small
+            FontSize = NexTypography.Metadata
         });
         root.Children.Add(header);
 
@@ -889,7 +889,7 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
                 MapperDestinationKind.ItemSource => UiTheme.Success,
                 _ => UiTheme.Accent
             },
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             VerticalAlignment = VerticalAlignment.Center
         });
         StackPanel identity = new() { Spacing = 0 };
@@ -904,7 +904,7 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         {
             Text = string.Join(" · ", new[] { entry.RoomName, entry.Area }.Where(value => !string.IsNullOrWhiteSpace(value))),
             Foreground = UiTheme.Muted,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextTrimming = TextTrimming.CharacterEllipsis
         });
         Grid.SetColumn(identity, 1);
@@ -913,7 +913,7 @@ internal sealed class MapperWorkspace : UserControl, IDisposable
         {
             Text = $"×{entry.ObservationCount:N0}",
             Foreground = UiTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             VerticalAlignment = VerticalAlignment.Center
         };
         Grid.SetColumn(count, 2);

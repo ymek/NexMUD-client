@@ -138,7 +138,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
         detail.Children.Add(SectionLabel("ITEM INSPECTION"));
         _selectedItemHint.Text = "Hover an equipped item for a quick view. Select one for persistent detail.";
         _selectedItemHint.Foreground = NexMudTheme.Faint;
-        _selectedItemHint.FontSize = NexTypography.Small;
+        _selectedItemHint.FontSize = NexTypography.Metadata;
         _selectedItemHint.TextWrapping = TextWrapping.Wrap;
         detail.Children.Add(_selectedItemHint);
         _selectedItemDetail.HorizontalContentAlignment = HorizontalAlignment.Stretch;
@@ -219,7 +219,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
             Foreground = NexMudTheme.Muted,
             BorderBrush = NexMudTheme.Divider,
             BorderThickness = new Thickness(1),
-            FontSize = NexTypography.Small
+            FontSize = NexTypography.Metadata
         };
         refresh.Click += async (_, _) => await _sendCommand("inventory");
         Grid.SetColumn(refresh, 1);
@@ -249,7 +249,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
         inventory.Children.Add(inventoryScroll);
 
         _inventoryStatus.Foreground = NexMudTheme.Faint;
-        _inventoryStatus.FontSize = NexTypography.Small;
+        _inventoryStatus.FontSize = NexTypography.Metadata;
         _inventoryStatus.Margin = new Thickness(0, 6, 0, 0);
         Grid.SetRow(_inventoryStatus, 3);
         inventory.Children.Add(_inventoryStatus);
@@ -272,7 +272,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
         {
             Text = "Equipment and inventory are projections of observed Avendar state; unknown data is never fabricated.",
             Foreground = NexMudTheme.Faint,
-            FontSize = NexTypography.Small,
+            FontSize = NexTypography.Metadata,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(10, 0, 10, 7)
         };
@@ -336,7 +336,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
         {
             Text = spec.Label.ToUpperInvariant(),
             Foreground = occupied ? NexMudTheme.Muted : NexMudTheme.Faint,
-            FontSize = NexTypography.PaperDollSlot,
+            FontSize = NexTypography.Metadata,
             FontWeight = FontWeight.SemiBold
         });
         body.Children.Add(label);
@@ -345,7 +345,7 @@ internal sealed class CharacterInventoryWorkspace : UserControl
         {
             Text = occupied ? item! : "—",
             Foreground = occupied ? NexMudTheme.Parchment : NexMudTheme.Faint,
-            FontSize = NexTypography.PaperDollItem,
+            FontSize = NexTypography.CompactData,
             FontWeight = occupied ? FontWeight.SemiBold : FontWeight.Normal,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,

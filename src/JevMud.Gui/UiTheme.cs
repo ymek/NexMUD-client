@@ -34,10 +34,10 @@ internal static class UiTheme
     public static readonly FontFamily Sans = new("Inter, SF Pro Text, Helvetica Neue, sans-serif");
     public static readonly FontFamily Mono = new("Menlo, SFMono-Regular, Consolas, monospace");
 
-    public const double TextXs = 9.5;
-    public const double TextSm = 10.5;
-    public const double TextBody = 11.5;
-    public const double TextSection = 12.5;
+    public const double TextXs = NexTypography.Metadata;
+    public const double TextSm = NexTypography.Metadata;
+    public const double TextBody = NexTypography.Body;
+    public const double TextSection = NexTypography.CompactData;
     public const double TextTitle = 20;
     public const double ControlHeight = 30;
     public const double DenseRowHeight = 24;

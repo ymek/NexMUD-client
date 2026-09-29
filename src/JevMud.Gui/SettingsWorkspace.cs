@@ -45,7 +45,6 @@ public sealed class SettingsWorkspace : UserControl
         public required CheckBox Underline { get; init; }
         public required CheckBox CaseSensitive { get; init; }
         public required CheckBox Enabled { get; init; }
-        public required IReadOnlyList<OutputRuleAction> PreservedActions { get; init; }
     }
 
     private sealed class AliasEditor
@@ -67,7 +66,6 @@ public sealed class SettingsWorkspace : UserControl
         public required CheckBox StopProcessing { get; init; }
         public required CheckBox CaseSensitive { get; init; }
         public required CheckBox Enabled { get; init; }
-        public required IReadOnlyList<OutputRuleAction> PreservedActions { get; init; }
         public required CheckBox OneShot { get; init; }
     }
 
@@ -273,7 +271,7 @@ public sealed class SettingsWorkspace : UserControl
         {
             Text = "Settings",
             Foreground = TextForeground,
-            FontSize = NexTypography.InspectionTitle,
+            FontSize = NexTypography.SectionTitle,
             FontWeight = FontWeight.SemiBold,
             Margin = new Thickness(8, 0, 8, 10)
         });
@@ -1340,7 +1338,7 @@ public sealed class SettingsWorkspace : UserControl
             MinHeight = 130,
             PlaceholderText = "send look\nwait !combat.active timeout=30000\nnavigate trainer",
             FontFamily = new FontFamily("Menlo, monospace"),
-            FontSize = NexTypography.Mono,
+            FontSize = NexTypography.Monospace,
             Background = RaisedBackground,
             Foreground = TextForeground,
             BorderBrush = BorderColor,
@@ -1902,8 +1900,7 @@ public sealed class SettingsWorkspace : UserControl
             Bold = bold,
             Underline = underline,
             CaseSensitive = caseSensitive,
-            Enabled = enabled,
-            PreservedActions = rule.EffectiveActions.Skip(1).ToArray()
+            Enabled = enabled
         };
         remove.Click += (_, _) =>
         {

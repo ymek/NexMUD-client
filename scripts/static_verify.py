@@ -611,9 +611,8 @@ for literal in (
     'ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto")',
     'Math.Clamp(_preferredRailWidth, 390, 425)',
     '_workspaceColumn.MinWidth = 380',
-    'RowDefinitions = new RowDefinitions("Auto,4,*")',
-    'text.LineHeight = TranscriptLineHeight(fontSize);',
-    'text.LineSpacing = 0;',
+    'RowDefinitions = new RowDefinitions("Auto,2,*")',
+    'NexTranscriptTypography.Apply(text, _runtime.Settings.TranscriptFontSize);',
 ):
     if literal not in main_window_text:
         fail(f"default World main-shell visual invariant missing: {literal}")
@@ -1074,15 +1073,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.27.0"):
-    fail("README current version must be NexMUD 0.27.0")
-if '<Version>0.27.0</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.27.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.27.1"):
+    fail("README current version must be NexMUD 0.27.1")
+if '<Version>0.27.1</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.27.1 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.27.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.27.0")
-if '<string>27000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 27000 for NexMUD 0.27.0")
+if '<string>0.27.1</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.27.1")
+if '<string>27001</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 27001 for NexMUD 0.27.1")
 item_inspection_text = (ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1260,10 +1259,10 @@ if not (ROOT / "docs/design/NexMUD-typography-item-inspection-correction-pass.md
     fail("missing typography + item-inspection correction design contract")
 for literal in (
     'internal static class NexTypography',
-    'app.Resources["NexTypography.Display"]',
-    'app.Resources["NexTypography.HudStrong"]',
-    'PaperDollItem = 13',
-    'InspectionTitle = 19',
+    'app.Resources["Typography.Display"]',
+    'app.Resources["Typography.HudStrong"]',
+    'public const double CompactData = 12.5;',
+    'public const double Monospace = 13;',
 ):
     if literal not in nex_design_text:
         fail(f"0.24.1 semantic typography invariant missing: {literal}")
@@ -1273,8 +1272,8 @@ for literal in (
     'PointerEntered +=',
     'PointerExited +=',
     'MinWidth = 280',
-    'NexTypography.PaperDollSlot',
-    'NexTypography.PaperDollItem',
+    'NexTypography.Metadata',
+    'NexTypography.CompactData',
     'NexTypography.Body',
 ):
     if literal not in character_workspace_text:
@@ -1297,7 +1296,7 @@ for literal in (
 ):
     if literal not in persistent_gameplay_text:
         fail(f"0.24.1 gameplay HUD typography invariant missing: {literal}")
-if '_value.FontSize = height >= 18 ? NexTypography.HudStrong : NexTypography.Small;' not in nex_design_text:
+if '_value.FontSize = height >= 18 ? NexTypography.HudStrong : NexTypography.Metadata;' not in nex_design_text:
     fail("0.24.1 resource-bar value typography invariant missing")
 for source_name, source_text in (
     ("CharacterInventoryWorkspace", character_workspace_text),
@@ -1347,8 +1346,8 @@ for literal in (
     "private const double NodeWidth = 164;",
     "private const double NodeHeight = 62;",
     "NexTypography.Metadata, primary",
-    "NexTypography.Small, secondary",
-    "NexTypography.Small, brush",
+    "NexTypography.Metadata, secondary",
+    "NexTypography.Metadata, brush",
 ):
     if literal not in mapper_workspace_text:
         fail(f"0.24.2 mapper typography/geometry invariant missing: {literal}")
@@ -1370,7 +1369,6 @@ for literal in (
     "FontSize = NexTypography.Body",
     "FontSize = NexTypography.BodyStrong",
     "FontSize = NexTypography.Metadata",
-    "FontSize = NexTypography.Small",
 ):
     if literal not in main_workspace_typography_text:
         fail(f"0.24.2 World/Abilities/Jev semantic typography role missing: {literal}")
@@ -1400,30 +1398,54 @@ for literal in (
     if literal not in test_program_text:
         fail(f"0.23.0 inventory regression coverage missing: {literal}")
 
-# 0.20.1 compact typography retained; 0.21.0 aligns terminal presentation with MUD clients.
+# Terminal typography and application-wide density remain centralized and regression-checked.
 client_settings_text = (ROOT / "src/JevMud.Client/Settings/ClientSettings.cs").read_text(encoding="utf-8")
 client_settings_store_text = (ROOT / "src/JevMud.Client/Settings/ClientSettingsStore.cs").read_text(encoding="utf-8")
 runtime_text = (ROOT / "src/JevMud.Client/Runtime/JevMudRuntime.cs").read_text(encoding="utf-8")
 line_ending_text = (ROOT / "src/JevMud.Gui/TranscriptLineEndingNormalizer.cs").read_text(encoding="utf-8")
 for literal in (
-    'public static readonly FontFamily Terminal = new("Bitstream Vera Sans Mono, DejaVu Sans Mono, Monaco, Menlo, SFMono-Regular, Consolas, monospace")',
-    'text.FontFamily = NexMudTheme.Terminal;',
-    'double fontSize = NormalizeTranscriptFontSize(_runtime.Settings.TranscriptFontSize);',
-    'text.FontSize = fontSize;',
-    'text.LineHeight = TranscriptLineHeight(fontSize);',
-    'text.TextWrapping = TextWrapping.NoWrap;',
-    'text.Margin = new Thickness(7, 3, 7, 4);',
+    'public static readonly FontFamily Terminal = ResolveTerminalFont();',
+    'if (OperatingSystem.IsMacOS()) return new FontFamily("Menlo");',
+    'if (OperatingSystem.IsWindows()) return new FontFamily("Consolas");',
+    'return new FontFamily("DejaVu Sans Mono");',
+    'public const double DefaultFontSize = 14;',
+    'public const double LineHeightRatio = 8d / 7d;',
+    'text.LineHeight = LineHeight(normalized);',
     'text.LineSpacing = 0;',
+    'text.LetterSpacing = 0;',
+    'text.Margin = new Thickness(0);',
+    '_gameScroll.Content = TranscriptTextHost(_gameText);',
+    '_liveScroll.Content = TranscriptTextHost(_liveText);',
+    'FontFamily = NexMudTheme.Terminal,',
     '_gameScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;',
     '_liveScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;',
-    'NormalizeTranscriptFontSize(double fontSize) => Math.Clamp(fontSize, 8, 24)',
 ):
     if literal not in (nex_design_text + main_window_text):
-        fail(f"0.21.0 terminal presentation invariant missing: {literal}")
+        fail(f"terminal typography invariant missing: {literal}")
+for literal in (
+    'app.Resources["Transcript.FontSize"]',
+    'app.Resources["Transcript.LineHeight"]',
+    'app.Resources["Typography.Display"]',
+    'app.Resources["Typography.SectionTitle"]',
+    'app.Resources["Typography.Body"]',
+    'app.Resources["Typography.BodyStrong"]',
+    'app.Resources["Typography.Metadata"]',
+    'app.Resources["Typography.Compact"]',
+    'app.Resources["Typography.Mono"]',
+    'app.Resources["Typography.Hud"]',
+    'app.Resources["Typography.HudStrong"]',
+    'app.Resources["Spacing.Micro"]',
+    'app.Resources["Spacing.Tight"]',
+    'app.Resources["Spacing.Normal"]',
+    'app.Resources["Spacing.Section"]',
+):
+    if literal not in nex_design_text:
+        fail(f"central typography/spacing resource missing: {literal}")
 if "_presentationLineEndings.Process(displayRaw)" not in interaction_output_text:
     fail("display line-ending normalization must remain in the presentation-only output path")
 for literal in (
     'private bool _pendingCarriageReturn;',
+    'private bool _lastOutputWasLineFeed;',
     "if (text[index + 1] == '\\n')",
     "output.Append('\\n');",
 ):
@@ -1431,33 +1453,35 @@ for literal in (
         fail(f"display line-ending normalization invariant missing: {literal}")
 if 'Math.Max(14, _runtime.Settings.TranscriptFontSize)' in main_window_text:
     fail("hidden 14-point transcript floor must not return")
-if 'TranscriptLineHeight(double fontSize) => Math.Round(fontSize, 2)' not in main_window_text:
-    fail("terminal transcript row advance must match the configured font size")
 for literal in (
-    'ApplyTranscriptMetrics(_gameText, transcriptFontSize);',
-    'ApplyTranscriptMetrics(_liveText, transcriptFontSize);',
-    'text.LineHeight = TranscriptLineHeight(fontSize);',
-    'text.LineSpacing = 0;',
+    'NexTranscriptTypography.Apply(_gameText, transcriptFontSize);',
+    'NexTranscriptTypography.Apply(_liveText, transcriptFontSize);',
+    'double lineHeight = NexTranscriptTypography.LineHeight(fontSize);',
 ):
     if literal not in main_window_text:
         fail(f"runtime transcript metric synchronization invariant missing: {literal}")
 if 'Math.Floor(height / lineHeight)' not in main_window_text:
-    fail("NAWS row sizing must use the same compact transcript line height")
+    fail("NAWS row sizing must use the same terminal transcript line height")
 if 'fontSize * 1.35' in main_window_text:
     fail("legacy oversized transcript row-height estimate must not return")
-if 'double TranscriptFontSize = 11' not in client_settings_text:
-    fail("new NexMUD profiles must default transcript typography to 11")
+if 'double TranscriptFontSize = 14' not in client_settings_text:
+    fail("new NexMUD profiles must default transcript typography to 14")
 if 'Math.Clamp(settings.TranscriptFontSize, 8, 24)' not in client_settings_store_text:
     fail("persisted transcript font sizes must normalize to 8-24")
 if 'Math.Clamp(transcriptFontSize, 8, 24)' not in runtime_text:
     fail("runtime transcript font size saving must normalize to 8-24")
 if '_fontSize.ItemsSource = new double[] { 8, 9, 10, 11' not in settings_workspace_text:
-    fail("settings must expose transcript sizes below 11")
+    fail("settings must retain the supported compact transcript size range")
 for literal in (
     'ClientSettingsAllowCompactTranscriptSizes',
-    'Assert.Equal(8d, compact.TranscriptFontSize);',
+    'Assert.Equal(14d, ClientSettings.Default.TranscriptFontSize);',
+    'TranscriptTypographyUsesFixedTerminalDensity',
+    'Assert.Equal(320d, NexTranscriptTypography.HeightForRows(20, 14));',
+    'OutputPreservesTerminalLineStructure',
     'TranscriptDisplayNormalizesCrLf',
     'normalizer.Process("one\\r\\ntwo\\r\\n")',
+    'normalizer.Process("three\\n\\rfour\\n\\r")',
+    'runtime.ProcessServerOutput(" continued\\n\\rline two\\n\\r"',
 ):
     if literal not in test_program_text:
         fail(f"terminal regression coverage missing: {literal}")
@@ -1473,7 +1497,7 @@ for literal in (
 for literal in (
     'HorizontalContentAlignment = HorizontalAlignment.Stretch;',
     'HorizontalAlignment = HorizontalAlignment.Stretch;',
-    'Padding = new Thickness(7, 5)',
+    'Padding = new Thickness(5, 3)',
 ):
     if literal not in nex_design_text:
         fail(f"0.21.0 command-bar stretch invariant missing: {literal}")

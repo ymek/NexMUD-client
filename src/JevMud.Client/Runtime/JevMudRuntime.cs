@@ -333,7 +333,7 @@ public sealed class JevMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts,
                 Eor: protocols.Eor),
             ClientName: "NexMUD",
-            ClientVersion: "0.27.0");
+            ClientVersion: "0.27.1");
     }
 
     public async Task SaveSubsystemSettingsAsync(

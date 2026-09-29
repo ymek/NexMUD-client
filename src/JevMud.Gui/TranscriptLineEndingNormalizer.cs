@@ -10,6 +10,7 @@ namespace JevMud.Gui;
 internal sealed class TranscriptLineEndingNormalizer
 {
     private bool _pendingCarriageReturn;
+    private bool _lastOutputWasLineFeed;
 
     public string Process(string text)
     {
@@ -25,12 +26,17 @@ internal sealed class TranscriptLineEndingNormalizer
         {
             if (text[0] == '\n')
             {
-                output.Append('\n');
+                AppendLineFeed(output);
                 index = 1;
+            }
+            else if (text[0] == '\0')
+            {
+                index = 1;
+                _lastOutputWasLineFeed = false;
             }
             else
             {
-                output.Append('\r');
+                _lastOutputWasLineFeed = false;
             }
             _pendingCarriageReturn = false;
         }
@@ -38,9 +44,25 @@ internal sealed class TranscriptLineEndingNormalizer
         for (; index < text.Length; index++)
         {
             char value = text[index];
+            if (value == '\n')
+            {
+                AppendLineFeed(output);
+                continue;
+            }
+
             if (value != '\r')
             {
                 output.Append(value);
+                _lastOutputWasLineFeed = false;
+                continue;
+            }
+
+            // Old Diku/Merc servers commonly emit LFCR. LF advances the terminal
+            // row and CR only returns to column zero; rendering both as text line
+            // breaks inserts a blank visual row between every server line.
+            if (_lastOutputWasLineFeed)
+            {
+                _lastOutputWasLineFeed = false;
                 continue;
             }
 
@@ -52,16 +74,33 @@ internal sealed class TranscriptLineEndingNormalizer
 
             if (text[index + 1] == '\n')
             {
-                output.Append('\n');
+                AppendLineFeed(output);
                 index++;
                 continue;
             }
 
-            output.Append('\r');
+            if (text[index + 1] == '\0')
+            {
+                index++;
+                _lastOutputWasLineFeed = false;
+                continue;
+            }
+
+            _lastOutputWasLineFeed = false;
         }
 
         return output.ToString();
     }
 
-    public void Reset() => _pendingCarriageReturn = false;
+    public void Reset()
+    {
+        _pendingCarriageReturn = false;
+        _lastOutputWasLineFeed = false;
+    }
+
+    private void AppendLineFeed(StringBuilder output)
+    {
+        output.Append('\n');
+        _lastOutputWasLineFeed = true;
+    }
 }
