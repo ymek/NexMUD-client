@@ -12,25 +12,25 @@ NexMUD uses TypeScript as the supported authoring language and Jint as the initi
 TypeScript source -> IScriptCompiler -> ES modules -> Jint -> NexMUD Script Host -> typed C# services
 ```
 
-Jint is an adapter behind `JevMud.Scripting` contracts. It is not a dependency of Automation, Mapper, Jev, Codex, Core, Protocols, or Transport. Internal `JevMud.*` project/namespace names are retained during the product rename to avoid an unrelated binary/source migration.
+Jint is an adapter behind `NexMud.Scripting` contracts. It is not a dependency of Automation, Mapper, Jev, Codex, Core, Protocols, or Transport. Internal `NexMud.*` project/namespace names are retained during the product rename to avoid an unrelated binary/source migration.
 
 ## Project boundaries
 
 ```text
-JevMud.Scripting
+NexMud.Scripting
   language-neutral contracts, lifecycle, manifests, permissions,
   events, storage, compiler and diagnostics contracts
 
-JevMud.Scripting.Jint
+NexMud.Scripting.Jint
   Jint package, hardened engine construction, engine-per-script lifecycle,
   mailbox, private host bridge, module loader, diagnostics, JS bootstrap
 
-JevMud.Scripting.TypeScript
+NexMud.Scripting.TypeScript
   TypeScript authoring boundary, API declarations, compiler cache,
   future compiler adapter/source maps
 ```
 
-Only `JevMud.Scripting.Jint` may reference the Jint NuGet package. `JevMud.Scripting` must remain free of runtime-engine dependencies.
+Only `NexMud.Scripting.Jint` may reference the Jint NuGet package. `NexMud.Scripting` must remain free of runtime-engine dependencies.
 
 ## Runtime isolation and concurrency
 
@@ -60,7 +60,7 @@ Production engines:
 - keep general CLR interop disabled
 - disable `eval` / `new Function` string compilation
 - disable CommonJS `require`
-- use JevMUD/NexMUD-controlled in-memory modules only
+- use NexMUD/NexMUD-controlled in-memory modules only
 - reject package-relative path traversal
 - bound source/module sizes before registration
 - apply Jint execution time, statement, memory, recursion, regex, array, JSON and cancellation constraints

@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../NexMud.Contracts/NexMud.Contracts.csproj" />
+    <ProjectReference Include="../NexMud.Core/NexMud.Core.csproj" />
+    <ProjectReference Include="../NexMud.Transport/NexMud.Transport.csproj" />
+  </ItemGroup>
+</Project>

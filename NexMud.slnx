@@ -1,0 +1,14 @@
+<Solution>
+  <Project Path="src/NexMud.Adapters/NexMud.Adapters.csproj" />
+  <Project Path="src/NexMud.Client/NexMud.Client.csproj" />
+  <Project Path="src/NexMud.Contracts/NexMud.Contracts.csproj" />
+  <Project Path="src/NexMud.Core/NexMud.Core.csproj" />
+  <Project Path="src/NexMud.Transport/NexMud.Transport.csproj" />
+  <Project Path="src/NexMud.Jev/NexMud.Jev.csproj" />
+  <Project Path="src/NexMud.Scripting/NexMud.Scripting.csproj" />
+  <Project Path="src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj" />
+  <Project Path="src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj" />
+  <Project Path="src/NexMud.Gui/NexMud.Gui.csproj" />
+  <Project Path="src/NexMud.Tui/NexMud.Tui.csproj" />
+  <Project Path="tests/NexMud.Tests/NexMud.Tests.csproj" />
+</Solution>

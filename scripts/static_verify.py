@@ -14,7 +14,29 @@ def fail(message: str) -> None:
     errors.append(message)
 
 
-xml_files = [ROOT / "Directory.Build.props", ROOT / "JevMud.slnx", *ROOT.glob("src/**/*.csproj"), *ROOT.glob("tests/**/*.csproj")]
+xml_files = [ROOT / "Directory.Build.props", ROOT / "NexMud.slnx", *ROOT.glob("src/**/*.csproj"), *ROOT.glob("tests/**/*.csproj")]
+
+# Product identity is NexMud/NexMUD. Jev remains valid only as the explicit
+# decision/agent feature name, never as the repository/project namespace prefix.
+legacy_product_tokens = ("Jev" + "Mud", "Jev" + "MUD", "jev" + "mud")
+legacy_scan_roots = (ROOT / "src", ROOT / "tests", ROOT / "scripts", ROOT / "docs")
+legacy_scan_files = [ROOT / "README.md", ROOT / "IMPLEMENTATION_NOTES.md", ROOT / "Directory.Build.props", ROOT / "NexMud.slnx"]
+for scan_root in legacy_scan_roots:
+    for path in scan_root.rglob("*"):
+        if any(part in {"bin", "obj", "artifacts"} for part in path.parts):
+            continue
+        if any(token in path.name for token in legacy_product_tokens):
+            fail(f"legacy pre-rename product identity remains in path: {path.relative_to(ROOT)}")
+        if path.is_file():
+            legacy_scan_files.append(path)
+for path in legacy_scan_files:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    for token in legacy_product_tokens:
+        if token in text:
+            fail(f"legacy pre-rename product identity remains in {path.relative_to(ROOT)}: {token}")
 for path in xml_files:
     try:
         ET.parse(path)
@@ -32,15 +54,15 @@ for project in [*ROOT.glob("src/**/*.csproj"), *ROOT.glob("tests/**/*.csproj")]:
         if not target.is_file():
             fail(f"missing ProjectReference target: {project.relative_to(ROOT)} -> {include}")
 
-solution = ET.parse(ROOT / "JevMud.slnx")
+solution = ET.parse(ROOT / "NexMud.slnx")
 for project in solution.findall(".//Project"):
     path = project.get("Path")
     if not path or not (ROOT / path).is_file():
         fail(f"solution references missing project: {path!r}")
 
 for executable_project in (
-    ROOT / "src/JevMud.Tui/JevMud.Tui.csproj",
-    ROOT / "src/JevMud.Gui/JevMud.Gui.csproj",
+    ROOT / "src/NexMud.Tui/NexMud.Tui.csproj",
+    ROOT / "src/NexMud.Gui/NexMud.Gui.csproj",
 ):
     tree = ET.parse(executable_project)
     output_types = [node.text for node in tree.findall(".//OutputType")]
@@ -53,12 +75,12 @@ for project in ROOT.glob("src/**/*.csproj"):
     for package in tree.findall(".//PackageReference"):
         packages.append((project, package.get("Include"), package.get("Version")))
 expected_packages = {
-    (ROOT / "src/JevMud.Tui/JevMud.Tui.csproj", "Terminal.Gui", "2.5.0"),
-    (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj", "Avalonia", "12.1.2"),
-    (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj", "Avalonia.Desktop", "12.1.2"),
-    (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj", "Avalonia.Themes.Fluent", "12.1.2"),
-    (ROOT / "src/JevMud.Client/JevMud.Client.csproj", "Microsoft.Data.Sqlite", "10.0.12"),
-    (ROOT / "src/JevMud.Scripting.Jint/JevMud.Scripting.Jint.csproj", "Jint", "4.16.3"),
+    (ROOT / "src/NexMud.Tui/NexMud.Tui.csproj", "Terminal.Gui", "2.5.0"),
+    (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia", "12.1.2"),
+    (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia.Desktop", "12.1.2"),
+    (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia.Themes.Fluent", "12.1.2"),
+    (ROOT / "src/NexMud.Client/NexMud.Client.csproj", "Microsoft.Data.Sqlite", "10.0.12"),
+    (ROOT / "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj", "Jint", "4.16.3"),
 }
 if set(packages) != expected_packages:
     rendered = sorted((str(p.relative_to(ROOT)), name, version) for p, name, version in packages)
@@ -239,7 +261,7 @@ for name, literal in required_literals.items():
     if literal not in source:
         fail(f"missing {name}: {literal}")
 
-knowledge_store_source = (ROOT / "src/JevMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text()
+knowledge_store_source = (ROOT / "src/NexMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text()
 knowledge_store_required_api = {
     "codex search API": "public async Task<IReadOnlyList<CodexEntrySummary>> SearchCodexAsync(",
     "codex detail API": "public async Task<CodexEntryDetail?> GetCodexEntryAsync(",
@@ -255,7 +277,7 @@ for name, declaration in knowledge_store_required_api.items():
 # namespaces imported by the original generated source, and Avalonia Grid does
 # not create implicit rows for Grid.Row assignments.
 gui_required_literals = {
-    ROOT / "src/JevMud.Gui/App.cs": [
+    ROOT / "src/NexMud.Gui/App.cs": [
         "using Avalonia.Controls;",
         "using Avalonia.Threading;",
         "Dispatcher.UIThread.UnhandledException += HandleUnhandledUiException;",
@@ -265,11 +287,11 @@ gui_required_literals = {
         'NativeMenuItem about = new("About NexMUD…")',
         "NativeMenu.SetMenu(this, menu)",
     ],
-    ROOT / "src/JevMud.Gui/MainWindow.cs": [
+    ROOT / "src/NexMud.Gui/MainWindow.cs": [
         "using Avalonia.Controls.Primitives;",
         "Dispatcher.UIThread.Post(() => _searchQuery.Focus());",
     ],
-    ROOT / "src/JevMud.Gui/SettingsWorkspace.cs": [
+    ROOT / "src/NexMud.Gui/SettingsWorkspace.cs": [
         "using Avalonia.Controls.Primitives;",
         "matrix.RowDefinitions.Add(new RowDefinition(GridLength.Auto));",
     ],
@@ -280,8 +302,8 @@ for path, literals in gui_required_literals.items():
         if literal not in text:
             fail(f"missing GUI compile/layout requirement in {path.relative_to(ROOT)}: {literal}")
 
-main_window_text = (ROOT / "src/JevMud.Gui/MainWindow.cs").read_text(encoding="utf-8")
-settings_workspace_text = (ROOT / "src/JevMud.Gui/SettingsWorkspace.cs").read_text(encoding="utf-8")
+main_window_text = (ROOT / "src/NexMud.Gui/MainWindow.cs").read_text(encoding="utf-8")
+settings_workspace_text = (ROOT / "src/NexMud.Gui/SettingsWorkspace.cs").read_text(encoding="utf-8")
 
 # Explorer workspaces must remain outside MainWindow's render/rebuild lifecycle.
 main_window_explorer_forbidden = (
@@ -295,10 +317,10 @@ for literal in main_window_explorer_forbidden:
     if literal in main_window_text:
         fail(f"explorer subsystem leaked back into MainWindow render lifecycle: {literal}")
 
-codex_workspace_text = (ROOT / "src/JevMud.Gui/CodexWorkspace.cs").read_text(encoding="utf-8")
-mapper_workspace_text = (ROOT / "src/JevMud.Gui/MapperWorkspace.cs").read_text(encoding="utf-8")
-mapper_repository_text = (ROOT / "src/JevMud.Client/Knowledge/MapperReadRepository.cs").read_text(encoding="utf-8")
-mapper_topology_text = (ROOT / "src/JevMud.Client/Knowledge/MapperTopologyLayout.cs").read_text(encoding="utf-8")
+codex_workspace_text = (ROOT / "src/NexMud.Gui/CodexWorkspace.cs").read_text(encoding="utf-8")
+mapper_workspace_text = (ROOT / "src/NexMud.Gui/MapperWorkspace.cs").read_text(encoding="utf-8")
+mapper_repository_text = (ROOT / "src/NexMud.Client/Knowledge/MapperReadRepository.cs").read_text(encoding="utf-8")
+mapper_topology_text = (ROOT / "src/NexMud.Client/Knowledge/MapperTopologyLayout.cs").read_text(encoding="utf-8")
 if "RenderDock(" in codex_workspace_text or "RenderDock(" in mapper_workspace_text:
     fail("explorer workspaces must not depend on MainWindow.RenderDock")
 if "_resultList.SelectionChanged" in mapper_workspace_text:
@@ -328,9 +350,9 @@ if "ClearSearchAfterSelection();\n        await PlanRouteAsync()" not in mapper_
     fail("mapper selection must clear its originating query before asynchronous route planning")
 if "await PlanRouteAsync().ConfigureAwait(true);\n        ClearSearchAfterSelection();" in mapper_workspace_text:
     fail("stale route planning may not clear a newer mapper search")
-interaction_input_text = (ROOT / "src/JevMud.Client/Interaction/InputInteraction.cs").read_text(encoding="utf-8")
-interaction_output_text = (ROOT / "src/JevMud.Client/Interaction/OutputInteraction.cs").read_text(encoding="utf-8")
-interaction_keybinding_text = (ROOT / "src/JevMud.Client/Interaction/Keybindings.cs").read_text(encoding="utf-8")
+interaction_input_text = (ROOT / "src/NexMud.Client/Interaction/InputInteraction.cs").read_text(encoding="utf-8")
+interaction_output_text = (ROOT / "src/NexMud.Client/Interaction/OutputInteraction.cs").read_text(encoding="utf-8")
+interaction_keybinding_text = (ROOT / "src/NexMud.Client/Interaction/Keybindings.cs").read_text(encoding="utf-8")
 for literal in ("RenderedTranscriptSegmentLimit", "TrimRenderedTranscriptIfNeeded()", "_runtime.Interaction.World.Appended += HandleWorldBufferAppended"):
     if literal not in main_window_text:
         fail(f"logical transcript projection invariant missing: {literal}")
@@ -352,14 +374,14 @@ if "PublishAppended(entry)" not in interaction_output_text or "GetInvocationList
     fail("logical output/view notifications must isolate subscriber faults from the output worker")
 if "FindMatches(matcher, rendered)" not in interaction_output_text:
     fail("highlight matching must use the full rendered line so ANSI run boundaries do not break matches")
-contracts_actions_text = (ROOT / "src/JevMud.Contracts/Actions/MudActions.cs").read_text(encoding="utf-8")
-script_host_contracts_text = (ROOT / "src/JevMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
+contracts_actions_text = (ROOT / "src/NexMud.Contracts/Actions/MudActions.cs").read_text(encoding="utf-8")
+script_host_contracts_text = (ROOT / "src/NexMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
 for literal in ("User = 0", "Automation = 1", "Jev = 2", "Mapper = 3", "Script = 4", "System = 5", "Alias = 6", "Keybinding = 7"):
     if literal not in contracts_actions_text or literal not in script_host_contracts_text:
         fail(f"command provenance enum compatibility invariant missing: {literal}")
-contracts_events_text = (ROOT / "src/JevMud.Contracts/Events/MudEvents.cs").read_text(encoding="utf-8")
-adapter_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
-knowledge_text = (ROOT / "src/JevMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text(encoding="utf-8")
+contracts_events_text = (ROOT / "src/NexMud.Contracts/Events/MudEvents.cs").read_text(encoding="utf-8")
+adapter_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
+knowledge_text = (ROOT / "src/NexMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text(encoding="utf-8")
 for literal in ("AreaObserved(string Area)",):
     if literal not in contracts_events_text:
         fail("explicit area observation contract is missing")
@@ -424,14 +446,14 @@ for literal in (
 if "context.DrawLine(new Pen(edgeBrush" in mapper_workspace_text:
     fail("directed blocked state must not paint an entire reciprocal room connection")
 
-client_script_infrastructure_text = (ROOT / "src/JevMud.Client/Scripting/ClientScriptInfrastructure.cs").read_text(encoding="utf-8")
+client_script_infrastructure_text = (ROOT / "src/NexMud.Client/Scripting/ClientScriptInfrastructure.cs").read_text(encoding="utf-8")
 if "ArgumentException.ThrowIfNullOrWhiteSpace(request.Command)" in client_script_infrastructure_text:
     fail("shared command adapter must permit empty MUD input")
 if "ArgumentNullException.ThrowIfNull(request.Command)" not in client_script_infrastructure_text:
     fail("shared command adapter should reject null command values without rejecting empty input")
 
-automation_workspace_text = (ROOT / "src/JevMud.Gui/AutomationWorkspace.cs").read_text(encoding="utf-8")
-scripting_workspace_text = (ROOT / "src/JevMud.Gui/ScriptingWorkspace.cs").read_text(encoding="utf-8")
+automation_workspace_text = (ROOT / "src/NexMud.Gui/AutomationWorkspace.cs").read_text(encoding="utf-8")
+scripting_workspace_text = (ROOT / "src/NexMud.Gui/ScriptingWorkspace.cs").read_text(encoding="utf-8")
 for literal in (
     'Text = "AUTOMATIONS"',
     'Text = "Choose a behavior to see when it runs and exactly what Jev will do."',
@@ -474,7 +496,7 @@ if 'UtilityButton("⚙", "Settings")' in main_window_text:
     fail("settings affordance regressed to an undersized icon-only control")
 if '#43C7F4' in main_window_text or '#43C7F4' in settings_workspace_text:
     fail("legacy cyan GUI palette must not reappear outside user-configured highlights")
-if '#B99A5B' in main_window_text or '#B99A5B' in settings_workspace_text or '#B99A5B' in (ROOT / "src/JevMud.Gui/UiTheme.cs").read_text(encoding="utf-8"):
+if '#B99A5B' in main_window_text or '#B99A5B' in settings_workspace_text or '#B99A5B' in (ROOT / "src/NexMud.Gui/UiTheme.cs").read_text(encoding="utf-8"):
     fail("legacy sepia/gold GUI accent must not reappear in the application design system")
 if 'Text = room.Name ?? state.Room.Name ?? room.RoomId' in main_window_text:
     fail("GUI must never fall back to exposing internal room ids as room names")
@@ -506,21 +528,21 @@ if 'RowDefinitions = new RowDefinitions("Auto,*,Auto")' not in main_window_text:
     fail("main layout must retain app bar, world body, and status footer")
 
 for required_gui_file in (
-    ROOT / "src/JevMud.Gui/GameplayShellViewModels.cs",
-    ROOT / "src/JevMud.Gui/NexMudDesignSystem.cs",
-    ROOT / "src/JevMud.Gui/NexMudIcons.cs",
-    ROOT / "src/JevMud.Gui/PersistentGameplayPanels.cs",
-    ROOT / "src/JevMud.Gui/CharacterInventoryWorkspace.cs",
-    ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs",
-    ROOT / "src/JevMud.Gui/SettingsWorkspace.cs",
-    ROOT / "src/JevMud.Gui/ScriptingWorkspace.cs",
-    ROOT / "src/JevMud.Gui/Assets/Textures/dark-metal.png",
-    ROOT / "src/JevMud.Gui/Assets/Textures/obsidian-grain.png",
+    ROOT / "src/NexMud.Gui/GameplayShellViewModels.cs",
+    ROOT / "src/NexMud.Gui/NexMudDesignSystem.cs",
+    ROOT / "src/NexMud.Gui/NexMudIcons.cs",
+    ROOT / "src/NexMud.Gui/PersistentGameplayPanels.cs",
+    ROOT / "src/NexMud.Gui/CharacterInventoryWorkspace.cs",
+    ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs",
+    ROOT / "src/NexMud.Gui/SettingsWorkspace.cs",
+    ROOT / "src/NexMud.Gui/ScriptingWorkspace.cs",
+    ROOT / "src/NexMud.Gui/Assets/Textures/dark-metal.png",
+    ROOT / "src/NexMud.Gui/Assets/Textures/obsidian-grain.png",
 ):
     if not required_gui_file.is_file():
         fail(f"missing world-first GUI component: {required_gui_file.relative_to(ROOT)}")
 
-app_icon_png = ROOT / "src/JevMud.Gui/Assets/app-icon.png"
+app_icon_png = ROOT / "src/NexMud.Gui/Assets/app-icon.png"
 if not app_icon_png.is_file():
     fail("missing approved high-resolution application icon PNG")
 else:
@@ -532,7 +554,7 @@ else:
         if width < 512 or height < 512:
             fail(f"approved application icon must be >=512px per side, found {width}x{height}")
 
-if (ROOT / "src/JevMud.Gui/WorldVisualTheme.cs").exists():
+if (ROOT / "src/NexMud.Gui/WorldVisualTheme.cs").exists():
     fail("legacy flat WorldVisualTheme must not survive the prescriptive design-system reconstruction")
 if not (ROOT / "docs/architecture/NexMUD-avalonia-world-first-ui-architecture.md").is_file():
     fail("missing NexMUD Avalonia world-first UI architecture contract")
@@ -541,15 +563,15 @@ if not (ROOT / "docs/design/NexMUD-main-window-prescriptive-visual-spec.md").is_
 if not (ROOT / "docs/design/NexMUD-default-world-design-system-implementation.md").is_file():
     fail("missing default-World design-system implementation notes")
 
-nex_design_text = (ROOT / "src/JevMud.Gui/NexMudDesignSystem.cs").read_text(encoding="utf-8")
-nex_icons_text = (ROOT / "src/JevMud.Gui/NexMudIcons.cs").read_text(encoding="utf-8")
+nex_design_text = (ROOT / "src/NexMud.Gui/NexMudDesignSystem.cs").read_text(encoding="utf-8")
+nex_icons_text = (ROOT / "src/NexMud.Gui/NexMudIcons.cs").read_text(encoding="utf-8")
 if "private readonly Avalonia.Controls.Shapes.Path _path;" not in nex_icons_text:
     fail("NexMUD icon library must fully qualify Avalonia.Controls.Shapes.Path")
 if "_path = new Avalonia.Controls.Shapes.Path" not in nex_icons_text:
     fail("NexMUD icon construction must fully qualify Avalonia.Controls.Shapes.Path")
-persistent_gameplay_text = (ROOT / "src/JevMud.Gui/PersistentGameplayPanels.cs").read_text(encoding="utf-8")
-character_workspace_text = (ROOT / "src/JevMud.Gui/CharacterInventoryWorkspace.cs").read_text(encoding="utf-8")
-item_popover_text = (ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
+persistent_gameplay_text = (ROOT / "src/NexMud.Gui/PersistentGameplayPanels.cs").read_text(encoding="utf-8")
+character_workspace_text = (ROOT / "src/NexMud.Gui/CharacterInventoryWorkspace.cs").read_text(encoding="utf-8")
+item_popover_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 for literal in (
     'internal enum NexAccentTheme',
     'EmberBrass', 'ArcaneCyan', 'MysticViolet', 'BloodCrimson', 'VerdantEmerald',
@@ -616,36 +638,36 @@ for literal in (
 ):
     if literal not in main_window_text:
         fail(f"default World main-shell visual invariant missing: {literal}")
-if 'NexMudTheme.Install(this);' not in (ROOT / "src/JevMud.Gui/App.cs").read_text(encoding="utf-8"):
+if 'NexMudTheme.Install(this);' not in (ROOT / "src/NexMud.Gui/App.cs").read_text(encoding="utf-8"):
     fail("NexMUD design resources must be installed at application initialization")
 
 
-scripting_project = ROOT / "src/JevMud.Scripting/JevMud.Scripting.csproj"
+scripting_project = ROOT / "src/NexMud.Scripting/NexMud.Scripting.csproj"
 if not scripting_project.is_file():
     fail("missing language-neutral scripting project")
 else:
     scripting_tree = ET.parse(scripting_project)
     if scripting_tree.findall(".//ProjectReference"):
-        fail("JevMud.Scripting must remain independent of application/domain projects")
+        fail("NexMud.Scripting must remain independent of application/domain projects")
     if scripting_tree.findall(".//PackageReference"):
         fail("language-neutral scripting contracts must not select an external runtime package yet")
 
 for lower_layer_project in (
-    ROOT / "src/JevMud.Contracts/JevMud.Contracts.csproj",
-    ROOT / "src/JevMud.Core/JevMud.Core.csproj",
-    ROOT / "src/JevMud.Transport/JevMud.Transport.csproj",
-    ROOT / "src/JevMud.Adapters/JevMud.Adapters.csproj",
-    ROOT / "src/JevMud.Jev/JevMud.Jev.csproj",
+    ROOT / "src/NexMud.Contracts/NexMud.Contracts.csproj",
+    ROOT / "src/NexMud.Core/NexMud.Core.csproj",
+    ROOT / "src/NexMud.Transport/NexMud.Transport.csproj",
+    ROOT / "src/NexMud.Adapters/NexMud.Adapters.csproj",
+    ROOT / "src/NexMud.Jev/NexMud.Jev.csproj",
 ):
     lower_tree = ET.parse(lower_layer_project)
     for reference in lower_tree.findall(".//ProjectReference"):
-        if "JevMud.Scripting" in (reference.get("Include") or ""):
+        if "NexMud.Scripting" in (reference.get("Include") or ""):
             fail(f"lower layer may not depend upward on scripting: {lower_layer_project.relative_to(ROOT)}")
 
 behavior_orchestration_files = (
-    ROOT / "src/JevMud.Client/Automation/ClientAutomationService.cs",
-    ROOT / "src/JevMud.Client/Navigation/AutoMoveService.cs",
-    ROOT / "src/JevMud.Client/Runtime/JevDecisionCoordinator.cs",
+    ROOT / "src/NexMud.Client/Automation/ClientAutomationService.cs",
+    ROOT / "src/NexMud.Client/Navigation/AutoMoveService.cs",
+    ROOT / "src/NexMud.Client/Runtime/JevDecisionCoordinator.cs",
 )
 for behavior_file in behavior_orchestration_files:
     behavior_text = behavior_file.read_text(encoding="utf-8")
@@ -653,14 +675,14 @@ for behavior_file in behavior_orchestration_files:
         if forbidden in behavior_text:
             fail(f"behavior orchestration bypasses shared runtime primitive in {behavior_file.relative_to(ROOT)}: {forbidden}")
 
-script_events_text = (ROOT / "src/JevMud.Scripting/Events/ScriptEvents.cs").read_text(encoding="utf-8")
+script_events_text = (ROOT / "src/NexMud.Scripting/Events/ScriptEvents.cs").read_text(encoding="utf-8")
 if "finally\n                {\n                    Close();" not in script_events_text:
     fail("script event subscriptions must unregister automatically when owner execution ends")
-script_execution_text = (ROOT / "src/JevMud.Scripting/Execution/ScriptExecutionScope.cs").read_text(encoding="utf-8")
+script_execution_text = (ROOT / "src/NexMud.Scripting/Execution/ScriptExecutionScope.cs").read_text(encoding="utf-8")
 if "event Action<ScriptTaskFault>? TaskFaulted" not in script_execution_text:
     fail("shared execution supervisor must expose owned task faults")
 
-client_script_infrastructure_text = (ROOT / "src/JevMud.Client/Scripting/ClientScriptInfrastructure.cs").read_text(encoding="utf-8")
+client_script_infrastructure_text = (ROOT / "src/NexMud.Client/Scripting/ClientScriptInfrastructure.cs").read_text(encoding="utf-8")
 for literal in (
     "ScriptCommandOrigin.User",
     "WaitForHumanOverrideAsync",
@@ -673,7 +695,7 @@ for literal in (
         fail(f"central command arbitration/provenance invariant missing: {literal}")
 
 for source_file in (ROOT / "src").rglob("*.cs"):
-    if source_file == ROOT / "src/JevMud.Client/Scripting/ClientScriptInfrastructure.cs":
+    if source_file == ROOT / "src/NexMud.Client/Scripting/ClientScriptInfrastructure.cs":
         continue
     source_text = source_file.read_text(encoding="utf-8")
     if ".Actions.QueueAsync(" in source_text or "_actions.QueueAsync(" in source_text:
@@ -684,7 +706,7 @@ if "FullMode = BoundedChannelFullMode.Wait" not in script_events_text:
 if "ValidateChildKind" not in script_execution_text:
     fail("script execution owners must constrain child ownership kinds")
 
-script_host_text = (ROOT / "src/JevMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
+script_host_text = (ROOT / "src/NexMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
 for literal in (
     "IScriptEvents Events",
     "IScriptCommands Commands",
@@ -699,9 +721,9 @@ for literal in (
     if literal not in script_host_text:
         fail(f"script host capability surface missing: {literal}")
 
-automation_runtime_text = (ROOT / "src/JevMud.Client/Automation/AutomationRuntimeCompiler.cs").read_text(encoding="utf-8")
-automation_js_compiler_text = (ROOT / "src/JevMud.Client/Automation/AutomationJavaScriptCompiler.cs").read_text(encoding="utf-8")
-automation_ir_text = (ROOT / "src/JevMud.Client/Automation/AutomationIr.cs").read_text(encoding="utf-8")
+automation_runtime_text = (ROOT / "src/NexMud.Client/Automation/AutomationRuntimeCompiler.cs").read_text(encoding="utf-8")
+automation_js_compiler_text = (ROOT / "src/NexMud.Client/Automation/AutomationJavaScriptCompiler.cs").read_text(encoding="utf-8")
+automation_ir_text = (ROOT / "src/NexMud.Client/Automation/AutomationIr.cs").read_text(encoding="utf-8")
 for literal in (
     "class AutomationRuntimeCompiler",
     "AutomationProgram[] candidatePrograms = BuildPrograms",
@@ -741,7 +763,7 @@ for literal in (
 ):
     if literal not in automation_ir_text:
         fail(f"automation IR invariant missing: {literal}")
-legacy_automation_text = (ROOT / "src/JevMud.Client/Automation/ClientAutomationService.cs").read_text(encoding="utf-8")
+legacy_automation_text = (ROOT / "src/NexMud.Client/Automation/ClientAutomationService.cs").read_text(encoding="utf-8")
 for forbidden in ("EvaluateTriggersAsync", "EvaluateGameRulesAsync", "RunTimersAsync"):
     if forbidden in legacy_automation_text:
         fail(f"migrated Automation category still executes through legacy runtime: {forbidden}")
@@ -755,10 +777,10 @@ for literal in (
     "nex.timers.cancel",
     "nex.storage.get",
 ):
-    permission_or_sdk_text = (ROOT / "src/JevMud.Scripting/Permissions/ScriptPermissions.cs").read_text(encoding="utf-8") + automation_js_compiler_text + (ROOT / "src/JevMud.Scripting.Jint/Bootstrap/NexMudJavaScriptBootstrap.cs").read_text(encoding="utf-8")
+    permission_or_sdk_text = (ROOT / "src/NexMud.Scripting/Permissions/ScriptPermissions.cs").read_text(encoding="utf-8") + automation_js_compiler_text + (ROOT / "src/NexMud.Scripting.Jint/Bootstrap/NexMudJavaScriptBootstrap.cs").read_text(encoding="utf-8")
     if literal not in permission_or_sdk_text:
         fail(f"stabilized Automation SDK invariant missing: {literal}")
-jint_project = ROOT / "src/JevMud.Scripting.Jint/JevMud.Scripting.Jint.csproj"
+jint_project = ROOT / "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj"
 if not jint_project.is_file():
     fail("missing Jint scripting adapter project")
 else:
@@ -767,7 +789,7 @@ else:
     if jint_packages != [("Jint", "4.16.3")]:
         fail(f"Jint adapter must pin exactly Jint 4.16.3: {jint_packages}")
     jint_refs = [node.get("Include") or "" for node in jint_tree.findall(".//ProjectReference")]
-    if jint_refs != ["../JevMud.Scripting/JevMud.Scripting.csproj"]:
+    if jint_refs != ["../NexMud.Scripting/NexMud.Scripting.csproj"]:
         fail(f"Jint adapter must depend only on language-neutral scripting contracts: {jint_refs}")
 
 for project in ROOT.glob("src/**/*.csproj"):
@@ -777,7 +799,7 @@ for project in ROOT.glob("src/**/*.csproj"):
     if any((node.get("Include") or "").casefold() == "jint" for node in tree.findall(".//PackageReference")):
         fail(f"Jint package leaked outside adapter project: {project.relative_to(ROOT)}")
 
-jint_source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src/JevMud.Scripting.Jint").rglob("*.cs"))
+jint_source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src/NexMud.Scripting.Jint").rglob("*.cs"))
 for forbidden in ("AllowClr(", "EnableModules(", "System.Reflection", "Process.Start("):
     if forbidden in jint_source:
         fail(f"Jint adapter violates sandbox boundary: {forbidden}")
@@ -804,7 +826,7 @@ for literal in (
     if literal not in jint_source:
         fail(f"Jint integration invariant missing: {literal}")
 
-bootstrap_text = (ROOT / "src/JevMud.Scripting.Jint/Bootstrap/NexMudJavaScriptBootstrap.cs").read_text(encoding="utf-8")
+bootstrap_text = (ROOT / "src/NexMud.Scripting.Jint/Bootstrap/NexMudJavaScriptBootstrap.cs").read_text(encoding="utf-8")
 for literal in ("'__nexResolve'", "'__nexReject'", "'__nexDispatchEvent'", "'__nexDispatchTimer'", "@nexmud/api", "globalThis, 'nex'", "function deepFreeze", "delay(milliseconds)", "after(milliseconds, handler)", "every(milliseconds, handler)", "has(key)"):
     if literal not in bootstrap_text:
         fail(f"NexMUD JavaScript bootstrap invariant missing: {literal}")
@@ -814,7 +836,7 @@ for reserved_namespace in ("codex,", "ui,", "jev,"):
     if reserved_namespace in bootstrap_text.split("const nex = Object.freeze(", 1)[-1].split(");", 1)[0]:
         fail(f"reserved scripting namespace exposed before its architecture slice: {reserved_namespace.rstrip(',')}")
 
-typescript_project = ROOT / "src/JevMud.Scripting.TypeScript/JevMud.Scripting.TypeScript.csproj"
+typescript_project = ROOT / "src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj"
 if not typescript_project.is_file():
     fail("missing TypeScript scripting boundary project")
 else:
@@ -822,25 +844,25 @@ else:
     if ts_tree.findall(".//PackageReference"):
         fail("TypeScript boundary must not smuggle in Node/native compiler dependencies")
     ts_refs = [node.get("Include") or "" for node in ts_tree.findall(".//ProjectReference")]
-    if ts_refs != ["../JevMud.Scripting/JevMud.Scripting.csproj"]:
+    if ts_refs != ["../NexMud.Scripting/NexMud.Scripting.csproj"]:
         fail(f"TypeScript boundary must depend only on scripting contracts: {ts_refs}")
-ts_declarations = (ROOT / "src/JevMud.Scripting.TypeScript/Declarations/NexMudTypeDeclarations.cs").read_text(encoding="utf-8")
+ts_declarations = (ROOT / "src/NexMud.Scripting.TypeScript/Declarations/NexMudTypeDeclarations.cs").read_text(encoding="utf-8")
 for literal in ('ModuleSpecifier = "@nexmud/api"', "declare const nex: NexMudApi", "\"character.vitalsChanged\"", "Promise<NexMudCommandResult>", "NexMudTimersApi", "NexMudStorageApi", "ScriptApiVersion.Current"):
     if literal not in ts_declarations:
         fail(f"TypeScript declaration/API-version invariant missing: {literal}")
 
-solution_text = (ROOT / "JevMud.slnx").read_text(encoding="utf-8")
+solution_text = (ROOT / "NexMud.slnx").read_text(encoding="utf-8")
 for project_path in (
-    "src/JevMud.Scripting/JevMud.Scripting.csproj",
-    "src/JevMud.Scripting.Jint/JevMud.Scripting.Jint.csproj",
-    "src/JevMud.Scripting.TypeScript/JevMud.Scripting.TypeScript.csproj",
+    "src/NexMud.Scripting/NexMud.Scripting.csproj",
+    "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj",
+    "src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj",
 ):
     if project_path not in solution_text:
         fail(f"scripting project must be included in solution: {project_path}")
 
-if "src/JevMud.Scripting/JevMud.Scripting.csproj" not in (ROOT / "JevMud.slnx").read_text(encoding="utf-8"):
+if "src/NexMud.Scripting/NexMud.Scripting.csproj" not in (ROOT / "NexMud.slnx").read_text(encoding="utf-8"):
     fail("scripting project must be included in solution")
-if not (ROOT / "docs/architecture/JevMUD-scripting-platform-architecture.md").is_file():
+if not (ROOT / "docs/architecture/NexMUD-scripting-platform-architecture.md").is_file():
     fail("missing original scripting platform architecture contract in repository")
 if not (ROOT / "docs/architecture/NexMUD-jint-integration-architecture.md").is_file():
     fail("missing NexMUD Jint integration architecture contract in repository")
@@ -850,8 +872,8 @@ if not (ROOT / "docs/architecture/NexMUD-scripting-sdk-automation-migration-arch
     fail("missing NexMUD scripting SDK + Automation migration architecture contract in repository")
 
 vertical_slice_files = (
-    ROOT / "src/JevMud.Scripting.TypeScript/Compiler/TypeScriptCompiler.cs",
-    ROOT / "src/JevMud.Scripting/Compilation/ScriptSourceMaps.cs",
+    ROOT / "src/NexMud.Scripting.TypeScript/Compiler/TypeScriptCompiler.cs",
+    ROOT / "src/NexMud.Scripting/Compilation/ScriptSourceMaps.cs",
     ROOT / "scripts/reference/vitals-policy/manifest.json",
     ROOT / "scripts/reference/vitals-policy/main.ts",
 )
@@ -867,9 +889,9 @@ for literal in (
 ):
     if literal not in vertical_slice_source:
         fail(f"scripting vertical-slice invariant missing: {literal}")
-if "Transport" in (ROOT / "src/JevMud.Scripting.Jint/Host/JintHostBridge.cs").read_text(encoding="utf-8"):
+if "Transport" in (ROOT / "src/NexMud.Scripting.Jint/Host/JintHostBridge.cs").read_text(encoding="utf-8"):
     fail("Jint host bridge must not bypass central command dispatch through Transport")
-jint_host_bridge_text = (ROOT / "src/JevMud.Scripting.Jint/Host/JintHostBridge.cs").read_text(encoding="utf-8")
+jint_host_bridge_text = (ROOT / "src/NexMud.Scripting.Jint/Host/JintHostBridge.cs").read_text(encoding="utf-8")
 for forbidden_jint_internal in (
     "engine.RunAvailableContinuations(",
     "engine.DrainEventLoopUntilSettled(",
@@ -883,7 +905,7 @@ if 'engine.Execute("void 0;", "<nexmud-continuation-pump>")' not in jint_host_br
 if "await invocation.Completion.Task.WaitAsync(cancellationToken)" not in jint_host_bridge_text:
     fail("Jint event subscriptions must preserve FIFO across the full async handler lifecycle")
 
-automation_runtime_text = (ROOT / "src/JevMud.Client/Automation/AutomationRuntimeCompiler.cs").read_text(encoding="utf-8")
+automation_runtime_text = (ROOT / "src/NexMud.Client/Automation/AutomationRuntimeCompiler.cs").read_text(encoding="utf-8")
 for literal in ("EnsureRuntimeRunningAsync", "if (!await EnsureRuntimeRunningAsync(cancellationToken)"):
     if literal not in automation_runtime_text:
         fail(f"Automation alias runtime-health invariant missing: {literal}")
@@ -895,17 +917,17 @@ mapper_architecture = ROOT / "docs/architecture/NexMUD-mapper-orchestration-arch
 if not mapper_architecture.is_file():
     fail("missing Mapper orchestration architecture contract")
 for path in (
-    ROOT / "src/JevMud.Client/Navigation/MapperQueryService.cs",
-    ROOT / "src/JevMud.Client/Navigation/MapperMovementCoordinator.cs",
-    ROOT / "src/JevMud.Client/Navigation/MapperNavigationAuthority.cs",
-    ROOT / "src/JevMud.Client/Navigation/MapperRouteOrchestration.cs",
+    ROOT / "src/NexMud.Client/Navigation/MapperQueryService.cs",
+    ROOT / "src/NexMud.Client/Navigation/MapperMovementCoordinator.cs",
+    ROOT / "src/NexMud.Client/Navigation/MapperNavigationAuthority.cs",
+    ROOT / "src/NexMud.Client/Navigation/MapperRouteOrchestration.cs",
 ):
     if not path.is_file():
         fail(f"missing Mapper orchestration implementation file: {path.relative_to(ROOT)}")
-mapper_orchestration_text = (ROOT / "src/JevMud.Client/Navigation/MapperRouteOrchestration.cs").read_text(encoding="utf-8")
-mapper_movement_text = (ROOT / "src/JevMud.Client/Navigation/MapperMovementCoordinator.cs").read_text(encoding="utf-8")
-mapper_query_text = (ROOT / "src/JevMud.Client/Navigation/MapperQueryService.cs").read_text(encoding="utf-8")
-auto_move_text = (ROOT / "src/JevMud.Client/Navigation/AutoMoveService.cs").read_text(encoding="utf-8")
+mapper_orchestration_text = (ROOT / "src/NexMud.Client/Navigation/MapperRouteOrchestration.cs").read_text(encoding="utf-8")
+mapper_movement_text = (ROOT / "src/NexMud.Client/Navigation/MapperMovementCoordinator.cs").read_text(encoding="utf-8")
+mapper_query_text = (ROOT / "src/NexMud.Client/Navigation/MapperQueryService.cs").read_text(encoding="utf-8")
+auto_move_text = (ROOT / "src/NexMud.Client/Navigation/AutoMoveService.cs").read_text(encoding="utf-8")
 for literal in (
     "class MapperQueryService",
     "FindRouteAsync",
@@ -987,7 +1009,7 @@ if load_position < 0 or start_signal_position < 0 or start_signal_position <= lo
     fail("Mapper route start signal must be published only after the Jint route module load/reload path")
 if "nex.timers.after(0, executeRoute)" in mapper_orchestration_text:
     fail("Mapper route startup must not depend on a zero-delay activation timer")
-mapper_test_text = (ROOT / "tests/JevMud.Tests/Program.cs").read_text(encoding="utf-8")
+mapper_test_text = (ROOT / "tests/NexMud.Tests/Program.cs").read_text(encoding="utf-8")
 if "MapperRouteExplicitStartSignalBeginsOrchestration" not in mapper_test_text:
     fail("Mapper route startup regression test is missing")
 if "MapperRouteResumesAfterDelayedPathfinding" not in mapper_test_text:
@@ -998,7 +1020,7 @@ if "CompiledAutomationAliasResumesAfterDelayedHostCompletion" not in mapper_test
 # Cross-project scripting runtime symbols must import their defining namespace.
 # This catches compile failures which structural string checks otherwise miss when a migration
 # introduces a runtime enum/record into Client, GUI, Automation, Mapper, or future Jev code.
-runtime_namespace = "JevMud.Scripting.Runtime"
+runtime_namespace = "NexMud.Scripting.Runtime"
 runtime_symbols = (
     "ScriptModuleId",
     "ScriptOwnerKind",
@@ -1035,7 +1057,7 @@ for literal in (
 ):
     if literal not in bootstrap_text:
         fail(f"nex.mapper bootstrap invariant missing: {literal}")
-script_host_contracts = (ROOT / "src/JevMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
+script_host_contracts = (ROOT / "src/NexMud.Scripting/Host/ScriptHostContracts.cs").read_text(encoding="utf-8")
 for literal in (
     "Task<ScriptRoomSnapshot?> CurrentRoomAsync",
     "Task<ScriptRoutePlan?> FindPathAsync",
@@ -1048,16 +1070,16 @@ for forbidden in ("MoveToAsync", '"mapper.moveTo"'):
         fail(f"legacy Mapper scripting execution path remains: {forbidden}")
 
 for required_file in (
-    ROOT / "src/JevMud.Gui/Assets/app-icon.icns",
-    ROOT / "src/JevMud.Gui/Assets/app-icon.ico",
+    ROOT / "src/NexMud.Gui/Assets/app-icon.icns",
+    ROOT / "src/NexMud.Gui/Assets/app-icon.ico",
     ROOT / "scripts/run-macos-app.sh",
-    ROOT / "src/JevMud.Gui/CommandGesture.cs",
-    ROOT / "src/JevMud.Gui/CrashDiagnostics.cs",
+    ROOT / "src/NexMud.Gui/CommandGesture.cs",
+    ROOT / "src/NexMud.Gui/CrashDiagnostics.cs",
 ):
     if not required_file.is_file():
         fail(f"missing application identity/convenience file: {required_file.relative_to(ROOT)}")
 
-ornaments_dir = ROOT / "src/JevMud.Gui/Assets/Ornaments"
+ornaments_dir = ROOT / "src/NexMud.Gui/Assets/Ornaments"
 if ornaments_dir.exists():
     fail("regression-recovery release must not ship the rejected generated gameplay ornament directory")
 
@@ -1073,16 +1095,16 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.28.0"):
-    fail("README current version must be NexMUD 0.28.0")
-if '<Version>0.28.0</Version>' not in (ROOT / "src/JevMud.Gui/JevMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.28.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.29.0"):
+    fail("README current version must be NexMUD 0.29.0")
+if '<Version>0.29.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.29.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.28.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.28.0")
-if '<string>28000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 28000 for NexMUD 0.28.0")
-item_inspection_text = (ROOT / "src/JevMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
+if '<string>0.29.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.29.0")
+if '<string>29000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 29000 for NexMUD 0.29.0")
+item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
 
@@ -1093,33 +1115,33 @@ if "semantic extraction cannot suppress it" not in readme:
 
 
 # 0.23.0 alias expansion must feed separators introduced by aliases back through batching.
-alias_input_text = (ROOT / "src/JevMud.Client/Commands/CommandInputExpander.cs").read_text(encoding="utf-8")
+alias_input_text = (ROOT / "src/NexMud.Client/Commands/CommandInputExpander.cs").read_text(encoding="utf-8")
 if "CommandAliasExpander.TryExpand" not in alias_input_text or "CommandBatchSplitter.Split(command, separator)" not in alias_input_text:
     fail("alias expansion must occur before final command-batch splitting")
 if "SplitPreservingEscapes" not in alias_input_text:
     fail("alias command planning must preserve escaped separators until final expansion")
 if "_runtime.Interaction.Input.SubmitAsync" not in main_window_text:
     fail("Avalonia command submission must use the shared interaction input pipeline")
-tui_main_window_text = (ROOT / "src/JevMud.Tui/Views/MainWindow.cs").read_text(encoding="utf-8")
+tui_main_window_text = (ROOT / "src/NexMud.Tui/Views/MainWindow.cs").read_text(encoding="utf-8")
 if "_runtime.Interaction.Input.SubmitAsync" not in tui_main_window_text:
     fail("TUI command submission must use the shared interaction input pipeline")
 if "_runtime.Interaction.World.Appended += HandleWorldBufferAppended" not in tui_main_window_text:
     fail("TUI world output must project the shared logical WorldBuffer")
 
 # 0.19.x gameplay shell compile-safety
-gameplay_shell_text = (ROOT / "src/JevMud.Gui/GameplayShellViewModels.cs").read_text(encoding="utf-8")
-if "using JevMud.Contracts.Events;" not in gameplay_shell_text:
-    fail("gameplay shell must import ConnectionStatus from JevMud.Contracts.Events")
+gameplay_shell_text = (ROOT / "src/NexMud.Gui/GameplayShellViewModels.cs").read_text(encoding="utf-8")
+if "using NexMud.Contracts.Events;" not in gameplay_shell_text:
+    fail("gameplay shell must import ConnectionStatus from NexMud.Contracts.Events")
 if "out AttributeScore? score" not in gameplay_shell_text or "score is null" not in gameplay_shell_text:
     fail("gameplay shell AttributeScore lookup must be nullable-safe under warnings-as-errors")
 
 # 0.19.1 regression-recovery invariants retained in 0.20.x
-command_input_policy_text = (ROOT / "src/JevMud.Client/Presentation/CommandInputPolicy.cs").read_text(encoding="utf-8")
-avendar_adapter_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
-room_state_text = (ROOT / "src/JevMud.Contracts/State/StateModels.cs").read_text(encoding="utf-8")
-room_event_text = (ROOT / "src/JevMud.Contracts/Events/MudEvents.cs").read_text(encoding="utf-8")
-room_parser_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarRoomContentsParser.cs").read_text(encoding="utf-8")
-test_program_text = (ROOT / "tests/JevMud.Tests/Program.cs").read_text(encoding="utf-8")
+command_input_policy_text = (ROOT / "src/NexMud.Client/Presentation/CommandInputPolicy.cs").read_text(encoding="utf-8")
+avendar_adapter_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
+room_state_text = (ROOT / "src/NexMud.Contracts/State/StateModels.cs").read_text(encoding="utf-8")
+room_event_text = (ROOT / "src/NexMud.Contracts/Events/MudEvents.cs").read_text(encoding="utf-8")
+room_parser_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarRoomContentsParser.cs").read_text(encoding="utf-8")
+test_program_text = (ROOT / "tests/NexMud.Tests/Program.cs").read_text(encoding="utf-8")
 for literal in (
     "SessionInputMode.LoginName => new(",
     'Placeholder: "Character name"',
@@ -1399,10 +1421,10 @@ for literal in (
         fail(f"0.23.0 inventory regression coverage missing: {literal}")
 
 # Terminal typography and application-wide density remain centralized and regression-checked.
-client_settings_text = (ROOT / "src/JevMud.Client/Settings/ClientSettings.cs").read_text(encoding="utf-8")
-client_settings_store_text = (ROOT / "src/JevMud.Client/Settings/ClientSettingsStore.cs").read_text(encoding="utf-8")
-runtime_text = (ROOT / "src/JevMud.Client/Runtime/JevMudRuntime.cs").read_text(encoding="utf-8")
-line_ending_text = (ROOT / "src/JevMud.Gui/TranscriptLineEndingNormalizer.cs").read_text(encoding="utf-8")
+client_settings_text = (ROOT / "src/NexMud.Client/Settings/ClientSettings.cs").read_text(encoding="utf-8")
+client_settings_store_text = (ROOT / "src/NexMud.Client/Settings/ClientSettingsStore.cs").read_text(encoding="utf-8")
+runtime_text = (ROOT / "src/NexMud.Client/Runtime/NexMudRuntime.cs").read_text(encoding="utf-8")
+line_ending_text = (ROOT / "src/NexMud.Gui/TranscriptLineEndingNormalizer.cs").read_text(encoding="utf-8")
 for literal in (
     'public static readonly FontFamily Terminal = ResolveTerminalFont();',
     'if (OperatingSystem.IsMacOS()) return new FontFamily("Menlo");',
@@ -1581,17 +1603,17 @@ if 'RowDefinitions = new RowDefinitions("*,Auto,Auto")' not in main_window_text:
 semantic_spec = ROOT / "docs/architecture/NexMUD-gameplay-semantics-event-normalization-state-reconciliation-architecture.md"
 if not semantic_spec.is_file():
     fail("missing gameplay semantics architecture contract")
-observation_factory_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarObservationFactory.cs").read_text(encoding="utf-8")
-avendar_adapter_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
-semantic_parser_text = (ROOT / "src/JevMud.Adapters/Avendar/AvendarSemanticParser.cs").read_text(encoding="utf-8")
-command_journal_text = (ROOT / "src/JevMud.Client/Commands/OutboundCommandJournal.cs").read_text(encoding="utf-8")
+observation_factory_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarObservationFactory.cs").read_text(encoding="utf-8")
+avendar_adapter_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
+semantic_parser_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarSemanticParser.cs").read_text(encoding="utf-8")
+command_journal_text = (ROOT / "src/NexMud.Client/Commands/OutboundCommandJournal.cs").read_text(encoding="utf-8")
 for literal in (
     "public sealed record GameObservation(",
     "public sealed record CharacterPromptSnapshot(",
     "public sealed record MovementObservation(",
     "public sealed record ScanObservation(",
 ):
-    if literal not in (ROOT / "src/JevMud.Contracts/Gameplay/GameplayModels.cs").read_text(encoding="utf-8"):
+    if literal not in (ROOT / "src/NexMud.Contracts/Gameplay/GameplayModels.cs").read_text(encoding="utf-8"):
         fail(f"gameplay semantic contract missing: {literal}")
 for literal in (
     "Interlocked.Increment(ref _sequence)",

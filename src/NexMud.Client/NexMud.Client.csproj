@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NexMud.Adapters/NexMud.Adapters.csproj" />
+    <ProjectReference Include="../NexMud.Contracts/NexMud.Contracts.csproj" />
+    <ProjectReference Include="../NexMud.Core/NexMud.Core.csproj" />
+    <ProjectReference Include="../NexMud.Transport/NexMud.Transport.csproj" />
+    <ProjectReference Include="../NexMud.Jev/NexMud.Jev.csproj" />
+    <ProjectReference Include="../NexMud.Scripting/NexMud.Scripting.csproj" />
+    <ProjectReference Include="../NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj" />
+  </ItemGroup>
+</Project>

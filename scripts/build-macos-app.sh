@@ -18,14 +18,14 @@ app="$artifacts/NexMUD.app"
 rm -rf "$artifacts"
 mkdir -p "$publish" "$app/Contents/MacOS" "$app/Contents/Resources"
 
-dotnet publish src/JevMud.Gui/JevMud.Gui.csproj \
+dotnet publish src/NexMud.Gui/NexMud.Gui.csproj \
   -c "$configuration" \
   -r "$rid" \
   --self-contained false \
   -o "$publish"
 
 cp -R "$publish"/. "$app/Contents/MacOS/"
-cp src/JevMud.Gui/Assets/app-icon.icns "$app/Contents/Resources/NexMUD.icns"
+cp src/NexMud.Gui/Assets/app-icon.icns "$app/Contents/Resources/NexMUD.icns"
 chmod +x "$app/Contents/MacOS/NexMUD"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
@@ -48,9 +48,9 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.28.0</string>
+  <string>0.29.0</string>
   <key>CFBundleVersion</key>
-  <string>28000</string>
+  <string>29000</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>

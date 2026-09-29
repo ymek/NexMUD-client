@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/NexMud.Adapters/NexMud.Adapters.csproj" />
+    <ProjectReference Include="../../src/NexMud.Client/NexMud.Client.csproj" />
+    <ProjectReference Include="../../src/NexMud.Contracts/NexMud.Contracts.csproj" />
+    <ProjectReference Include="../../src/NexMud.Core/NexMud.Core.csproj" />
+    <ProjectReference Include="../../src/NexMud.Gui/NexMud.Gui.csproj" />
+    <ProjectReference Include="../../src/NexMud.Transport/NexMud.Transport.csproj" />
+    <ProjectReference Include="../../src/NexMud.Jev/NexMud.Jev.csproj" />
+    <ProjectReference Include="../../src/NexMud.Scripting/NexMud.Scripting.csproj" />
+    <ProjectReference Include="../../src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj" />
+    <ProjectReference Include="../../src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Fixtures/**/*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

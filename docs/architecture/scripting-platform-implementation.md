@@ -1,11 +1,11 @@
 # Scripting Platform Implementation Status
 
-**Target release:** JevMUD v0.16.0-alpha.1  
-**Architecture contract:** `JevMUD-scripting-platform-architecture.md`
+**Target release:** NexMUD v0.16.0-alpha.1
+**Architecture contract:** `NexMUD-scripting-platform-architecture.md`
 
 ## Implemented in alpha.1
 
-1. Language-neutral scripting contracts in `JevMud.Scripting`.
+1. Language-neutral scripting contracts in `NexMud.Scripting`.
 2. Capability-gated host API for events, commands, state, mapper, Codex, storage, timers, UI and logging.
 3. Structured execution ownership/cancellation through `ScriptExecutionSupervisor` / `ScriptExecutionScope`, including centralized owned-task fault reporting.
 4. Ordered bounded event subscriptions through `ScriptEventHub`, with stable script event names, explicit backpressure instead of silent drops, automatic subscription teardown when an owner stops, and a state-reduction barrier so handlers cannot observe an event before Core has reduced it.

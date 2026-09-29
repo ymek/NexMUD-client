@@ -13,7 +13,7 @@ NexMUD does not infer level-progress percentage from `Experience` plus `Exper/le
 
 ## Generated image asset manifest
 
-Assets live under `src/JevMud.Gui/Assets/Ornaments/` and are packaged as Avalonia resources.
+Assets live under `src/NexMud.Gui/Assets/Ornaments/` and are packaged as Avalonia resources.
 
 | Asset | Source resolution | Purpose |
 | --- | ---: | --- |
@@ -30,7 +30,7 @@ Frame/panel corner, junction, divider, active-navigation, and Jev assets use tra
 
 ## Character fields exercised by the populated score fixture
 
-`tests/JevMud.Tests/Fixtures/avendar-score-randolph.txt` exercises:
+`tests/NexMud.Tests/Fixtures/avendar-score-randolph.txt` exercises:
 
 - Randolph the Smuggler
 - human / thief / level 6
@@ -57,7 +57,7 @@ Frame/panel corner, junction, divider, active-navigation, and Jev assets use tra
 
 ## Room/context fields exercised by the gameplay fixture
 
-`tests/JevMud.Tests/Fixtures/avendar-room-observations.txt` exercises The Adventurer's Lounge with east/south/west exits, a kankoran student, a small fountain, and a prominent bulletin board. The parser regression verifies the student as an occupant and the fountain/board as fixtures, including fountain drinkability and board targeting.
+`tests/NexMud.Tests/Fixtures/avendar-room-observations.txt` exercises The Adventurer's Lounge with east/south/west exits, a kankoran student, a small fountain, and a prominent bulletin board. The parser regression verifies the student as an occupant and the fountain/board as fixtures, including fountain drinkability and board targeting.
 
 ## Input-mode behavior
 

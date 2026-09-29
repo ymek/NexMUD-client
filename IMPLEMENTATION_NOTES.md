@@ -1,3 +1,15 @@
+# NexMUD 0.29.0
+
+## NexMud project and namespace rename
+
+- Renamed the repository solution/project identities to `NexMud.*`, including source/test directories, `.csproj` files, project references, declared C# namespaces, imports, and `InternalsVisibleTo` assembly identities.
+- Renamed the solution to `NexMud.slnx` and the application composition root to `NexMudRuntime`; build, run, verification, and macOS packaging scripts now resolve only `NexMud.*` project paths.
+- Kept the `Jev` name exclusively for the decision/agent subsystem. The Jev project is now `NexMud.Jev`; Jev contracts, authority, decision engines, settings, provenance, and UI continue to use the feature name intentionally.
+- Removed the obsolete pre-rename scripting architecture duplicate in favor of the canonical `NexMUD-scripting-platform-architecture.md`.
+- Added a static legacy-product-identity guard covering repository paths and UTF-8 source/config/documentation text so the pre-rename product prefix cannot silently return outside Git metadata/build artifacts.
+- Updated product/runtime version surfaces to 0.29.0 / macOS build 29000.
+- SemVer release: 0.29.0. macOS build: 29000.
+
 # NexMUD 0.28.0
 
 ## Gameplay semantics, observation, and reconciliation architecture
@@ -42,7 +54,7 @@
 
 ## Jint public continuation-pump correction
 
-- Removed the invalid direct call to Jint 4.16.x `Engine.RunAvailableContinuations()`, which is an internal API and caused `CS1061` in `JevMud.Scripting.Jint`.
+- Removed the invalid direct call to Jint 4.16.x `Engine.RunAvailableContinuations()`, which is an internal API and caused `CS1061` in `NexMud.Scripting.Jint`.
 - `JintHostBridge.EnqueueWithInvocationAsync` now settles the host-facing Promise and then enters Jint through `Engine.Execute("void 0;", "<nexmud-continuation-pump>")`. Jint's normal public script-evaluation boundary drains pending Promise reactions before returning, while the NexMUD dispatcher still guarantees single-engine serialization.
 - The change preserves delayed asynchronous host completion semantics for Mapper and Automation: real I/O can resume JavaScript `await` chains on the mailbox without reflection or unsupported Jint internals.
 - Static verification now rejects direct references from the host bridge to Jint internal event-loop APIs and requires the public continuation-pump boundary.
@@ -74,9 +86,9 @@
 
 ## Mapper compile-safety correction
 
-- `AutoMoveService` now imports `JevMud.Scripting.Runtime`, resolving the `ScriptOwnerKind.MapperRoute` compile failure in the production route-task fault-correlation path.
+- `AutoMoveService` now imports `NexMud.Scripting.Runtime`, resolving the `ScriptOwnerKind.MapperRoute` compile failure in the production route-task fault-correlation path.
 - The entire v0.26 Mapper C# delta was audited against the repository type/namespace map and project-reference graph. `ScriptOwnerKind` was the only newly introduced project type missing its namespace import; all other Mapper migration type dependencies resolve through existing project references.
-- `scripts/static_verify.py` now verifies scripting-runtime type namespace ownership across the entire C# source tree. Runtime symbols used outside `JevMud.Scripting.Runtime` must import that namespace or use an explicit fully-qualified name.
+- `scripts/static_verify.py` now verifies scripting-runtime type namespace ownership across the entire C# source tree. Runtime symbols used outside `NexMud.Scripting.Runtime` must import that namespace or use an explicit fully-qualified name.
 - The production Map `Go` startup seam remains deterministic: `AutoMoveService` loads/reloads the route module, the module registers `mapper.route.execute`, then the service publishes the route-ID-scoped start event. The generated route module still rejects zero-delay activation startup and keeps only the idempotent 250 ms fallback.
 - This patch changes compile safety only; route planning, authority, movement coordination, recovery/replan, pause/resume/abort, and command provenance behavior remain as designed in v0.26.0/v0.26.1.
 - SemVer release: 0.26.2. macOS build: 26002.
@@ -167,7 +179,7 @@
 
 ## Item inspection build correction
 
-- Fixed `src/JevMud.Gui/ItemInspectionPopover.cs` by importing the root `Avalonia` namespace required by `Thickness` and `CornerRadius`.
+- Fixed `src/NexMud.Gui/ItemInspectionPopover.cs` by importing the root `Avalonia` namespace required by `Thickness` and `CornerRadius`.
 - This is a compile-only regression correction; v0.23.0 Character/Inventory behavior and architecture are unchanged.
 - Added a static verification guard for the required namespace import.
 - SemVer release: 0.23.1. macOS build: 23001.
@@ -291,7 +303,7 @@
 - `AvendarScoreParser` now accepts both boxed legacy score output and the supplied plain score layout, including explicit `Name:`, slash-form inventory capacity, and multi-denomination wealth.
 - Added `CommandInputPolicy` in the presentation layer so masking, completion/history eligibility, and password-history exclusion are deterministic and testable outside Avalonia.
 - The GUI explicitly clears and refocuses command input on password-to-normal transitions.
-- Replaced drawn frame diamonds/corners on the production gameplay surface with raster assets under `src/JevMud.Gui/Assets/Ornaments`. Structural frame lines remain Avalonia drawing primitives.
+- Replaced drawn frame diamonds/corners on the production gameplay surface with raster assets under `src/NexMud.Gui/Assets/Ornaments`. Structural frame lines remain Avalonia drawing primitives.
 - Added a real image-backed character crest, application mark, active-navigation ornament, Jev sigil, frame/panel corners, panel junction, and major divider.
 - Updated default navigation semantics for Automation and Log.
 - Added the populated Randolph score fixture and regression coverage for score parsing plus password input policy.
@@ -342,7 +354,7 @@
 
 ## Gameplay shell compile correction
 
-- `GameplayShellViewModels.cs` now imports `JevMud.Contracts.Events`, resolving the `ConnectionStatus` reference used by the persistent connection presentation model.
+- `GameplayShellViewModels.cs` now imports `NexMud.Contracts.Events`, resolving the `ConnectionStatus` reference used by the persistent connection presentation model.
 - `AttributeScore` lookup now uses nullable-aware narrowing before formatting, satisfying the repository's warnings-as-errors policy without suppressions.
 - No world-first UI architecture semantics changed.
 - SemVer release: 0.18.1. macOS build: 18001.
@@ -371,11 +383,11 @@
 
 - Product-facing identity is now NexMUD. macOS packaging emits `NexMUD.app` / `NexMUD`, bundle id `ai.typesafe.nexmud`, build `17001`.
 - Added new NexMUD `N` icon assets for macOS, Windows/Avalonia, and source PNG.
-- Application-data and macOS Keychain access retain explicit legacy JevMUD migration/fallback paths. Internal `JevMud.*` code identifiers remain intentionally unchanged in this cut.
+- Application-data and macOS Keychain access retain explicit legacy NexMUD migration/fallback paths. Internal `NexMud.*` code identifiers remain intentionally unchanged in this cut.
 
 ## Jint adapter
 
-- Added isolated `JevMud.Scripting.Jint`; it alone owns the exact Jint `4.16.3` package dependency.
+- Added isolated `NexMud.Scripting.Jint`; it alone owns the exact Jint `4.16.3` package dependency.
 - `JintEngineFactory` centralizes sandbox posture and execution constraints. General CLR access, reflection, CLR writes, operator interop, dynamic string compilation, CommonJS require, and blocking agent suspension remain closed.
 - Every independently loaded package receives its own engine, execution scope, host bridge, request/subscription/timer ownership, and bounded single-reader mailbox. No continuation or event producer directly re-enters Jint.
 - Added explicit source/module preflight limits and controlled package-relative module resolution. `@nexmud/api` is registered in-memory; arbitrary file/network/npm module resolution is unavailable.
@@ -386,8 +398,8 @@
 
 ## TypeScript authoring boundary
 
-- Added language-neutral compiler artifacts/manifests/diagnostics/cache-key contracts to `JevMud.Scripting`.
-- Added `JevMud.Scripting.TypeScript` with `@nexmud/api` declarations and compile-cache infrastructure. It depends only on language-neutral scripting contracts and does not depend on Jint.
+- Added language-neutral compiler artifacts/manifests/diagnostics/cache-key contracts to `NexMud.Scripting`.
+- Added `NexMud.Scripting.TypeScript` with `@nexmud/api` declarations and compile-cache infrastructure. It depends only on language-neutral scripting contracts and does not depend on Jint.
 - A concrete TypeScript compiler adapter and source-map translation are still pending. This prerelease therefore does not yet claim direct `.ts` execution acceptance; it establishes the correct replaceable boundary while Jint executes validated compiled JavaScript packages.
 
 ## Verification
@@ -398,7 +410,7 @@
 
 ---
 
-# JevMUD 0.16.0-alpha.4
+# NexMUD 0.16.0-alpha.4
 
 ## Mapper directed-edge state correction
 
@@ -424,15 +436,15 @@
 - Static verification now rejects the malformed pattern form and requires the corrected expressions.
 - macOS CFBundleVersion: 16002.
 
-# JevMUD 0.16.0-alpha.1
+# NexMUD 0.16.0-alpha.1
 
 ## Shared programmable execution foundation
 
-This release implements the first architecture cut defined by `docs/architecture/JevMUD-scripting-platform-architecture.md`. Domain truth and infrastructure remain strongly typed; programmable orchestration moves onto shared runtime primitives.
+This release implements the first architecture cut defined by `docs/architecture/NexMUD-scripting-platform-architecture.md`. Domain truth and infrastructure remain strongly typed; programmable orchestration moves onto shared runtime primitives.
 
 ### Scripting platform
 
-- Introduced dependency-free `JevMud.Scripting` contracts: runtime/module/context, capability host, events, scheduler, clock, storage, permissions, and structured execution ownership.
+- Introduced dependency-free `NexMud.Scripting` contracts: runtime/module/context, capability host, events, scheduler, clock, storage, permissions, and structured execution ownership.
 - `ManagedScriptRuntime` is a first-party bootstrap adapter only. It deliberately does not select JavaScript, Lua, Python, or another public authoring language.
 - `ScriptExecutionSupervisor` owns hierarchical scopes and cancellation for application, module, automation, Jev, mapper, and future plugin work. Owned task failures are surfaced through one diagnostic channel.
 - `ScriptEventHub` provides serialized per-subscription delivery with bounded backpressure and owner-bound teardown.
@@ -468,7 +480,7 @@ This release implements the first architecture cut defined by `docs/architecture
 
 ---
 
-# JevMUD 0.15.0-alpha.23
+# NexMUD 0.15.0-alpha.23
 
 ## alpha.23 compile correction
 
@@ -489,7 +501,7 @@ This release implements the first architecture cut defined by `docs/architecture
 - Added reducer and durable knowledge regression coverage for stale movement poisoning.
 - macOS CFBundleVersion: 15023.
 
-# JevMUD 0.15.0-alpha.14
+# NexMUD 0.15.0-alpha.14
 
 - Restored the public `WorldKnowledgeStore` Codex and room-metadata read APIs required by the GUI and tests: `SearchCodexAsync`, `GetCodexEntryAsync`, and `GetRoomMetadataAsync`.
 - Hardened `scripts/static_verify.py` so call sites can no longer masquerade as implementations of those APIs.
@@ -513,7 +525,7 @@ This pass audits the interrupted `0.15.0-alpha.11` automation/mapping completion
 
 ---
 
-# JevMUD 0.15.0-alpha.11
+# NexMUD 0.15.0-alpha.11
 
 ## Automation and mapping completion pass
 
@@ -553,7 +565,7 @@ No generalized scripting/plugin API is exposed yet. These first-party components
 
 ---
 
-# JevMUD 0.15.0-alpha.10
+# NexMUD 0.15.0-alpha.10
 
 ## Protocol subsystem completion
 
@@ -561,9 +573,9 @@ This prerelease completes the agreed first-party protocol baseline before the ne
 
 - Stateful Telnet option negotiation tracks local/remote capabilities, rejects unsupported options once, emits lifecycle transitions, and avoids repeated negotiation/activation loops.
 - GMCP activation sends `Core.Hello` and `Core.Supports.Set`; inbound messages remain structured module/payload events and outbound GMCP is available through `TcpMudTransport`.
-- MSDP uses a recursive value model (`MsdpScalar`, `MsdpArray`, `MsdpTable`), discovers `REPORTABLE_VARIABLES`, and REPORTs only supported values JevMUD currently consumes.
+- MSDP uses a recursive value model (`MsdpScalar`, `MsdpArray`, `MsdpTable`), discovers `REPORTABLE_VARIABLES`, and REPORTs only supported values NexMUD currently consumes.
 - MSSP retains repeated values as lists.
-- TTYPE/MTTS reports JevMUD identity, configured terminal type, then an MTTS bit vector reflecting actual ANSI/UTF-8/256-color/truecolor/MNES/TLS capability.
+- TTYPE/MTTS reports NexMUD identity, configured terminal type, then an MTTS bit vector reflecting actual ANSI/UTF-8/256-color/truecolor/MNES/TLS capability.
 - NEW-ENVIRON implements filtered SEND/IS responses with escaping and MUD-standard metadata variables.
 - CHARSET accepts UTF-8 when offered and explicitly rejects unsupported translation tables.
 - NAWS tracks live transcript dimensions and sends updates after negotiation when the viewport changes.
@@ -574,7 +586,7 @@ This prerelease completes the agreed first-party protocol baseline before the ne
 
 ### Verification
 
-`tests/JevMud.Tests` now includes regression cases for negotiation deduplication, MTTS sequencing/reset, CHARSET UTF-8/translation-table handling, NEW-ENVIRON filtering, nested MSDP, discovery-driven MSDP REPORTs, bounded oversized subnegotiation, EOR/GA boundaries, and EOR settings persistence. `scripts/static_verify.py` is also run before packaging. This environment still has no .NET SDK, so compilation/runtime verification must be performed on a .NET 10 development machine.
+`tests/NexMud.Tests` now includes regression cases for negotiation deduplication, MTTS sequencing/reset, CHARSET UTF-8/translation-table handling, NEW-ENVIRON filtering, nested MSDP, discovery-driven MSDP REPORTs, bounded oversized subnegotiation, EOR/GA boundaries, and EOR settings persistence. `scripts/static_verify.py` is also run before packaging. This environment still has no .NET SDK, so compilation/runtime verification must be performed on a .NET 10 development machine.
 
 ## v0.15.0-alpha.9
 
@@ -619,7 +631,7 @@ The previous Mapper/Codex implementations remained coupled to `MainWindow.Render
 ### Verification
 
 - `scripts/static_verify.py` passes.
-- Mapper read behavior has regression coverage in `tests/JevMud.Tests`.
+- Mapper read behavior has regression coverage in `tests/NexMud.Tests`.
 - The execution environment does not contain the .NET SDK, so compilation and runtime UI verification must be performed on a .NET 10 development machine.
 
 ## 0.15.0-alpha.5 - Stable Codex browsing and mapper rendering isolation
@@ -649,7 +661,7 @@ The previous Mapper/Codex implementations remained coupled to `MainWindow.Render
 - Entity/combat category browse aggregates bounded recent windows rather than grouping lifetime history on every launch.
 - Codex search no longer rebuilds the whole dock just to display a loading state on every keystroke.
 
-# JevMUD Automation, Protocols, Mapper, and UX Implementation
+# NexMUD Automation, Protocols, Mapper, and UX Implementation
 
 ## UX overhaul
 
@@ -678,7 +690,7 @@ The previous Mapper/Codex implementations remained coupled to `MainWindow.Render
 - Added conservative MSDP REPORT requests for common vitals/room/opponent fields.
 - Added MCCP2 zlib stream handoff, including compressed bytes already received in the Telnet negotiation buffer.
 - Added UTF-8 CHARSET acceptance and neutral terminal capability reporting.
-- Connection creation is centralized through `JevMudRuntime.CreateConnectionOptions` so GUI, CLI commands, and TUI use the same protocol configuration.
+- Connection creation is centralized through `NexMudRuntime.CreateConnectionOptions` so GUI, CLI commands, and TUI use the same protocol configuration.
 
 Protocol setting changes apply on the next connection because Telnet capability negotiation is connection-scoped.
 
@@ -703,7 +715,7 @@ Dedicated Settings sections now cover:
 
 `python3 scripts/static_verify.py` passes after the changes. Additional regression tests were added for durable mapper entity/graph/route behavior, Jev master-state persistence, and preserving the authority profile while Jev is disabled.
 
-The execution environment used for this implementation does not contain the .NET SDK and has no external network resolution, so `dotnet build` / `dotnet test` could not be executed here. The source should be built and tests run in the normal JevMUD development environment before release.
+The execution environment used for this implementation does not contain the .NET SDK and has no external network resolution, so `dotnet build` / `dotnet test` could not be executed here. The source should be built and tests run in the normal NexMUD development environment before release.
 
 ## 0.15.0-alpha.2 - Mapper/Codex responsiveness
 

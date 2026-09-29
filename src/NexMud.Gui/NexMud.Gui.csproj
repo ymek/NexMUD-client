@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>NexMUD</AssemblyName>
+    <AssemblyTitle>NexMUD</AssemblyTitle>
+    <Product>NexMUD</Product>
+    <Version>0.29.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NexMud.Client/NexMud.Client.csproj" />
+    <ProjectReference Include="../NexMud.Contracts/NexMud.Contracts.csproj" />
+    <ProjectReference Include="../NexMud.Adapters/NexMud.Adapters.csproj" />
+    <ProjectReference Include="../NexMud.Jev/NexMud.Jev.csproj" />
+    <ProjectReference Include="../NexMud.Transport/NexMud.Transport.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+  </ItemGroup>
+</Project>

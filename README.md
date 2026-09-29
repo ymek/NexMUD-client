@@ -1,4 +1,15 @@
-# NexMUD Client v0.28.0
+# NexMUD Client v0.29.0
+
+## v0.29.0 - NexMud project and namespace rename
+
+- Renamed every product-level .NET project, project directory, solution entry, test project, and C# namespace to the `NexMud.*` product prefix.
+- Renamed the solution to `NexMud.slnx`, the application composition root to `NexMudRuntime`, and all project references/build scripts/static verification paths to the new product identity.
+- Preserved `Jev` only where it names the Jev decision/agent feature set, including `NexMud.Jev`, `NexMud.Contracts.Jev`, Jev authority/decision types, Jev settings, and Jev UI surfaces.
+- Removed the obsolete pre-rename scripting architecture duplicate; the canonical product-named document remains `NexMUD-scripting-platform-architecture.md`.
+- Added static verification preventing reintroduction of the legacy product prefix in repository paths or text sources.
+- Updated runtime/server-facing client version metadata and application version text to 0.29.0.
+- SemVer release: 0.29.0. macOS build: 29000.
+
 
 ## v0.28.0 - Gameplay semantics and state reconciliation
 
@@ -72,7 +83,7 @@
 
 ## v0.26.2 - Mapper compile-safety correction
 
-- Fixed the v0.26.1 `AutoMoveService` build failure by importing `JevMud.Scripting.Runtime`, which defines `ScriptOwnerKind` used by route-task fault correlation.
+- Fixed the v0.26.1 `AutoMoveService` build failure by importing `NexMud.Scripting.Runtime`, which defines `ScriptOwnerKind` used by route-task fault correlation.
 - Audited every C# file introduced or changed by the v0.26 Mapper orchestration slice against project-defined type namespaces and project-reference reachability; no other newly introduced unresolved cross-project type references remain.
 - Added repository-level static verification for the scripting-runtime symbol family (`ScriptOwnerKind`, `ScriptModuleId`, runtime profiles/status/contracts, and related DTOs) so Client/GUI/Automation/Mapper/Jev code cannot reference those types without the defining namespace or an explicit fully-qualified name.
 - Retained and re-verified the v0.26.1 route-start seam: Map `Go` loads/subscribes the Jint route module before publishing `mapper.route.execute`; the zero-delay activation timer remains prohibited and the bounded fallback is secondary only.
@@ -309,7 +320,7 @@
 
 ## v0.18.1 - Gameplay shell compile correction
 
-- Added the missing `JevMud.Contracts.Events` import required for `ConnectionStatus` in `GameplayShellViewModels`.
+- Added the missing `NexMud.Contracts.Events` import required for `ConnectionStatus` in `GameplayShellViewModels`.
 - Corrected nullable `Dictionary.TryGetValue` handling for reference-type `AttributeScore` values under `Nullable=enable` / `TreatWarningsAsErrors=true`.
 - No layout, interaction, or architecture behavior changed from 0.18.0.
 - macOS CFBundleVersion: 18001.
@@ -332,16 +343,16 @@
 
 ## v0.17.0 - NexMUD rename and Jint runtime foundation
 
-- Renamed the product-facing application from **JevMUD** to **NexMUD**. The macOS bundle is now `NexMUD.app`, executable/product metadata use NexMUD, the bundle identifier is `ai.typesafe.nexmud`, and existing application-data/keychain state is migrated from legacy JevMUD locations where practical. Internal `JevMud.*` namespaces/project names remain for source/binary continuity.
+- Renamed the product-facing application from **NexMUD** to **NexMUD**. The macOS bundle is now `NexMUD.app`, executable/product metadata use NexMUD, the bundle identifier is `ai.typesafe.nexmud`, and existing application-data/keychain state is migrated from legacy NexMUD locations where practical. Internal `NexMud.*` namespaces/project names remain for source/binary continuity.
 - Replaced the application icon with the new NexMUD `N` mark across PNG, Windows ICO, and macOS ICNS assets.
-- Added `JevMud.Scripting.Jint` with an exact Jint `4.16.3` dependency. No other project references the Jint NuGet package.
+- Added `NexMud.Scripting.Jint` with an exact Jint `4.16.3` dependency. No other project references the Jint NuGet package.
 - Added one isolated Jint engine per compiled script package, a bounded single-consumer mailbox, explicit lifecycle states, deterministic unload, and replacement-style hot reload which keeps the old instance alive if the replacement fails to initialize.
 - Centralized hardened engine creation: CLR globals/reflection/writes/operator interop remain disabled, `eval`/`new Function` string compilation is disabled, CommonJS `require` is disabled, blocking `Atomics.wait` is disabled, and execution is bounded by timeout, statements, memory, recursion, execution-stack, regex, promise, array, JSON, source, AST-estimate, module-count, module-size, module-depth, module-hop, and mailbox limits.
 - Added controlled in-memory ES-module registration with package-root traversal rejection and `@nexmud/api` as the only built-in scripting module. There is no `node_modules`, filesystem discovery, network import, or Node/Bun/Deno runtime dependency.
 - Added the private host bridge and frozen public `nex` API for events, commands, state, mapper, Codex, storage, timers, UI notifications, and logging. Async host work returns through request IDs and is resolved/rejected only by the owning script mailbox.
 - Jint event callbacks and timer callbacks re-enter the engine only through its serialized dispatcher; outstanding requests, subscriptions, and timers are cancelled during instance shutdown.
 - JavaScript `Date.now()` / `new Date()` now use NexMUD's injected script clock, aligning direct JavaScript time reads with timers and future event-journal replay.
-- Added `JevMud.Scripting.TypeScript` as an engine-independent TypeScript authoring boundary with deterministic compiler contracts/cache keys and versioned `@nexmud/api` declarations. A concrete TypeScript compiler adapter is deliberately **not** claimed in this prerelease; Jint currently consumes validated compiled JavaScript packages.
+- Added `NexMud.Scripting.TypeScript` as an engine-independent TypeScript authoring boundary with deterministic compiler contracts/cache keys and versioned `@nexmud/api` declarations. A concrete TypeScript compiler adapter is deliberately **not** claimed in this prerelease; Jint currently consumes validated compiled JavaScript packages.
 - Added Jint integration coverage for sandboxed activation, engine isolation, dynamic-code rejection, controlled JavaScript time, failed hot-reload preservation, and TypeScript API declaration versioning.
 - macOS CFBundleVersion: 17001.
 
@@ -369,9 +380,9 @@
 
 ## v0.16.0-alpha.1 - Shared scripting/orchestration foundation
 
-- Added the dependency-free `JevMud.Scripting` project containing language-neutral runtime, host, permissions, scheduling, event, storage, clock, and structured execution contracts.
+- Added the dependency-free `NexMud.Scripting` project containing language-neutral runtime, host, permissions, scheduling, event, storage, clock, and structured execution contracts.
 - Added capability-gated Client host adapters for semantic events, state, commands, mapper/pathfinding, Codex, namespaced script storage, timers, UI notifications, and structured logging.
-- Added a managed bootstrap runtime so first-party behavior can exercise the scripting contracts before JevMUD chooses a public JavaScript/Lua runtime.
+- Added a managed bootstrap runtime so first-party behavior can exercise the scripting contracts before NexMUD chooses a public JavaScript/Lua runtime.
 - Added owner-scoped execution and deterministic cancellation for automation workflows, mapper routes, Jev sessions, timers, and event subscriptions, with centralized task-fault reporting.
 - Added provenance-aware command dispatch (`USER`, `AUTOMATION`, `JEV`, `MAPPER`, `SCRIPT`, `SYSTEM`) while retaining `ActionProcessor` as the only transport-facing command boundary.
 - Added stable script event DTO projection, a state-reduction barrier, and bounded backpressured per-subscription delivery; script handlers see semantic events only after Core has reduced the corresponding event.
@@ -436,7 +447,7 @@
 - Completed the agreed baseline Telnet/OOB protocol pass: NAWS, GMCP, MSDP, MSSP, MCCP2, CHARSET, NEW-ENVIRON/MNES, MTTS/TTYPE, and EOR/GA prompt boundaries.
 - Telnet negotiation is stateful and deduplicated so repeated WILL/DO offers do not create negotiation loops or duplicate activation frames.
 - GMCP now performs Core.Hello/Core.Supports negotiation and exposes outbound GMCP through the transport.
-- MSDP now preserves nested arrays/tables, discovers REPORTABLE_VARIABLES, subscribes only to supported JevMUD-relevant values, and exposes outbound MSDP.
+- MSDP now preserves nested arrays/tables, discovers REPORTABLE_VARIABLES, subscribes only to supported NexMUD-relevant values, and exposes outbound MSDP.
 - MSSP preserves repeated values instead of overwriting them.
 - MTTS/TTYPE follows the client-name, terminal-type, capability-bitvector sequence and advertises MNES/TLS only when actually available.
 - NEW-ENVIRON/MNES answers requested variables, escapes reserved octets, and exposes standard MUD client metadata.
@@ -512,7 +523,7 @@
 - Dispatched Human/Jev/Rules/Hybrid commands use bright source-aware local echo in the transcript.
 - The contextual dock fully releases its grid column when closed, so the MUD surface consumes the reclaimed width.
 - World/Codex routes display known room names rather than internal `avendar:…` identities.
-- The macOS application menu defines `About JevMUD…` and opens JevMUD's own About window rather than Avalonia's default.
+- The macOS application menu defines `About NexMUD…` and opens NexMUD's own About window rather than Avalonia's default.
 - The in-window header is reduced to one compact context/control rail: room context and character identity on the left, navigation/utilities on the right.
 - MUD commands are locally echoed into the game transcript. Human commands appear as `> command`; automated commands are explicitly marked as `[Jev] >`, `[Rule] >`, or `[Hybrid] >`. Sensitive input is never echoed.
 - Action execution source is preserved in events and durable action history, giving Jev bounded context over recent human and automated commands rather than only manually-entered history.
@@ -566,19 +577,19 @@ The spacing system is intentionally compact and consistent, with square-to-subtl
 Run the GUI:
 
 ```bash
-dotnet run --project src/JevMud.Gui/JevMud.Gui.csproj -- --host avendar.net --port 9999
+dotnet run --project src/NexMud.Gui/NexMud.Gui.csproj -- --host avendar.net --port 9999
 ```
 
 Use the saved connection without explicitly passing host/port:
 
 ```bash
-dotnet run --project src/JevMud.Gui/JevMud.Gui.csproj
+dotnet run --project src/NexMud.Gui/NexMud.Gui.csproj
 ```
 
 Prevent startup auto-connect:
 
 ```bash
-dotnet run --project src/JevMud.Gui/JevMud.Gui.csproj -- --no-connect
+dotnet run --project src/NexMud.Gui/NexMud.Gui.csproj -- --no-connect
 ```
 
 The GUI provides:
@@ -682,7 +693,7 @@ Default model: `jev-latest`.
 Override it with:
 
 ```bash
-dotnet run --project src/JevMud.Gui/JevMud.Gui.csproj -- --jev-model jev-1.13.0
+dotnet run --project src/NexMud.Gui/NexMud.Gui.csproj -- --jev-model jev-1.13.0
 ```
 
 ## Convenience automation
@@ -705,13 +716,13 @@ The automation service consumes its own lossless event subscription so UI render
 
 Connection settings, GUI/workspace preferences, highlights, aliases, triggers, timers, command key bindings, logging format, neutral Telnet terminal identity, Jev model, and the complete Jev authority matrix are persisted as JSON. GUI saves, TUI saves, and local `:jev` commands use the same shared settings store.
 
-The default settings path is the platform application-data directory under `NexMUD/settings.json` (with one-time migration from the legacy `JevMUD` directory). The default server-facing terminal type is `xterm-256color`; the client does not advertise its Jev integration to MUD servers.
+The default settings path is the platform application-data directory under `NexMUD/settings.json` (with one-time migration from the legacy `NexMUD` directory). The default server-facing terminal type is `xterm-256color`; the client does not advertise its Jev integration to MUD servers.
 
 Writes are serialized and atomic through a temporary file replacement. Explicit UI saves persist before reporting success; the event-driven persistence worker remains a fallback for authority changes originating elsewhere.
 
 ## Persistent Codex / world memory
 
-`JevMud.Client.Knowledge.WorldKnowledgeStore` maintains a local SQLite database at the platform application-data path under `NexMUD/knowledge.db`. It is a durable observation store, not a second authoritative reducer.
+`NexMud.Client.Knowledge.WorldKnowledgeStore` maintains a local SQLite database at the platform application-data path under `NexMUD/knowledge.db`. It is a durable observation store, not a second authoritative reducer.
 
 The database keeps both a generic append-only event archive and query-oriented projections for sessions, rooms and directed exits, recurring room entities, character observations, skills/spells, equipment, item identifications, ability-help documents, combat events, communications, non-sensitive executed command history with Human/Jev/Rules/Hybrid source, and Jev decisions. Event identity is GUID-based so event sequence numbers may restart on a later client launch without colliding with prior sessions.
 
@@ -782,10 +793,10 @@ Important constraints:
 ## TUI fallback
 
 ```bash
-dotnet run --project src/JevMud.Tui/JevMud.Tui.csproj -- --host avendar.net --port 9999
+dotnet run --project src/NexMud.Tui/NexMud.Tui.csproj -- --host avendar.net --port 9999
 ```
 
-The TUI remains useful for debugging and low-overhead play, but new UX work should target `JevMud.Gui` unless a feature belongs in shared runtime/state.
+The TUI remains useful for debugging and low-overhead play, but new UX work should target `NexMud.Gui` unless a feature belongs in shared runtime/state.
 
 ## Local commands
 

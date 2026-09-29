@@ -1,6 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="../JevMud.Contracts/JevMud.Contracts.csproj" />
-    <ProjectReference Include="../JevMud.Core/JevMud.Core.csproj" />
-  </ItemGroup>
-</Project>

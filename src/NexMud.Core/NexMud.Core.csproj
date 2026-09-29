@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../NexMud.Contracts/NexMud.Contracts.csproj" />
+  </ItemGroup>
+</Project>
