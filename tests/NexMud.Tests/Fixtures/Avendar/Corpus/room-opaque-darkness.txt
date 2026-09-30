@@ -1,0 +1,4 @@
+# Source: Xiganath 06.27.2015.txt
+# Extraction: opaque movement sequence beginning with 12:30> e
+# Purpose: darkness is opaque evidence and never a durable room identity
+It is pitch black ...

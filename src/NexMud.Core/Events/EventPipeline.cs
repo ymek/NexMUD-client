@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using NexMud.Contracts.Events;
+using NexMud.Contracts.Gameplay;
 
 namespace NexMud.Core.Events;
 
@@ -65,7 +66,37 @@ public sealed class EventPipeline : IEventSink, IAsyncDisposable
     public ValueTask PublishAsync(
         IMudEvent mudEvent,
         string source,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        PublishCoreAsync(
+            mudEvent,
+            source,
+            DateTimeOffset.UtcNow,
+            SessionId.Empty,
+            null,
+            cancellationToken);
+
+    public ValueTask PublishSemanticAsync(
+        IMudEvent mudEvent,
+        string source,
+        SessionId sessionId,
+        long sourceSequence,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken = default) =>
+        PublishCoreAsync(
+            mudEvent,
+            source,
+            observedAt,
+            sessionId,
+            sourceSequence,
+            cancellationToken);
+
+    private ValueTask PublishCoreAsync(
+        IMudEvent mudEvent,
+        string source,
+        DateTimeOffset timestamp,
+        SessionId sessionId,
+        long? sourceSequence,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(mudEvent);
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
@@ -78,9 +109,13 @@ public sealed class EventPipeline : IEventSink, IAsyncDisposable
             EventEnvelope envelope = new(
                 Guid.NewGuid(),
                 ++_sequence,
-                DateTimeOffset.UtcNow,
+                timestamp,
                 source,
-                mudEvent);
+                mudEvent)
+            {
+                SessionId = sessionId,
+                SourceSequence = sourceSequence
+            };
 
             if (!_stateEvents.Writer.TryWrite(envelope))
             {

@@ -20,7 +20,7 @@ public sealed record MudConnectionOptions(
     ushort Rows = 40,
     MudProtocolOptions? Protocols = null,
     string ClientName = "NexMUD",
-    string ClientVersion = "0.30.1")
+    string ClientVersion = "0.31.0")
 {
     public MudProtocolOptions EffectiveProtocols => Protocols ?? new MudProtocolOptions();
 

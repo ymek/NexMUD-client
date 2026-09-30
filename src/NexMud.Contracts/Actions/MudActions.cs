@@ -1,4 +1,5 @@
 using NexMud.Contracts.Jev;
+using NexMud.Contracts.Gameplay;
 
 namespace NexMud.Contracts.Actions;
 
@@ -29,10 +30,11 @@ public enum OutboundCommandState
 
 public sealed record OutboundCommandRecord(
     Guid CommandId,
+    SessionId SessionId,
     CommandOrigin SourceKind,
     string Text,
-    long SentSequence,
-    DateTimeOffset SentAt,
+    DateTimeOffset DispatchedAt,
+    long? SourceSequence,
     OutboundCommandState State,
     Guid? ParentOperationId = null);
 

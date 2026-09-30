@@ -63,9 +63,6 @@ public sealed class MapperMovementCoordinator
                     case RoomChanged room when !string.IsNullOrWhiteSpace(room.Id):
                         CompleteRoom(room.Id!);
                         break;
-                    case NavigationFailed failure:
-                        CompleteFailure(failure);
-                        break;
                     case MovementObserved movement:
                         CompleteMovement(movement.Movement);
                         break;
@@ -257,7 +254,7 @@ public sealed class MapperMovementCoordinator
         if (pending is null) return;
         if (movement.CommandId is not null && movement.CommandId != pending.ActionId) return;
 
-        if (movement.Result == MovementResult.CombatRestricted)
+        if (movement.Result == MovementResultKind.CombatRestricted)
         {
             pending.Completion.TrySetResult(Blocked(
                 pending.FromRoomId,
@@ -267,9 +264,14 @@ public sealed class MapperMovementCoordinator
             return;
         }
 
-        if (movement.Result == MovementResult.Blocked)
+        if (movement.Result == MovementResultKind.Blocked)
         {
-            ScriptMovementFailureReason reason = ClassifyFailure(movement.Detail);
+            ScriptMovementFailureReason reason = movement.BlockReason switch
+            {
+                MovementBlockReason.NoExit => ScriptMovementFailureReason.NoExit,
+                MovementBlockReason.CombatRestriction => ScriptMovementFailureReason.CombatRestriction,
+                _ => ClassifyFailure(movement.Detail)
+            };
             pending.Completion.TrySetResult(Blocked(
                 pending.FromRoomId,
                 reason,
@@ -282,9 +284,9 @@ public sealed class MapperMovementCoordinator
                                 movement.Cause == MovementCause.MapperRoute;
         if (!belongsToPending)
         {
-            if (movement.Result is MovementResult.SucceededKnownRoom or
-                MovementResult.SucceededUnknownRoom or MovementResult.Forced or
-                MovementResult.Teleported)
+            if (movement.Result is MovementResultKind.SucceededKnownRoom or
+                MovementResultKind.SucceededUnknownRoom or MovementResultKind.Forced or
+                MovementResultKind.Teleported)
             {
                 pending.Completion.TrySetResult(new ScriptMovementResult(
                     "unexpected",
@@ -296,7 +298,7 @@ public sealed class MapperMovementCoordinator
             return;
         }
 
-        if (movement.Result == MovementResult.SucceededUnknownRoom)
+        if (movement.Result == MovementResultKind.SucceededUnknownRoom)
         {
             pending.Completion.TrySetResult(new ScriptMovementResult(
                 "unexpected",
@@ -305,22 +307,6 @@ public sealed class MapperMovementCoordinator
                 ActualRoomId: null,
                 Message: movement.Detail ?? "Movement succeeded but the destination room is unresolved."));
         }
-    }
-
-    private void CompleteFailure(NavigationFailed failure)
-    {
-        PendingMove? pending;
-        lock (_pendingGate) pending = _pending;
-        if (pending is null) return;
-        if (!string.IsNullOrWhiteSpace(failure.Direction) &&
-            !failure.Direction.Equals(pending.Request.Direction, StringComparison.OrdinalIgnoreCase)) return;
-
-        ScriptMovementFailureReason reason = ClassifyFailure(failure.Reason);
-        pending.Completion.TrySetResult(Blocked(
-            pending.FromRoomId,
-            reason,
-            failure.Reason,
-            RecoveryCommand(reason, pending.Request.Direction)));
     }
 
     private void CompleteRejected(ActionRejected rejected)

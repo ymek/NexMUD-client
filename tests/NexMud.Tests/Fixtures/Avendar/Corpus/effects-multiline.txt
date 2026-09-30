@@ -1,0 +1,8 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 46-68
+# Purpose: modifier continuation rows attach to the immediately preceding effect
+You are affected by the following:
+Spell: communion      : modifies hp by 33 for 12 hours
+                       : modifies armor class by -66 for 12 hours
+                       : modifies saves by -5 for 12 hours
+Skill: detect hidden  : modifies something permanently

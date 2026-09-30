@@ -1,0 +1,5 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 401-417
+# Purpose: clear is a server command and Buffer cleared. is semantic evidence
+clear
+Buffer cleared.

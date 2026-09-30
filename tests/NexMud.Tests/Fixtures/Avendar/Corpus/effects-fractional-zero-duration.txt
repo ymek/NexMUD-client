@@ -1,0 +1,8 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 6031-6044, 6186-6200
+# Purpose: fractional and zero timed effects remain exact observations
+You are affected by the following:
+Spell: wellspring     : modifies something for 0.5 hours
+Spell: water breathing: modifies something for 17.5 hours
+Spell: sanctuary      : modifies something for 0 hours
+Spell: armor          : modifies armor class by -45 for 1.5 hours

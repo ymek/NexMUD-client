@@ -1,4 +1,15 @@
-# NexMUD Client v0.30.1
+# NexMUD Client v0.31.0
+
+## v0.31.0 - Gameplay observation and semantic reconciliation
+
+- Added the canonical `GameObservation` framing boundary for ordered, immutable raw/plain/ANSI gameplay evidence with per-session sequencing and replay injection.
+- Normalized Avendar prompts, command lifecycle, rooms, movement, scans, groups, effects, combat, entities, item identification, equipment, corpse/loot, and progress semantics into typed events and reducer-owned state.
+- Preserved signed and over-max resources, fractional/zero/permanent effects, coarse target-condition ranges, duplicate entities, qualifiers, opaque destinations, and non-directional movement without inventing precision.
+- Migrated Mapper, Codex, HUD/state projections, Automation, and Scripting toward typed semantic events while retaining raw observation triggers and presentation-only output transforms.
+- Added semantic traceability through `EventEnvelope` session/source metadata and isolated parser/reducer failures from the gameplay stream.
+- Added a provenance-bearing Avendar corpus fixture suite, semantic/reducer/Mapper/Codex goldens, high-volume combat ordering coverage, parser inventory, and acceptance audit.
+- Jev behavior and the existing Connection Profiles architecture remain unchanged.
+- SemVer release: 0.31.0. macOS build: 31000.
 
 ## v0.30.1 - Startup stability
 

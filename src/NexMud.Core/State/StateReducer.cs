@@ -3,12 +3,14 @@ using System.Threading.Channels;
 using NexMud.Contracts.Events;
 using NexMud.Contracts.Gameplay;
 using NexMud.Contracts.State;
+using NexMud.Core.Events;
 
 namespace NexMud.Core.State;
 
 public sealed class StateReducer
 {
     private readonly ChannelReader<EventEnvelope> _events;
+    private readonly IEventSink? _diagnostics;
     private readonly object _stateLock = new();
     private readonly object _subscriberLock = new();
     private readonly object _sequenceLock = new();
@@ -18,9 +20,10 @@ public sealed class StateReducer
     private long _lastProcessedSequence;
     private bool _completed;
 
-    public StateReducer(ChannelReader<EventEnvelope> events)
+    public StateReducer(ChannelReader<EventEnvelope> events, IEventSink? diagnostics = null)
     {
         _events = events;
+        _diagnostics = diagnostics;
     }
 
     public long LastProcessedSequence => Interlocked.Read(ref _lastProcessedSequence);
@@ -84,23 +87,40 @@ public sealed class StateReducer
         {
             await foreach (EventEnvelope envelope in _events.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                StateSnapshot next;
-                bool changed;
-                lock (_stateLock)
+                StateSnapshot? next = null;
+                bool changed = false;
+                try
                 {
-                    StateSnapshot previous = _current;
-                    next = Reduce(previous, envelope);
-                    changed = !ReferenceEquals(previous, next);
-                    if (changed)
+                    lock (_stateLock)
                     {
-                        _current = next;
+                        StateSnapshot previous = _current;
+                        next = Reduce(previous, envelope);
+                        changed = !ReferenceEquals(previous, next);
+                        if (changed)
+                        {
+                            _current = next;
+                        }
                     }
                 }
+                catch (Exception exception)
+                {
+                    if (_diagnostics is not null)
+                    {
+                        await _diagnostics.PublishAsync(
+                            new ComponentError(
+                                "State reducer",
+                                $"Event {envelope.EventId} from {envelope.Source}: {exception.Message}"),
+                            "core.state.reducer",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _lastProcessedSequence, envelope.Sequence);
+                    SignalSequenceAdvanced(envelope.Sequence);
+                }
 
-                Interlocked.Exchange(ref _lastProcessedSequence, envelope.Sequence);
-                SignalSequenceAdvanced(envelope.Sequence);
-
-                if (changed)
+                if (changed && next is not null)
                 {
                     PublishSnapshot(next);
                 }
@@ -145,7 +165,7 @@ public sealed class StateReducer
             CharacterPositionObserved position => ReducePosition(current, position),
             CharacterPromptSnapshotObserved prompt => ReducePromptSnapshot(current, prompt.Snapshot),
             GroupSnapshotObserved group => ReduceGroupSnapshot(current, group.Snapshot),
-            ActiveEffectsSnapshotObserved effects => ReduceActiveEffectsSnapshot(current, effects.Snapshot),
+            EffectSnapshotObserved effects => ReduceEffectSnapshot(current, effects.Snapshot),
             CharacterPromptObserved prompt => ReducePrompt(current, prompt),
             CharacterScoreObserved score => ReduceScore(current, score),
             SkillsSnapshotObserved skills => ReduceSkills(current, skills, envelope.Timestamp),
@@ -162,7 +182,7 @@ public sealed class StateReducer
             RoomObservationObserved room => ReduceRoomObservation(current, room, envelope.Timestamp),
             RoomContentsObserved contents => ReduceLegacyRoomContents(current, contents),
             RoomOccupantDeparted departed => ReduceRoomOccupantDeparted(current, departed),
-            MovementObserved movement => ReduceMovement(current, movement.Movement),
+            MovementObserved movement => ReduceMovement(current, movement.Movement, envelope.Timestamp),
             ScanUpdated scan => ReduceScan(current, scan.Scan),
             NavigationAttempted navigation => ReduceNavigationAttempted(current, navigation),
             NavigationResponseCompleted response => ReduceNavigationResponseCompleted(current, response),
@@ -171,7 +191,7 @@ public sealed class StateReducer
             CombatStateChanged combat => ReduceCombatState(current, combat),
             CombatDamageObserved damage => ReduceDamage(current, damage.Damage),
             CombatAttackObserved attack => ReduceAttack(current, attack.Attack),
-            CombatTargetConditionObserved condition => ReduceCondition(current, condition),
+            CombatTargetConditionObserved condition => ReduceCondition(current, condition, envelope.Timestamp),
             EnemyKilled killed => ReduceKilled(current, killed),
             CorpseDestroyed destroyed => ReduceCorpseDestroyed(current, destroyed),
             EffectStateChanged effect => ReduceEffect(current, effect),
@@ -191,7 +211,8 @@ public sealed class StateReducer
         return next with
         {
             Version = current.Version + 1,
-            Timestamp = envelope.Timestamp
+            Timestamp = envelope.Timestamp,
+            LastSourceSequence = envelope.SourceSequence ?? current.LastSourceSequence
         };
     }
 
@@ -337,7 +358,7 @@ public sealed class StateReducer
             : current with { Character = character };
     }
 
-    private static StateSnapshot ReduceActiveEffectsSnapshot(StateSnapshot current, ActiveEffectsSnapshot observed)
+    private static StateSnapshot ReduceEffectSnapshot(StateSnapshot current, EffectSnapshot observed)
     {
         IReadOnlyList<string> names = new ReadOnlyCollection<string>(
             observed.Effects.Select(effect => effect.Name)
@@ -737,7 +758,11 @@ public sealed class StateReducer
         {
             RecentObservations = Copy(observed.RecentObservations),
             VisibilityQuality = observed.VisibilityQuality,
-            LastObservedSequence = Math.Max(current.Room.LastObservedSequence, observed.SourceSequence)
+            LastObservedSequence = Math.Max(current.Room.LastObservedSequence, observed.SourceSequence),
+            LastObservedAt = observedAt,
+            ResolutionQuality = observed.VisibilityQuality == RoomVisibilityQuality.Opaque
+                ? ResolutionQuality.Provisional
+                : ResolutionQuality.Observed
         };
 
         WorldMapState world = UpdateWorldMap(current, observed, resolvedRoomId, observedAt);
@@ -880,12 +905,12 @@ public sealed class StateReducer
         return current with { Room = current.Room with { Contents = contents, ContentsCompleteness = ObservationCompleteness.Partial } };
     }
 
-    private static StateSnapshot ReduceMovement(StateSnapshot current, MovementObservation movement)
+    private static StateSnapshot ReduceMovement(StateSnapshot current, MovementObservation movement, DateTimeOffset observedAt)
     {
         WorldMapState world = current.World;
         RoomState room = current.Room;
 
-        if (movement.Result is MovementResult.Blocked or MovementResult.CombatRestricted)
+        if (movement.Result is MovementResultKind.Blocked or MovementResultKind.CombatRestricted)
         {
             IReadOnlyList<string> remaining = RemovePendingDirection(world.PendingDirections, movement.Direction);
             if (!SequenceEqual(world.PendingDirections, remaining))
@@ -893,7 +918,7 @@ public sealed class StateReducer
                 world = world with { PendingDirections = remaining };
             }
         }
-        else if (movement.Result == MovementResult.SucceededUnknownRoom)
+        else if (movement.Result == MovementResultKind.SucceededUnknownRoom)
         {
             IReadOnlyList<string> remaining = RemovePendingDirection(world.PendingDirections, movement.Direction);
             if (!SequenceEqual(world.PendingDirections, remaining))
@@ -913,7 +938,9 @@ public sealed class StateReducer
                     ContentsCompleteness = ObservationCompleteness.Unknown,
                     Contents = EmptyRoomContents(),
                     RecentObservations = Array.Empty<string>(),
-                    LastObservedSequence = Math.Max(room.LastObservedSequence, movement.SourceSequence)
+                    LastObservedSequence = Math.Max(room.LastObservedSequence, movement.SourceSequence),
+                    LastObservedAt = observedAt,
+                    ResolutionQuality = ResolutionQuality.Provisional
                 };
             }
         }
@@ -1085,7 +1112,7 @@ public sealed class StateReducer
         return next == current.Combat ? current : current with { Combat = next };
     }
 
-    private static StateSnapshot ReduceCondition(StateSnapshot current, CombatTargetConditionObserved condition)
+    private static StateSnapshot ReduceCondition(StateSnapshot current, CombatTargetConditionObserved condition, DateTimeOffset observedAt)
     {
         CombatState next = current.Combat with
         {
@@ -1093,7 +1120,9 @@ public sealed class StateReducer
             TargetName = condition.TargetName,
             TargetCondition = condition.Condition,
             TargetConditionRange = condition.Range,
-            LastObservedSequence = Math.Max(current.Combat.LastObservedSequence, condition.SourceSequence)
+            LastObservedSequence = Math.Max(current.Combat.LastObservedSequence, condition.SourceSequence),
+            LastObservedAt = observedAt,
+            ResolutionQuality = condition.Range is null ? ResolutionQuality.Unknown : ResolutionQuality.Observed
         };
 
         return next == current.Combat ? current : current with { Combat = next };
@@ -1430,7 +1459,7 @@ public sealed class StateReducer
         if (ReferenceEquals(left, right)) return true;
         if (left is null || right is null ||
             left.SourceSequence != right.SourceSequence ||
-            !string.Equals(left.LeaderName, right.LeaderName, StringComparison.Ordinal) ||
+            !string.Equals(left.LeaderDisplayName, right.LeaderDisplayName, StringComparison.Ordinal) ||
             left.Members.Count != right.Members.Count)
         {
             return false;
@@ -1504,7 +1533,9 @@ public sealed class StateReducer
         RoomContentsEqual(left.Contents, right.Contents) &&
         SequenceEqual(left.RecentObservations, right.RecentObservations) &&
         left.VisibilityQuality == right.VisibilityQuality &&
-        left.LastObservedSequence == right.LastObservedSequence;
+        left.LastObservedSequence == right.LastObservedSequence &&
+        left.LastObservedAt == right.LastObservedAt &&
+        left.ResolutionQuality == right.ResolutionQuality;
 
     private static bool WorldEquivalent(WorldMapState left, WorldMapState right) =>
         SequenceEqual(left.PendingDirections, right.PendingDirections) &&

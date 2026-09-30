@@ -131,7 +131,7 @@ required_literals = {
     "GUI settings workspace": "class SettingsWorkspace",
     "GUI combat HUD": "BuildCombatHud",
     "GUI combat HUD MA abbreviation": 'SetVital(_mana, _manaLabel, "MA", state.Character.Mana);',
-    "lossless raw display publication": 'new GameTextReceived(rawText)',
+    "lossless raw display publication": 'new GameTextReceived(observation.RawText)',
     "split-view transcript": 'Text = "LIVE OUTPUT"',
     "transcript logger": 'TranscriptLogWriter _logWriter',
     "typed output transformation pipeline": "class OutputTransformationService",
@@ -225,7 +225,7 @@ required_literals = {
     "item references in Jev context": "IReadOnlyList<ItemKnowledge> EquippedItems",
     "ability references in Jev context": "IReadOnlyList<AbilityHelpKnowledge> AbilityReference",
     "response output excluded from room classification": "claimedByAnotherParser: _responseMode != ResponseMode.None",
-    "leading telemetry prompt response guard": "Do not terminate a response capture until we have actually observed response text.",
+    "leading telemetry prompt response guard": "Do not terminate a response capture until response text has actually arrived.",
     "interactive equipment identification": 'SubmitCommandAsync($"id {slot.Item}")',
     "interactive ability help": 'SubmitCommandAsync($"help {name}")',
     "identified equipment state": "IdentifiedItems",
@@ -1112,15 +1112,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.30.1"):
-    fail("README current version must be NexMUD 0.30.1")
-if '<Version>0.30.1</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.30.1 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.31.0"):
+    fail("README current version must be NexMUD 0.31.0")
+if '<Version>0.31.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.31.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.30.1</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.30.1")
-if '<string>30001</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 30001 for NexMUD 0.30.1")
+if '<string>0.31.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.31.0")
+if '<string>31000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 31000 for NexMUD 0.31.0")
 item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1172,7 +1172,7 @@ for literal in (
     if literal not in command_input_policy_text:
         fail(f"credential input-state invariant missing: {literal}")
 for literal in (
-    "ObservePartialInputPromptAsync",
+    "AvendarPromptBoundaryDetector.FindPromptBoundary",
     'protocol.Protocol.Equals("ECHO"',
     "TryPublishCompleteScoreCoreAsync",
     "PublishInputModeAsync(SessionInputMode.Normal",
@@ -1620,7 +1620,8 @@ if 'RowDefinitions = new RowDefinitions("*,Auto,Auto")' not in main_window_text:
 semantic_spec = ROOT / "docs/architecture/NexMUD-gameplay-semantics-event-normalization-state-reconciliation-architecture.md"
 if not semantic_spec.is_file():
     fail("missing gameplay semantics architecture contract")
-observation_factory_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarObservationFactory.cs").read_text(encoding="utf-8")
+frame_assembler_text = (ROOT / "src/NexMud.Adapters/Observation/GameFrameAssembler.cs").read_text(encoding="utf-8")
+observation_source_text = (ROOT / "src/NexMud.Contracts/Gameplay/IGameObservationSource.cs").read_text(encoding="utf-8")
 avendar_adapter_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarGameAdapter.cs").read_text(encoding="utf-8")
 semantic_parser_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarSemanticParser.cs").read_text(encoding="utf-8")
 command_journal_text = (ROOT / "src/NexMud.Client/Commands/OutboundCommandJournal.cs").read_text(encoding="utf-8")
@@ -1635,18 +1636,49 @@ for literal in (
 for literal in (
     "Interlocked.Increment(ref _sequence)",
     "public GameObservation CreateEvidence(",
+):
+    if literal not in frame_assembler_text:
+        fail(f"game frame assembler invariant missing: {literal}")
+for literal in (
+    "public interface IGameObservationSource",
+    "public sealed class ReplayGameObservationSource",
+):
+    if literal not in observation_source_text:
+        fail(f"game observation source invariant missing: {literal}")
+for literal in (
     "new GameObservationReceived(observation)",
     "ReplayObservationAsync(",
+    "ReplayAsync(",
 ):
-    if literal not in (observation_factory_text + avendar_adapter_text):
-        fail(f"game observation invariant missing: {literal}")
+    if literal not in avendar_adapter_text:
+        fail(f"game observation adapter invariant missing: {literal}")
+if (ROOT / "src/NexMud.Adapters/Avendar/AvendarObservationFactory.cs").exists():
+    fail("legacy AvendarObservationFactory must not coexist with GameFrameAssembler")
 if "case GameObservationReceived observation when" not in interaction_output_text:
     fail("display transformations must branch from immutable GameObservation evidence")
 if "case GameTextReceived game:" in interaction_output_text:
     fail("display transformations must not use the compatibility raw-text event as canonical source")
+gameplay_models_text = (ROOT / "src/NexMud.Contracts/Gameplay/GameplayModels.cs").read_text(encoding="utf-8")
+for literal in (
+    "public sealed record RoomObservation(",
+    "public sealed record ExitObservation(",
+    "Visible,\n    Partial,\n    Opaque",
+    "public enum MovementResultKind",
+    "SucceededKnownRoom",
+    "SucceededUnknownRoom",
+    "CombatRestricted",
+    "public enum ResolutionQuality",
+    "Authoritative,\n    Observed,\n    Provisional,\n    Unknown",
+):
+    if literal not in gameplay_models_text:
+        fail(f"0.31 room/movement semantic contract missing: {literal}")
+mapper_movement_text = (ROOT / "src/NexMud.Client/Navigation/MapperMovementCoordinator.cs").read_text(encoding="utf-8")
+for forbidden in ("Regex", "GameTextReceived", "TextReceived", "NavigationFailed failure"):
+    if forbidden in mapper_movement_text:
+        fail(f"Mapper retains forbidden transcript semantic path: {forbidden}")
 for literal in (
     "GameCommandQueueCleared",
-    "MovementResult.CombatRestricted",
+    "MovementResultKind.CombatRestricted",
     "MovementCause.Teleport",
     "CombatTargetConditionObserved",
 ):
@@ -1659,6 +1691,43 @@ for literal in (
 ):
     if literal not in command_journal_text:
         fail(f"outbound command journal invariant missing: {literal}")
+prompt_components_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarPromptComponents.cs").read_text(encoding="utf-8")
+for literal in (
+    "ResourceSegmentParser",
+    "TnlParser",
+    "ExplorationPointsParser",
+    "GameClockParser",
+    "TerrainParser",
+    "LightParser",
+    "UnknownPromptFieldCollector",
+):
+    if literal not in prompt_components_text:
+        fail(f"composable Avendar prompt parser component missing: {literal}")
+if 'record OutboundCommandRecord(' not in (ROOT / "src/NexMud.Contracts/Actions/MudActions.cs").read_text(encoding="utf-8"):
+    fail("outbound command journal contract missing")
+if 'record.SessionId == _sessionId' not in command_journal_text:
+    fail("outbound command journal must remain session scoped")
+if 'clearIndex + 1' not in command_journal_text:
+    fail("server queue clearing must conservatively affect only commands after clear")
+for literal in (
+    "public sealed record GroupSnapshot(",
+    "public sealed record EffectSnapshot(",
+    "Timed,\n    Permanent,\n    Unknown",
+):
+    if literal not in gameplay_models_text:
+        fail(f"0.31 group/effect semantic contract missing: {literal}")
+script_event_types_text = (ROOT / "src/NexMud.Scripting/Events/ScriptEvents.cs").read_text(encoding="utf-8")
+for literal in (
+    '"effect.snapshotUpdated"',
+    '"effect.applied"',
+    '"effect.removed"',
+    '"combat.fleeSucceeded"',
+    '"combat.fleeFailed"',
+    '"combat.movementRestricted"',
+    '"room.observed"',
+):
+    if literal not in script_event_types_text:
+        fail(f"0.31 stable semantic event name missing: {literal}")
 for literal in (
     "AvendarReplayInfersLegacyStructure",
     "OpaqueSpecialMovementPreservesUnknownDestination",
@@ -1667,6 +1736,23 @@ for literal in (
 ):
     if literal not in test_program_text:
         fail(f"gameplay semantic regression coverage missing: {literal}")
+
+# 0.31.0 entity/item/Codex semantic ownership
+item_parser_text = (ROOT / "src/NexMud.Adapters/Avendar/AvendarItemIdentificationParser.cs").read_text(encoding="utf-8")
+knowledge_store_text = (ROOT / "src/NexMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text(encoding="utf-8")
+for literal in ("Properties", "RawFields", "SourceSequence"):
+    if literal not in (ROOT / "src/NexMud.Contracts/State/StateModels.cs").read_text(encoding="utf-8"):
+        fail(f"0.31 structured item contract missing: {literal}")
+for literal in ("EquipmentAction.Wear", "EquipmentAction.Hold", "EquipmentAction.StopUsing"):
+    if literal not in semantic_parser_text:
+        fail(f"0.31 equipment transition semantic missing: {literal}")
+if "case NavigationFailed failed when MapperRecordingEnabled()" in knowledge_store_text:
+    fail("Codex/Mapper persistence must not parse NavigationFailed text")
+if "case MovementObserved movement when MapperRecordingEnabled()" not in knowledge_store_text:
+    fail("Codex/Mapper persistence must consume typed movement semantics")
+for literal in ('"entity.observed"', '"item.looted"', '"currency.received"', '"corpse.observed"'):
+    if literal not in script_event_types_text:
+        fail(f"0.31 entity/item stable semantic event name missing: {literal}")
 
 # 0.30.0 product-ownership architecture
 product_settings_text = (ROOT / "src/NexMud.Client/Settings/ProductSettings.cs").read_text(encoding="utf-8")
@@ -1764,6 +1850,171 @@ if 'Enum.GetValues<OutputRuleActionKind>()' not in output_rules_editor_text:
     fail("0.30.0 Output Rules editor must preserve the complete transformation action surface")
 if 'MoveHighlight(draft, -1)' not in output_rules_editor_text or 'MoveHighlight(draft, 1)' not in output_rules_editor_text:
     fail("0.30.0 transcript highlights must expose explicit ordering")
+
+# 0.31.0 gameplay observation / semantic reconciliation acceptance invariants.
+corpus_root = ROOT / "tests/NexMud.Tests/Fixtures/Avendar/Corpus"
+required_corpus_fixtures = {
+    "prompt-basic.txt",
+    "prompt-extended-terrain-light.txt",
+    "prompt-current-over-max.txt",
+    "command-burst.txt",
+    "command-clear-buffer.txt",
+    "room-standard.txt",
+    "room-opaque-darkness.txt",
+    "movement-blocked.txt",
+    "movement-follow.txt",
+    "movement-flee.txt",
+    "movement-crawl.txt",
+    "movement-portal.txt",
+    "movement-teleport-or-summon.txt",
+    "scan-distance-tiers.txt",
+    "group-normal.txt",
+    "group-negative-hp.txt",
+    "effects-multiline.txt",
+    "effects-fractional-zero-duration.txt",
+    "target-condition-ranges.txt",
+    "combat-high-volume.txt",
+    "combat-movement-restricted.txt",
+    "entity-duplicate-corpses.txt",
+    "entity-qualifiers.txt",
+    "item-id-structured.txt",
+    "equipment-transition.txt",
+    "corpse-loot.txt",
+}
+if not corpus_root.is_dir():
+    fail("0.31.0 canonical Avendar corpus fixture directory is missing")
+else:
+    actual_corpus_fixtures = {path.name for path in corpus_root.glob("*.txt")}
+    if actual_corpus_fixtures != required_corpus_fixtures:
+        missing = sorted(required_corpus_fixtures - actual_corpus_fixtures)
+        extra = sorted(actual_corpus_fixtures - required_corpus_fixtures)
+        fail(f"0.31.0 corpus fixture manifest mismatch: missing={missing}, extra={extra}")
+    for fixture in sorted(corpus_root.glob("*.txt")):
+        text = fixture.read_text(encoding="utf-8")
+        if "# Source:" not in text or "# Purpose:" not in text:
+            fail(f"0.31.0 corpus fixture lacks source/purpose provenance: {fixture.name}")
+        if "# Source-Lines:" not in text and "# Extraction:" not in text:
+            fail(f"0.31.0 corpus fixture lacks line range/extraction marker: {fixture.name}")
+
+implementation_ard = ROOT / "docs/architecture/NexMUD-gameplay-observation-semantic-normalization-state-reconciliation-implementation-ARD.md"
+parser_inventory = ROOT / "docs/architecture/NexMUD-semantic-parser-inventory.md"
+acceptance_audit = ROOT / "docs/architecture/NexMUD-v0.31.0-acceptance-audit.md"
+if not implementation_ard.is_file():
+    fail("0.31.0 implementation ARD is missing from architecture documentation")
+if not parser_inventory.is_file():
+    fail("0.31.0 semantic parser inventory is missing")
+if not acceptance_audit.is_file():
+    fail("0.31.0 acceptance audit is missing")
+else:
+    audit_text = acceptance_audit.read_text(encoding="utf-8")
+    if "DEFERRED" in audit_text:
+        fail("0.31.0 acceptance audit may not use DEFERRED")
+    if "| 91 .NET validation | BLOCKED |" not in audit_text:
+        fail("0.31.0 acceptance audit must explicitly record unavailable .NET validation")
+
+observation_contract = (ROOT / "src/NexMud.Contracts/Gameplay/GameplayModels.cs").read_text(encoding="utf-8")
+frame_assembler = (ROOT / "src/NexMud.Adapters/Observation/GameFrameAssembler.cs").read_text(encoding="utf-8")
+event_envelope_text = (ROOT / "src/NexMud.Contracts/Events/EventEnvelope.cs").read_text(encoding="utf-8")
+event_sink_text = (ROOT / "src/NexMud.Core/Events/IEventSink.cs").read_text(encoding="utf-8")
+event_pipeline_text = (ROOT / "src/NexMud.Core/Events/EventPipeline.cs").read_text(encoding="utf-8")
+state_reducer_text = (ROOT / "src/NexMud.Core/State/StateReducer.cs").read_text(encoding="utf-8")
+for literal in (
+    "readonly record struct SessionId",
+    "sealed record GameObservation(",
+    "enum ObservationKind",
+    "sealed record RoomObservation(",
+    "enum MovementCause",
+    "enum MovementResultKind",
+    "enum ResolutionQuality",
+):
+    if literal not in observation_contract:
+        fail(f"0.31.0 gameplay contract missing: {literal}")
+for literal in (
+    "class GameFrameAssembler",
+    "Interlocked.Increment",
+    "GameAnsiRun",
+    "FlushPromptCandidate",
+):
+    if literal not in frame_assembler:
+        fail(f"0.31.0 observation framing invariant missing: {literal}")
+for literal in ("SessionId", "SourceSequence", "ObservedAt"):
+    if literal not in event_envelope_text:
+        fail(f"0.31.0 semantic envelope trace metadata missing: {literal}")
+if "PublishSemanticAsync" not in event_sink_text or "PublishSemanticAsync" not in event_pipeline_text:
+    fail("0.31.0 semantic event publications must retain observation trace metadata")
+state_models_text = (ROOT / "src/NexMud.Contracts/State/StateModels.cs").read_text(encoding="utf-8")
+if "public long LastSourceSequence { get; init; }" not in state_models_text or "LastSourceSequence = envelope.SourceSequence ?? current.LastSourceSequence" not in state_reducer_text:
+    fail("0.31.0 reducer-derived state must retain the last semantic source sequence")
+if 'new ComponentError(\n                                "State reducer"' not in state_reducer_text:
+    fail("0.31.0 reducer failures must be isolated and diagnosed per source event")
+
+navigation_source = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in (ROOT / "src/NexMud.Client/Navigation").rglob("*.cs")
+    if not any(part in {"bin", "obj", "artifacts"} for part in path.parts)
+)
+if "System.Text.RegularExpressions" in navigation_source or "Regex." in navigation_source:
+    fail("0.31.0 Mapper must not own transcript-regex gameplay semantics")
+knowledge_text = (ROOT / "src/NexMud.Client/Knowledge/WorldKnowledgeStore.cs").read_text(encoding="utf-8")
+for forbidden in ("Alas, you cannot go that way.", "No way! You are still fighting!", "It is pitch black ..."):
+    if forbidden in knowledge_text:
+        fail(f"0.31.0 Codex retains transcript gameplay parser text: {forbidden}")
+
+script_event_types_text = (ROOT / "src/NexMud.Scripting/Events/ScriptEvents.cs").read_text(encoding="utf-8")
+typescript_event_map_text = (ROOT / "src/NexMud.Scripting.TypeScript/Declarations/NexMudTypeDeclarations.cs").read_text(encoding="utf-8")
+for stable_name in (
+    "character.promptUpdated",
+    "character.statusChanged",
+    "group.snapshotUpdated",
+    "effect.snapshotUpdated",
+    "effect.applied",
+    "effect.removed",
+    "room.observed",
+    "movement.succeeded",
+    "movement.blocked",
+    "movement.unknownDestination",
+    "movement.forced",
+    "movement.teleported",
+    "scan.updated",
+    "combat.started",
+    "combat.ended",
+    "combat.targetObserved",
+    "combat.targetConditionUpdated",
+    "combat.damageObserved",
+    "combat.fleeSucceeded",
+    "combat.fleeFailed",
+    "combat.movementRestricted",
+    "entity.observed",
+    "entity.died",
+    "item.identified",
+    "equipment.changed",
+    "item.looted",
+    "currency.received",
+    "corpse.observed",
+    "corpse.harvested",
+    "corpse.sacrificed",
+    "game.commandQueueCleared",
+    "progress.explorationGained",
+    "progress.experienceGained",
+):
+    if stable_name not in script_event_types_text:
+        fail(f"0.31.0 stable semantic event name missing: {stable_name}")
+    if f'"{stable_name}"' not in typescript_event_map_text:
+        fail(f"0.31.0 TypeScript event map is missing semantic event: {stable_name}")
+
+corpus_test_text = (ROOT / "tests/NexMud.Tests/Program.cs").read_text(encoding="utf-8")
+for test_name in (
+    "CanonicalCorpusFixtureManifestIsComplete",
+    "CanonicalCorpusSemanticOutputsAreStable",
+    "CanonicalCorpusReducerGoldenTests",
+    "CanonicalCorpusMapperGoldenTests",
+    "CanonicalCorpusCodexGoldenTests",
+    "CanonicalCorpusCombatThroughputPreservesOrdering",
+    "SemanticEnvelopesRetainObservationTraceability",
+    "StateReducerFailuresAreIsolatedAndDiagnosed",
+):
+    if test_name not in corpus_test_text:
+        fail(f"0.31.0 corpus/semantic regression test missing: {test_name}")
 
 if errors:
     print("Static verification failed:")

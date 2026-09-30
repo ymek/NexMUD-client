@@ -1,0 +1,7 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 4918-4935
+# Purpose: reliable self equipment transitions normalize stop-using and wield actions
+You stop using the Staff of Belerin.
+The magic of the staff fades as it leaves your hand.
+You wield an ice-encrusted staff with both hands.
+An ice-encrusted staff feels like a part of you!

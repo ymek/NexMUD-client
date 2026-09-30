@@ -75,22 +75,38 @@ public sealed class ClientScriptEventBridge
     private string ProjectEventType(IMudEvent mudEvent) => mudEvent switch
     {
         RoomChanged room => ProjectRoomEventType(room.Id),
-        RoomObservationObserved room => ProjectRoomEventType(room.RoomId),
+        RoomObservationObserved => ScriptEventTypes.RoomObserved,
         CharacterVitalsChanged => ScriptEventTypes.CharacterVitalsChanged,
         CharacterPromptObserved => ScriptEventTypes.PromptReceived,
         CharacterPromptSnapshotObserved => ScriptEventTypes.CharacterPromptUpdated,
         CharacterStatusObserved => ScriptEventTypes.CharacterStatusChanged,
         GroupSnapshotObserved => ScriptEventTypes.GroupSnapshotUpdated,
-        ActiveEffectsSnapshotObserved => ScriptEventTypes.EffectStatusSnapshot,
+        EffectSnapshotObserved => ScriptEventTypes.EffectSnapshotUpdated,
+        EffectApplied => ScriptEventTypes.EffectApplied,
+        EffectRemoved => ScriptEventTypes.EffectRemoved,
+        CombatTargetObserved => ScriptEventTypes.CombatTargetObserved,
         CombatTargetConditionObserved => ScriptEventTypes.CombatTargetConditionUpdated,
+        CombatDamageObserved => ScriptEventTypes.CombatDamageObserved,
+        CombatFleeSucceeded => ScriptEventTypes.CombatFleeSucceeded,
+        CombatFleeFailed => ScriptEventTypes.CombatFleeFailed,
+        CombatMovementRestricted => ScriptEventTypes.CombatMovementRestricted,
         MovementObserved movement => ProjectMovementEventType(movement.Movement),
         ScanUpdated => ScriptEventTypes.ScanUpdated,
+        EntityObservedEvent => ScriptEventTypes.EntityObserved,
+        CorpseObserved => ScriptEventTypes.CorpseObserved,
         ItemIdentified => ScriptEventTypes.ItemIdentified,
         GameCommandQueueCleared => ScriptEventTypes.GameCommandQueueCleared,
         CombatStateChanged { Active: true } => ScriptEventTypes.CombatStarted,
         CombatStateChanged { Active: false } => ScriptEventTypes.CombatEnded,
         EnemyKilled => ScriptEventTypes.EnemyKilled,
-        ItemAcquired => ScriptEventTypes.ItemAcquired,
+        EntityDied => ScriptEventTypes.EntityDied,
+        EquipmentChanged => ScriptEventTypes.EquipmentChanged,
+        CorpseHarvested => ScriptEventTypes.CorpseHarvested,
+        CorpseSacrificed => ScriptEventTypes.CorpseSacrificed,
+        ItemAcquired => ScriptEventTypes.ItemLooted,
+        CurrencyGained => ScriptEventTypes.CurrencyReceived,
+        ExplorationGained => ScriptEventTypes.ProgressExplorationGained,
+        ExperienceGained => ScriptEventTypes.ProgressExperienceGained,
         ConnectionStateChanged => ScriptEventTypes.ConnectionStateChanged,
         AutoMoveStateChanged => ScriptEventTypes.MapperRouteStatusChanged,
         MapperRouteLifecycleChanged route => ProjectMapperRouteEventType(route.Kind),
@@ -102,11 +118,11 @@ public sealed class ClientScriptEventBridge
 
     private static string ProjectMovementEventType(MovementObservation movement) => movement.Result switch
     {
-        MovementResult.Blocked or MovementResult.CombatRestricted => ScriptEventTypes.MovementBlocked,
-        MovementResult.SucceededKnownRoom => ScriptEventTypes.MovementSucceeded,
-        MovementResult.SucceededUnknownRoom => ScriptEventTypes.MovementUnknownDestination,
-        MovementResult.Forced => ScriptEventTypes.MovementForced,
-        MovementResult.Teleported => ScriptEventTypes.MovementTeleported,
+        MovementResultKind.Blocked or MovementResultKind.CombatRestricted => ScriptEventTypes.MovementBlocked,
+        MovementResultKind.SucceededKnownRoom => ScriptEventTypes.MovementSucceeded,
+        MovementResultKind.SucceededUnknownRoom => ScriptEventTypes.MovementUnknownDestination,
+        MovementResultKind.Forced => ScriptEventTypes.MovementForced,
+        MovementResultKind.Teleported => ScriptEventTypes.MovementTeleported,
         _ => ScriptEventTypes.MovementObserved
     };
 
@@ -191,7 +207,7 @@ public sealed class ClientScriptEventBridge
             sourceSequence = status.SourceSequence
         }, JsonOptions),
         GroupSnapshotObserved group => JsonSerializer.SerializeToElement(group.Snapshot, JsonOptions),
-        ActiveEffectsSnapshotObserved effects => JsonSerializer.SerializeToElement(effects.Snapshot, JsonOptions),
+        EffectSnapshotObserved effects => JsonSerializer.SerializeToElement(effects.Snapshot, JsonOptions),
         CombatTargetConditionObserved condition => JsonSerializer.SerializeToElement(new
         {
             target = condition.TargetName,
@@ -216,8 +232,74 @@ public sealed class ClientScriptEventBridge
         {
             item = item.ItemName,
             source = item.SourceDescription,
-            sourceKind = item.SourceKind.ToString()
+            sourceKind = item.SourceKind.ToString(),
+            sourceSequence = item.SourceSequence
         }, JsonOptions),
+        EntityObservedEvent entity => JsonSerializer.SerializeToElement(entity.Entity, JsonOptions),
+        CorpseObserved corpse => JsonSerializer.SerializeToElement(corpse.Entity, JsonOptions),
+        EntityDied died => JsonSerializer.SerializeToElement(new
+        {
+            displayName = died.DisplayName,
+            sourceSequence = died.SourceSequence
+        }, JsonOptions),
+        EffectApplied applied => JsonSerializer.SerializeToElement(new
+        {
+            effect = applied.Effect,
+            sourceSequence = applied.SourceSequence
+        }, JsonOptions),
+        EffectRemoved removed => JsonSerializer.SerializeToElement(new
+        {
+            effectName = removed.EffectName,
+            sourceSequence = removed.SourceSequence
+        }, JsonOptions),
+        CombatTargetObserved target => JsonSerializer.SerializeToElement(new
+        {
+            target = target.TargetName,
+            sourceSequence = target.SourceSequence
+        }, JsonOptions),
+        CombatDamageObserved damage => JsonSerializer.SerializeToElement(damage.Damage, JsonOptions),
+        CombatFleeSucceeded flee => JsonSerializer.SerializeToElement(new { sourceSequence = flee.SourceSequence }, JsonOptions),
+        CombatFleeFailed flee => JsonSerializer.SerializeToElement(new
+        {
+            sourceSequence = flee.SourceSequence,
+            detail = flee.Detail
+        }, JsonOptions),
+        CombatMovementRestricted restricted => JsonSerializer.SerializeToElement(new
+        {
+            sourceSequence = restricted.SourceSequence,
+            detail = restricted.Detail
+        }, JsonOptions),
+        EquipmentChanged equipment => JsonSerializer.SerializeToElement(new
+        {
+            action = equipment.Action.ToString(),
+            slot = equipment.Slot,
+            item = equipment.Item,
+            sourceSequence = equipment.SourceSequence
+        }, JsonOptions),
+        CorpseHarvested harvested => JsonSerializer.SerializeToElement(new
+        {
+            item = harvested.ItemName,
+            corpse = harvested.CorpseDescription,
+            sourceSequence = harvested.SourceSequence
+        }, JsonOptions),
+        CorpseSacrificed sacrificed => JsonSerializer.SerializeToElement(new
+        {
+            item = sacrificed.ItemName,
+            deity = sacrificed.Deity,
+            sourceSequence = sacrificed.SourceSequence
+        }, JsonOptions),
+        CurrencyGained currency => JsonSerializer.SerializeToElement(new
+        {
+            currency = currency.Currency,
+            amount = currency.Amount,
+            sourceSequence = currency.SourceSequence
+        }, JsonOptions),
+        ExplorationGained exploration => JsonSerializer.SerializeToElement(new
+        {
+            amount = exploration.Amount,
+            experienceAmount = exploration.ExperienceAmount
+        }, JsonOptions),
+        ExperienceGained experience => JsonSerializer.SerializeToElement(new { amount = experience.Amount }, JsonOptions),
         ConnectionStateChanged connection => JsonSerializer.SerializeToElement(new
         {
             status = connection.Status.ToString(),

@@ -1,0 +1,5 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 51-62
+# Purpose: basic legacy resource prompt with tnl and exploration points
+<1049(1049)hp 1104(1104)m 470(486)mv 23395tnl 7618ep
+15:00> gr

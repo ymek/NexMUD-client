@@ -1,11 +1,11 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
+using NexMud.Adapters.Observation;
 using NexMud.Contracts.Events;
 using NexMud.Contracts.Gameplay;
 using NexMud.Contracts.State;
 using NexMud.Core.Events;
-using NexMud.Transport.Text;
 
 namespace NexMud.Adapters.Avendar;
 
@@ -29,25 +29,24 @@ public sealed class AvendarGameAdapter
 
     private readonly ChannelReader<EventEnvelope> _events;
     private readonly IEventSink _sink;
-    private readonly AvendarPromptStreamProcessor _streamProcessor = new();
     private readonly AvendarSemanticParser _semanticParser = new();
     private readonly AvendarCommunicationParser _communicationParser = new();
     private readonly AvendarRoomContentsParser _roomContentsParser = new();
-    private readonly AvendarObservationFactory _observationFactory = new();
-    private readonly AnsiStripper _ansiStripper = new();
-    private readonly StringBuilder _lineBuffer = new();
+    private readonly GameFrameAssembler _frameAssembler = new(AvendarPromptBoundaryDetector.FindPromptBoundary);
     private readonly List<string> _responseLines = [];
     private readonly Queue<PendingNavigationResponse> _pendingNavigationResponses = new();
     private bool _navigationResponseSawText;
     private bool _navigationSawOpaqueRoom;
     private long _currentSourceSequence;
-    private string _currentObservationSessionId = string.Empty;
+    private DateTimeOffset _currentObservedAt;
+    private SessionId _currentObservationSessionId = SessionId.Empty;
     private long _responseSourceSequence;
     private MovementCause? _pendingSpecialMovementCause;
     private long _pendingSpecialMovementSequence;
     private string? _lastObservedRoomId;
     private ResponseMode _responseMode;
     private bool _scoreCorePublished;
+    private EffectSnapshot? _lastEffectSnapshot;
     private SessionInputMode _inputMode = SessionInputMode.Unknown;
 
     private sealed record PendingNavigationResponse(
@@ -67,11 +66,21 @@ public sealed class AvendarGameAdapter
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(observation);
-        await _sink.PublishAsync(
-            new GameObservationReceived(observation),
+        await PublishAndProcessObservationAsync(
+            observation,
             "adapter.avendar.replay",
             cancellationToken).ConfigureAwait(false);
-        await ProcessObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ReplayAsync(
+        IGameObservationSource source,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        await foreach (GameObservation observation in source.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await ReplayObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -85,20 +94,39 @@ public sealed class AvendarGameAdapter
                     switch (envelope.Payload)
                     {
                         case TextReceived text:
-                            GameObservation observation = _observationFactory.Create(
-                                text.Text,
-                                envelope.Timestamp);
-                            await _sink.PublishAsync(
-                                new GameObservationReceived(observation),
-                                "adapter.avendar.observation",
-                                cancellationToken).ConfigureAwait(false);
-                            await ProcessObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+                            foreach (GameObservation observation in _frameAssembler.AppendText(text.Text, envelope.Timestamp))
+                            {
+                                await PublishAndProcessObservationAsync(
+                                    observation,
+                                    "adapter.avendar.observation",
+                                    cancellationToken).ConfigureAwait(false);
+                            }
                             break;
+
+                        case ProtocolPromptBoundaryReceived boundary:
+                            foreach (GameObservation observation in _frameAssembler.FlushPromptCandidate(
+                                         envelope.Timestamp,
+                                         new ObservationMetadata(
+                                             IsPrompt: true,
+                                             Protocol: "TELNET",
+                                             Fields: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                                             {
+                                                 ["boundary"] = boundary.Kind
+                                             })))
+                            {
+                                await PublishAndProcessObservationAsync(
+                                    observation,
+                                    "adapter.avendar.observation",
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                            break;
+
                         case ActionDispatching action:
                             await PublishLocalCommandObservationAsync(action, envelope.Timestamp, cancellationToken)
                                 .ConfigureAwait(false);
                             await BeginResponseCollectionAsync(action, cancellationToken).ConfigureAwait(false);
                             break;
+
                         case ProtocolStateChanged protocol:
                             await PublishProtocolObservationAsync(protocol, envelope.Timestamp, cancellationToken)
                                 .ConfigureAwait(false);
@@ -107,12 +135,29 @@ public sealed class AvendarGameAdapter
                                 await HandleEchoProtocolAsync(protocol.Enabled, cancellationToken).ConfigureAwait(false);
                             }
                             break;
+
                         case ConnectionStateChanged connection:
+                            if (connection.Status == ConnectionStatus.Connected)
+                            {
+                                ResetSessionParsing(resetObservationSession: true);
+                            }
+                            else
+                            {
+                                foreach (GameObservation observation in _frameAssembler.FlushText(envelope.Timestamp))
+                                {
+                                    await PublishAndProcessObservationAsync(
+                                        observation,
+                                        "adapter.avendar.observation",
+                                        cancellationToken).ConfigureAwait(false);
+                                }
+                            }
+
                             await PublishConnectionObservationAsync(connection, envelope.Timestamp, cancellationToken)
                                 .ConfigureAwait(false);
+
                             if (connection.Status != ConnectionStatus.Connected)
                             {
-                                ResetSessionParsing();
+                                ResetSessionParsing(resetObservationSession: false);
                             }
                             break;
                     }
@@ -123,8 +168,8 @@ public sealed class AvendarGameAdapter
                 }
                 catch (Exception exception)
                 {
-                    ResetSessionParsing();
-                    await _sink.PublishAsync(
+                    ResetSemanticParsing();
+                    await PublishAdapterEventAsync(
                         new ComponentError("Avendar adapter", exception.Message),
                         "adapter.avendar",
                         cancellationToken).ConfigureAwait(false);
@@ -136,18 +181,48 @@ public sealed class AvendarGameAdapter
         }
     }
 
+    private async Task PublishAndProcessObservationAsync(
+        GameObservation observation,
+        string source,
+        CancellationToken cancellationToken)
+    {
+        await PublishAdapterEventAsync(
+            new GameObservationReceived(observation),
+            source,
+            cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await ProcessObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            ResetSemanticParsing();
+            await PublishAdapterEventAsync(
+                new ComponentError(
+                    "Avendar semantic parser",
+                    $"Observation {observation.Sequence}: {exception.Message}"),
+                "adapter.avendar",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async Task PublishLocalCommandObservationAsync(
         ActionDispatching action,
         DateTimeOffset timestamp,
         CancellationToken cancellationToken)
     {
         string text = action.Sensitive ? "<redacted>" : action.Command;
-        GameObservation observation = _observationFactory.CreateEvidence(
+        GameObservation observation = _frameAssembler.CreateEvidence(
             text,
             timestamp,
             ObservationKind.LocalCommandEcho,
             new ObservationMetadata(IsLocal: true));
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new GameObservationReceived(observation),
             "adapter.avendar.observation",
             cancellationToken).ConfigureAwait(false);
@@ -163,12 +238,12 @@ public sealed class AvendarGameAdapter
         {
             ["enabled"] = protocol.Enabled.ToString()
         };
-        GameObservation observation = _observationFactory.CreateEvidence(
+        GameObservation observation = _frameAssembler.CreateEvidence(
             text,
             timestamp,
             ObservationKind.ProtocolEvent,
             new ObservationMetadata(Protocol: protocol.Protocol, Fields: fields));
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new GameObservationReceived(observation),
             "adapter.avendar.observation",
             cancellationToken).ConfigureAwait(false);
@@ -186,12 +261,12 @@ public sealed class AvendarGameAdapter
             ["host"] = connection.Host ?? string.Empty,
             ["port"] = connection.Port?.ToString() ?? string.Empty
         };
-        GameObservation observation = _observationFactory.CreateEvidence(
+        GameObservation observation = _frameAssembler.CreateEvidence(
             text,
             timestamp,
             ObservationKind.ConnectionEvent,
             new ObservationMetadata(Fields: fields));
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new GameObservationReceived(observation),
             "adapter.avendar.observation",
             cancellationToken).ConfigureAwait(false);
@@ -200,115 +275,83 @@ public sealed class AvendarGameAdapter
     private async Task ProcessObservationAsync(GameObservation observation, CancellationToken cancellationToken)
     {
         _currentSourceSequence = observation.Sequence;
+        _currentObservedAt = observation.ReceivedAt;
         _currentObservationSessionId = observation.SessionId;
-        string rawText = observation.RawText;
+
+        if (observation.Kind is not ObservationKind.Text and not ObservationKind.PromptCandidate)
+        {
+            return;
+        }
 
         // Display and semantics branch from the same immutable source observation.
         // Presentation transforms can therefore never alter parser evidence.
-        await _sink.PublishAsync(new GameTextReceived(rawText), "adapter.avendar.display", cancellationToken)
-            .ConfigureAwait(false);
+        await PublishAdapterEventAsync(
+            new GameTextReceived(observation.RawText),
+            "adapter.avendar.display",
+            cancellationToken).ConfigureAwait(false);
 
-        foreach (AvendarStreamToken token in _streamProcessor.Process(rawText))
+        string plainText = observation.PlainText;
+        if (observation.Kind == ObservationKind.PromptCandidate &&
+            plainText.TrimStart().StartsWith("[J|", StringComparison.Ordinal))
         {
-            switch (token)
-            {
-                case AvendarDisplayToken display:
-                    await ProcessDisplayAsync(display.Text, cancellationToken).ConfigureAwait(false);
-                    break;
-                case AvendarPromptToken prompt:
-                    await FlushPartialLineAsync(cancellationToken).ConfigureAwait(false);
-                    // Avendar can emit a telemetry prompt immediately before a command response.
-                    // Do not terminate a response capture until we have actually observed response text.
-                    // This is particularly important for equipment/id/help, where the leading prompt
-                    // otherwise caused a complete-but-empty snapshot and discarded the real response.
-                    if (_responseMode != ResponseMode.None && _responseLines.Any(line => !string.IsNullOrWhiteSpace(line)))
-                    {
-                        await FinalizeResponseAsync(cancellationToken, complete: true).ConfigureAwait(false);
-                    }
-                    if (AvendarPromptParser.TryParse(prompt.Text, out CharacterPromptObserved? observed) &&
-                        observed is not null)
-                    {
-                        observed = observed with { SourceSequence = _currentSourceSequence };
-                        await _sink.PublishAsync(observed, "adapter.avendar.prompt", cancellationToken)
-                            .ConfigureAwait(false);
-                        await _sink.PublishAsync(
-                            new CharacterPromptSnapshotObserved(
-                                AvendarPromptSnapshotParser.FromTelemetry(observed, _currentSourceSequence)),
-                            "adapter.avendar.prompt",
-                            cancellationToken).ConfigureAwait(false);
-                        await PublishInputModeAsync(SessionInputMode.Normal, cancellationToken).ConfigureAwait(false);
-
-                        RoomObservationObserved? completedRoom = null;
-                        if (_roomContentsParser.TryComplete(observed.RoomName, out RoomObservationObserved? room) &&
-                            room is not null)
-                        {
-                            completedRoom = StampRoomObservation(room, _currentSourceSequence, _currentObservationSessionId);
-                            await _sink.PublishAsync(completedRoom, "adapter.avendar.room", cancellationToken)
-                                .ConfigureAwait(false);
-                            await ReconcileUncorrelatedRoomTransitionAsync(completedRoom, cancellationToken)
-                                .ConfigureAwait(false);
-                            await CompleteSpecialMovementAsync(completedRoom, cancellationToken).ConfigureAwait(false);
-                        }
-
-                        await CompleteNavigationResponseAsync(completedRoom, cancellationToken)
-                            .ConfigureAwait(false);
-                        if (completedRoom is null)
-                        {
-                            _pendingSpecialMovementCause = null;
-                            _pendingSpecialMovementSequence = 0;
-                        }
-                    }
-                    else
-                    {
-                        _roomContentsParser.Reset();
-                        await _sink.PublishAsync(
-                            new ComponentError("Avendar prompt parser", "Received malformed Jev telemetry prompt."),
-                            "adapter.avendar.prompt",
-                            cancellationToken).ConfigureAwait(false);
-                    }
-                    break;
-            }
-        }
-    }
-
-    private async Task ProcessDisplayAsync(string rawText, CancellationToken cancellationToken)
-    {
-        if (rawText.Length == 0)
-        {
+            await ProcessTelemetryPromptAsync(plainText, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        string plainText = _ansiStripper.Process(Encoding.UTF8.GetBytes(rawText));
-        foreach (char value in plainText)
+        string semanticLine = plainText.TrimEnd('\r', '\n');
+        if (semanticLine.Length == 0 && plainText.Length > 0)
         {
-            if (value == '\r')
-            {
-                continue;
-            }
-
-            if (value == '\n')
-            {
-                await ProcessLineAsync(_lineBuffer.ToString(), cancellationToken).ConfigureAwait(false);
-                _lineBuffer.Clear();
-            }
-            else
-            {
-                _lineBuffer.Append(value);
-            }
-        }
-
-        await ObservePartialInputPromptAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task FlushPartialLineAsync(CancellationToken cancellationToken)
-    {
-        if (_lineBuffer.Length == 0)
-        {
+            await ProcessLineAsync(string.Empty, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        await ProcessLineAsync(_lineBuffer.ToString(), cancellationToken).ConfigureAwait(false);
-        _lineBuffer.Clear();
+        await ProcessLineAsync(semanticLine, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ProcessTelemetryPromptAsync(string promptText, CancellationToken cancellationToken)
+    {
+        // Avendar can emit a telemetry prompt immediately before a command response.
+        // Do not terminate a response capture until response text has actually arrived.
+        if (_responseMode != ResponseMode.None && _responseLines.Any(line => !string.IsNullOrWhiteSpace(line)))
+        {
+            await FinalizeResponseAsync(cancellationToken, complete: true).ConfigureAwait(false);
+        }
+
+        if (!AvendarPromptParser.TryParse(promptText, out CharacterPromptObserved? observed) || observed is null)
+        {
+            _roomContentsParser.Reset();
+            await PublishAdapterEventAsync(
+                new ComponentError("Avendar prompt parser", "Received malformed Jev telemetry prompt."),
+                "adapter.avendar.prompt",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        observed = observed with { SourceSequence = _currentSourceSequence };
+        await PublishAdapterEventAsync(observed, "adapter.avendar.prompt", cancellationToken).ConfigureAwait(false);
+        await PublishAdapterEventAsync(
+            new CharacterPromptSnapshotObserved(
+                AvendarPromptSnapshotParser.FromTelemetry(observed, _currentSourceSequence)),
+            "adapter.avendar.prompt",
+            cancellationToken).ConfigureAwait(false);
+        await PublishInputModeAsync(SessionInputMode.Normal, cancellationToken).ConfigureAwait(false);
+
+        RoomObservationObserved? completedRoom = null;
+        if (_roomContentsParser.TryComplete(observed.RoomName, out RoomObservationObserved? room) && room is not null)
+        {
+            completedRoom = StampRoomObservation(room, _currentSourceSequence, _currentObservationSessionId);
+            await PublishAdapterEventAsync(completedRoom, "adapter.avendar.room", cancellationToken).ConfigureAwait(false);
+            await PublishRoomEntitiesAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+            await ReconcileUncorrelatedRoomTransitionAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+            await CompleteSpecialMovementAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+        }
+
+        await CompleteNavigationResponseAsync(completedRoom, cancellationToken).ConfigureAwait(false);
+        if (completedRoom is null)
+        {
+            _pendingSpecialMovementCause = null;
+            _pendingSpecialMovementSequence = 0;
+        }
     }
 
     private async Task ProcessLineAsync(string line, CancellationToken cancellationToken)
@@ -321,7 +364,7 @@ public sealed class AvendarGameAdapter
             resourcePrompt is not null)
         {
             await CompleteLegacyPromptBoundaryAsync(cancellationToken).ConfigureAwait(false);
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new CharacterPromptSnapshotObserved(resourcePrompt),
                 "adapter.avendar.prompt",
                 cancellationToken).ConfigureAwait(false);
@@ -336,7 +379,7 @@ public sealed class AvendarGameAdapter
             clockPrompt is not null)
         {
             await CompleteLegacyPromptBoundaryAsync(cancellationToken).ConfigureAwait(false);
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new CharacterPromptSnapshotObserved(clockPrompt),
                 "adapter.avendar.prompt",
                 cancellationToken).ConfigureAwait(false);
@@ -372,10 +415,10 @@ public sealed class AvendarGameAdapter
                 long sourceSequence = Math.Max(_pendingSpecialMovementSequence, _currentSourceSequence);
                 _pendingSpecialMovementCause = null;
                 _pendingSpecialMovementSequence = 0;
-                await _sink.PublishAsync(
+                await PublishAdapterEventAsync(
                     new MovementObserved(new MovementObservation(
                         cause,
-                        MovementResult.SucceededUnknownRoom,
+                        MovementResultKind.SucceededUnknownRoom,
                         null,
                         null,
                         "It is pitch black ...",
@@ -398,29 +441,41 @@ public sealed class AvendarGameAdapter
         IReadOnlyList<IMudEvent> semanticEvents = _semanticParser.ParseLine(semanticLine, _currentSourceSequence);
         foreach (IMudEvent mudEvent in semanticEvents)
         {
-            if (mudEvent is NavigationFailed ||
-                mudEvent is MovementObserved
-                { Movement.Result: MovementResult.Blocked or MovementResult.CombatRestricted })
+            IMudEvent published = mudEvent;
+            if (mudEvent is MovementObserved
+                { Movement.Result: MovementResultKind.Blocked or MovementResultKind.CombatRestricted } blocked &&
+                _pendingNavigationResponses.Count > 0)
+            {
+                PendingNavigationResponse pending = _pendingNavigationResponses.Peek();
+                published = new MovementObserved(blocked.Movement with
+                {
+                    Cause = pending.Cause,
+                    Direction = pending.Direction,
+                    CommandId = pending.ActionId
+                });
+                MarkCurrentNavigationFailure();
+            }
+            else if (mudEvent is NavigationFailed)
             {
                 MarkCurrentNavigationFailure();
             }
 
-            if (mudEvent is MovementObserved movement &&
-                (movement.Movement.Result is MovementResult.SucceededUnknownRoom or MovementResult.Unknown) &&
+            if (published is MovementObserved movement &&
+                (movement.Movement.Result is MovementResultKind.SucceededUnknownRoom or MovementResultKind.Unknown) &&
                 movement.Movement.Cause is not MovementCause.ManualDirection and not MovementCause.MapperRoute)
             {
                 _pendingSpecialMovementCause = movement.Movement.Cause;
                 _pendingSpecialMovementSequence = movement.Movement.SourceSequence;
             }
 
-            await _sink.PublishAsync(mudEvent, "adapter.avendar.semantic", cancellationToken)
+            await PublishAdapterEventAsync(published, "adapter.avendar.semantic", cancellationToken)
                 .ConfigureAwait(false);
         }
 
         bool communicationClaimed = _communicationParser.TryParse(semanticLine, out CommunicationObserved? communication);
         if (communication is not null)
         {
-            await _sink.PublishAsync(communication, "adapter.avendar.communication", cancellationToken)
+            await PublishAdapterEventAsync(communication, "adapter.avendar.communication", cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -436,16 +491,62 @@ public sealed class AvendarGameAdapter
                                     semanticEvents.Count > 0 || communicationClaimed || session is not null);
     }
 
-    private async Task ObservePartialInputPromptAsync(CancellationToken cancellationToken)
+    private ValueTask PublishAdapterEventAsync(
+        IMudEvent mudEvent,
+        string source,
+        CancellationToken cancellationToken)
     {
-        if (_lineBuffer.Length == 0) return;
-
-        SessionInputModeChanged? session = AvendarSessionParser.ParseLine(_lineBuffer.ToString());
-        if (session is not null)
+        if (_currentObservationSessionId != SessionId.Empty &&
+            mudEvent is not GameObservationReceived &&
+            mudEvent is not GameTextReceived &&
+            mudEvent is not ComponentError &&
+            mudEvent is not SessionInputModeChanged &&
+            mudEvent is not ResponseCaptureChanged &&
+            mudEvent is not NavigationAttempted &&
+            mudEvent is not NavigationResponseCompleted &&
+            mudEvent is not NavigationFailed)
         {
-            await PublishInputModeAsync(session.Mode, cancellationToken).ConfigureAwait(false);
+            return _sink.PublishSemanticAsync(
+                mudEvent,
+                source,
+                _currentObservationSessionId,
+                SemanticSourceSequence(mudEvent),
+                _currentObservedAt,
+                cancellationToken);
         }
+
+        return _sink.PublishAsync(mudEvent, source, cancellationToken);
     }
+
+    private long SemanticSourceSequence(IMudEvent mudEvent) => mudEvent switch
+    {
+        CharacterPromptSnapshotObserved prompt => prompt.Snapshot.SourceSequence,
+        CharacterPromptObserved prompt => prompt.SourceSequence,
+        GroupSnapshotObserved group => group.Snapshot.SourceSequence,
+        EffectSnapshotObserved effects => effects.Snapshot.SourceSequence,
+        EffectApplied applied => applied.SourceSequence,
+        EffectRemoved removed => removed.SourceSequence,
+        RoomObservationObserved room => room.SourceSequence,
+        MovementObserved movement => movement.Movement.SourceSequence,
+        ScanUpdated scan => scan.Scan.SourceSequence,
+        GameCommandQueueCleared cleared => cleared.SourceSequence,
+        EntityObservedEvent entity => entity.Entity.SourceSequence,
+        CorpseObserved corpse => corpse.Entity.SourceSequence,
+        ItemIdentified item => item.Item.SourceSequence,
+        EquipmentChanged equipment => equipment.SourceSequence,
+        ItemAcquired item => item.SourceSequence,
+        CurrencyGained currency => currency.SourceSequence,
+        CorpseHarvested harvested => harvested.SourceSequence,
+        CorpseSacrificed sacrificed => sacrificed.SourceSequence,
+        CharacterStatusObserved status => status.SourceSequence,
+        CombatTargetObserved target => target.SourceSequence,
+        CombatTargetConditionObserved condition => condition.SourceSequence,
+        CombatFleeSucceeded flee => flee.SourceSequence,
+        CombatFleeFailed flee => flee.SourceSequence,
+        CombatMovementRestricted restricted => restricted.SourceSequence,
+        EntityDied died => died.SourceSequence,
+        _ => _currentSourceSequence
+    };
 
     private async Task HandleEchoProtocolAsync(bool enabled, CancellationToken cancellationToken)
     {
@@ -469,7 +570,7 @@ public sealed class AvendarGameAdapter
         if (_inputMode == mode) return;
 
         _inputMode = mode;
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new SessionInputModeChanged(mode),
             "adapter.avendar.session",
             cancellationToken).ConfigureAwait(false);
@@ -484,7 +585,7 @@ public sealed class AvendarGameAdapter
         }
 
         _scoreCorePublished = true;
-        await _sink.PublishAsync(score, "adapter.avendar.score", cancellationToken).ConfigureAwait(false);
+        await PublishAdapterEventAsync(score, "adapter.avendar.score", cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsCompleteScoreCore(CharacterScoreObserved score)
@@ -525,7 +626,7 @@ public sealed class AvendarGameAdapter
         if (_roomContentsParser.TryCompleteLatest(out RoomObservationObserved? room) && room is not null)
         {
             completedRoom = StampRoomObservation(room, _currentSourceSequence, _currentObservationSessionId);
-            await _sink.PublishAsync(completedRoom, "adapter.avendar.room", cancellationToken)
+            await PublishAdapterEventAsync(completedRoom, "adapter.avendar.room", cancellationToken)
                 .ConfigureAwait(false);
             await ReconcileUncorrelatedRoomTransitionAsync(completedRoom, cancellationToken)
                 .ConfigureAwait(false);
@@ -589,7 +690,7 @@ public sealed class AvendarGameAdapter
         _responseLines.Clear();
         _responseSourceSequence = _currentSourceSequence;
         _scoreCorePublished = false;
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new ResponseCaptureChanged(ToCaptureKind(inferred)),
             "adapter.avendar.response",
             cancellationToken).ConfigureAwait(false);
@@ -610,7 +711,7 @@ public sealed class AvendarGameAdapter
                 ? MovementCause.MapperRoute
                 : MovementCause.ManualDirection;
             _pendingNavigationResponses.Enqueue(new PendingNavigationResponse(action.ActionId, direction, cause));
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new NavigationAttempted(direction, action.ActionId),
                 "adapter.avendar.navigation",
                 cancellationToken).ConfigureAwait(false);
@@ -618,7 +719,7 @@ public sealed class AvendarGameAdapter
 
         if (AvendarSessionParser.IsEditorCommand(normalized))
         {
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new SessionInputModeChanged(NexMud.Contracts.State.SessionInputMode.Editor),
                 "adapter.avendar.session",
                 cancellationToken).ConfigureAwait(false);
@@ -689,7 +790,7 @@ public sealed class AvendarGameAdapter
         _scoreCorePublished = false;
         if (_responseMode != ResponseMode.None)
         {
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new ResponseCaptureChanged(ToCaptureKind(_responseMode)),
                 "adapter.avendar.response",
                 cancellationToken).ConfigureAwait(false);
@@ -712,7 +813,7 @@ public sealed class AvendarGameAdapter
                         score is not null &&
                         (!_scoreCorePublished || score.Effects is not null || score.Conditions is { Count: > 0 }))
                     {
-                        await _sink.PublishAsync(score, "adapter.avendar.score", cancellationToken)
+                        await PublishAdapterEventAsync(score, "adapter.avendar.score", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
@@ -724,7 +825,7 @@ public sealed class AvendarGameAdapter
                         {
                             Completeness = complete ? ObservationCompleteness.Complete : ObservationCompleteness.Partial
                         };
-                        await _sink.PublishAsync(snapshot, "adapter.avendar.skills", cancellationToken)
+                        await PublishAdapterEventAsync(snapshot, "adapter.avendar.skills", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
@@ -736,7 +837,7 @@ public sealed class AvendarGameAdapter
                         {
                             Completeness = complete ? ObservationCompleteness.Complete : ObservationCompleteness.Partial
                         };
-                        await _sink.PublishAsync(snapshot, "adapter.avendar.spells", cancellationToken)
+                        await PublishAdapterEventAsync(snapshot, "adapter.avendar.spells", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
@@ -744,7 +845,7 @@ public sealed class AvendarGameAdapter
                     if (AvendarEquipmentParser.TryParse(_responseLines, out IReadOnlyList<EquipmentSlotState>? equipment) &&
                         equipment is not null)
                     {
-                        await _sink.PublishAsync(
+                        await PublishAdapterEventAsync(
                             new EquipmentSnapshotObserved(
                                 equipment,
                                 complete ? ObservationCompleteness.Complete : ObservationCompleteness.Partial),
@@ -756,7 +857,7 @@ public sealed class AvendarGameAdapter
                     if (AvendarInventoryParser.TryParse(_responseLines, out IReadOnlyList<string>? inventory) &&
                         inventory is not null)
                     {
-                        await _sink.PublishAsync(
+                        await PublishAdapterEventAsync(
                             new InventorySnapshotObserved(
                                 inventory,
                                 complete ? ObservationCompleteness.Complete : ObservationCompleteness.Partial),
@@ -765,10 +866,10 @@ public sealed class AvendarGameAdapter
                     }
                     break;
                 case ResponseMode.ItemIdentification:
-                    if (AvendarItemIdentificationParser.TryParse(_responseLines, out ItemIdentified? item) &&
+                    if (AvendarItemIdentificationParser.TryParse(_responseLines, out ItemIdentified? item, _responseSourceSequence) &&
                         item is not null)
                     {
-                        await _sink.PublishAsync(item, "adapter.avendar.item-id", cancellationToken)
+                        await PublishAdapterEventAsync(item, "adapter.avendar.item-id", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
@@ -776,14 +877,14 @@ public sealed class AvendarGameAdapter
                     if (AvendarAbilityHelpParser.TryParse(_responseLines, out AbilityHelpObserved? help) &&
                         help is not null)
                     {
-                        await _sink.PublishAsync(help, "adapter.avendar.help", cancellationToken)
+                        await PublishAdapterEventAsync(help, "adapter.avendar.help", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
                 case ResponseMode.Where:
                     if (TryParseWhereArea(_responseLines, out string? area) && !string.IsNullOrWhiteSpace(area))
                     {
-                        await _sink.PublishAsync(new AreaObserved(area), "adapter.avendar.where", cancellationToken)
+                        await PublishAdapterEventAsync(new AreaObserved(area), "adapter.avendar.where", cancellationToken)
                             .ConfigureAwait(false);
                     }
                     break;
@@ -791,27 +892,29 @@ public sealed class AvendarGameAdapter
                     if (AvendarGroupParser.TryParse(_responseLines, _responseSourceSequence, out GroupSnapshot? group) &&
                         group is not null)
                     {
-                        await _sink.PublishAsync(
+                        await PublishAdapterEventAsync(
                             new GroupSnapshotObserved(group),
                             "adapter.avendar.group",
                             cancellationToken).ConfigureAwait(false);
                     }
                     break;
                 case ResponseMode.Effects:
-                    if (AvendarEffectsParser.TryParse(_responseLines, _responseSourceSequence, out ActiveEffectsSnapshot? effects) &&
+                    if (AvendarEffectsParser.TryParse(_responseLines, _responseSourceSequence, out EffectSnapshot? effects) &&
                         effects is not null)
                     {
-                        await _sink.PublishAsync(
-                            new ActiveEffectsSnapshotObserved(effects),
+                        await PublishAdapterEventAsync(
+                            new EffectSnapshotObserved(effects),
                             "adapter.avendar.effects",
                             cancellationToken).ConfigureAwait(false);
+                        await PublishEffectChangesAsync(effects, cancellationToken).ConfigureAwait(false);
+                        _lastEffectSnapshot = effects;
                     }
                     break;
                 case ResponseMode.Scan:
                     if (AvendarScanParser.TryParse(_responseLines, _responseSourceSequence, out ScanObservation? scan) &&
                         scan is not null)
                     {
-                        await _sink.PublishAsync(
+                        await PublishAdapterEventAsync(
                             new ScanUpdated(scan),
                             "adapter.avendar.scan",
                             cancellationToken).ConfigureAwait(false);
@@ -825,9 +928,32 @@ public sealed class AvendarGameAdapter
             _responseLines.Clear();
             _responseSourceSequence = 0;
             _scoreCorePublished = false;
-            await _sink.PublishAsync(
+            await PublishAdapterEventAsync(
                 new ResponseCaptureChanged(ResponseCaptureKind.None),
                 "adapter.avendar.response",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task PublishEffectChangesAsync(EffectSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        Dictionary<string, ActiveEffect> previous = (_lastEffectSnapshot?.Effects ?? Array.Empty<ActiveEffect>())
+            .ToDictionary(effect => effect.Name, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, ActiveEffect> current = snapshot.Effects
+            .ToDictionary(effect => effect.Name, StringComparer.OrdinalIgnoreCase);
+
+        foreach (ActiveEffect effect in current.Values.Where(effect => !previous.ContainsKey(effect.Name)))
+        {
+            await PublishAdapterEventAsync(
+                new EffectApplied(effect, snapshot.SourceSequence),
+                "adapter.avendar.effects",
+                cancellationToken).ConfigureAwait(false);
+        }
+        foreach (string removed in previous.Keys.Where(name => !current.ContainsKey(name)))
+        {
+            await PublishAdapterEventAsync(
+                new EffectRemoved(removed, snapshot.SourceSequence),
+                "adapter.avendar.effects",
                 cancellationToken).ConfigureAwait(false);
         }
     }
@@ -928,14 +1054,14 @@ public sealed class AvendarGameAdapter
         if (pending.ExplicitFailureObserved) return;
 
         bool roomObserved = room is not null;
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new NavigationResponseCompleted(pending.ActionId, pending.Direction, roomObserved),
             "adapter.avendar.navigation",
             cancellationToken).ConfigureAwait(false);
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new MovementObserved(new MovementObservation(
                 pending.Cause,
-                roomObserved ? MovementResult.SucceededKnownRoom : MovementResult.SucceededUnknownRoom,
+                roomObserved ? MovementResultKind.SucceededKnownRoom : MovementResultKind.SucceededUnknownRoom,
                 pending.Direction,
                 room?.RoomId,
                 opaque ? "It is pitch black ..." : null,
@@ -943,6 +1069,27 @@ public sealed class AvendarGameAdapter
                 pending.ActionId)),
             "adapter.avendar.navigation",
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PublishRoomEntitiesAsync(
+        RoomObservationObserved room,
+        CancellationToken cancellationToken)
+    {
+        if (room.Observation is null) return;
+        foreach (EntityObservation entity in room.Observation.Entities)
+        {
+            await PublishAdapterEventAsync(
+                new EntityObservedEvent(entity),
+                "adapter.avendar.entity",
+                cancellationToken).ConfigureAwait(false);
+            if (entity.Kind == EntityObservationKind.Corpse)
+            {
+                await PublishAdapterEventAsync(
+                    new CorpseObserved(entity),
+                    "adapter.avendar.corpse",
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     private async Task ReconcileUncorrelatedRoomTransitionAsync(
@@ -964,10 +1111,10 @@ public sealed class AvendarGameAdapter
         // still authoritative movement evidence. Preserve the unknown cause rather than
         // inventing teleport/follow semantics. This covers spoken teleports and other
         // game mechanics whose cause is not explicit in the observed output.
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new MovementObserved(new MovementObservation(
                 MovementCause.Unknown,
-                MovementResult.SucceededKnownRoom,
+                MovementResultKind.SucceededKnownRoom,
                 null,
                 room.RoomId,
                 room.RoomName,
@@ -986,14 +1133,14 @@ public sealed class AvendarGameAdapter
         long sourceSequence = Math.Max(_pendingSpecialMovementSequence, room.SourceSequence);
         _pendingSpecialMovementCause = null;
         _pendingSpecialMovementSequence = 0;
-        await _sink.PublishAsync(
+        await PublishAdapterEventAsync(
             new MovementObserved(new MovementObservation(
                 cause,
                 cause is MovementCause.Teleport or MovementCause.Summon
-                    ? MovementResult.Teleported
+                    ? MovementResultKind.Teleported
                     : cause == MovementCause.Forced
-                        ? MovementResult.Forced
-                        : MovementResult.SucceededKnownRoom,
+                        ? MovementResultKind.Forced
+                        : MovementResultKind.SucceededKnownRoom,
                 null,
                 room.RoomId,
                 room.RoomName,
@@ -1005,36 +1152,82 @@ public sealed class AvendarGameAdapter
     private static RoomObservationObserved StampRoomObservation(
         RoomObservationObserved room,
         long sourceSequence,
-        string sessionId)
+        SessionId sessionId)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
             $"room-observation|{sessionId}|{sourceSequence}|{room.RoomId}|{room.DescriptionFingerprint}"));
+        Guid observationId = new(hash.AsSpan(0, 16));
+        ExitObservation[] exits = room.ExitDetails.Select(exit => new ExitObservation(
+            exit.Direction,
+            exit.RawToken ?? exit.Direction,
+            exit.Qualifiers)).ToArray();
+        EntityObservation[] entities = room.Contents.Select((content, index) => new EntityObservation(
+            content.OccurrenceId == Guid.Empty ? DeterministicEntityObservationId(observationId, index) : content.OccurrenceId,
+            content.Kind switch
+            {
+                RoomEntityKind.Occupant => EntityObservationKind.Mob,
+                RoomEntityKind.Object => EntityObservationKind.Item,
+                RoomEntityKind.Corpse => EntityObservationKind.Corpse,
+                RoomEntityKind.Fixture => EntityObservationKind.Interactable,
+                _ => EntityObservationKind.Unknown
+            },
+            content.Description,
+            content.CanonicalName,
+            content.Decorators ?? Array.Empty<string>(),
+            content.Count,
+            content.StateFlags,
+            observationId,
+            sourceSequence)).ToArray();
+        RoomObservation observation = new(
+            observationId,
+            room.RoomName,
+            room.Description,
+            exits,
+            entities,
+            room.VisibilityQuality,
+            sourceSequence,
+            sourceSequence,
+            room.RoomId);
         return room with
         {
-            ObservationId = new Guid(hash.AsSpan(0, 16)),
-            SourceSequence = sourceSequence
+            ObservationId = observationId,
+            SourceSequence = sourceSequence,
+            Observation = observation
         };
     }
 
-    private void ResetSessionParsing()
+    private static Guid DeterministicEntityObservationId(Guid roomObservationId, int index)
     {
-        _streamProcessor.Reset();
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"entity-observation|{roomObservationId:N}|{index}"));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    private void ResetSessionParsing(bool resetObservationSession)
+    {
+        ResetSemanticParsing();
+        if (resetObservationSession)
+        {
+            _frameAssembler.BeginSession();
+        }
+    }
+
+    private void ResetSemanticParsing()
+    {
         _roomContentsParser.Reset();
-        _observationFactory.Reset();
-        _ansiStripper.Reset();
-        _lineBuffer.Clear();
         _responseLines.Clear();
         _pendingNavigationResponses.Clear();
         _navigationResponseSawText = false;
         _navigationSawOpaqueRoom = false;
         _currentSourceSequence = 0;
-        _currentObservationSessionId = string.Empty;
+        _currentObservationSessionId = SessionId.Empty;
         _responseSourceSequence = 0;
         _pendingSpecialMovementCause = null;
         _pendingSpecialMovementSequence = 0;
         _lastObservedRoomId = null;
         _responseMode = ResponseMode.None;
         _scoreCorePublished = false;
+        _lastEffectSnapshot = null;
         _inputMode = SessionInputMode.Unknown;
     }
 }

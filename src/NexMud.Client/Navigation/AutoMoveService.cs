@@ -101,9 +101,9 @@ public sealed class AutoMoveService
                         break;
                     case MovementObserved movement when
                         movement.Movement.Cause != MovementCause.MapperRoute &&
-                        (movement.Movement.Result is MovementResult.SucceededKnownRoom or
-                            MovementResult.SucceededUnknownRoom or MovementResult.Forced or
-                            MovementResult.Teleported) &&
+                        (movement.Movement.Result is MovementResultKind.SucceededKnownRoom or
+                            MovementResultKind.SucceededUnknownRoom or MovementResultKind.Forced or
+                            MovementResultKind.Teleported) &&
                         (Current.Status is AutoMoveStatus.Planning or AutoMoveStatus.Moving or
                             AutoMoveStatus.Recovering or AutoMoveStatus.Replanning):
                         await PauseAsync(

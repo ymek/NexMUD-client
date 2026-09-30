@@ -45,7 +45,7 @@ public sealed record CharacterVitalsChanged(
 public sealed record CharacterPositionObserved(string Position) : IMudEvent;
 public sealed record CharacterPromptSnapshotObserved(CharacterPromptSnapshot Snapshot) : IMudEvent;
 public sealed record GroupSnapshotObserved(GroupSnapshot Snapshot) : IMudEvent;
-public sealed record ActiveEffectsSnapshotObserved(ActiveEffectsSnapshot Snapshot) : IMudEvent;
+public sealed record EffectSnapshotObserved(EffectSnapshot Snapshot) : IMudEvent;
 
 public sealed record CharacterPromptObserved(
     int HitPoints,
@@ -89,7 +89,22 @@ public sealed record SpellsSnapshotObserved(
 public sealed record SkillImproved(string SkillName, int? ExperienceAmount = null) : IMudEvent;
 public sealed record SkillPracticeSucceeded(string SkillName) : IMudEvent;
 
-public sealed record EquipmentChanged(string Slot, string? Item) : IMudEvent;
+public enum EquipmentAction
+{
+    Wear,
+    Remove,
+    Wield,
+    DualWield,
+    Hold,
+    StopUsing,
+    Unknown
+}
+
+public sealed record EquipmentChanged(string Slot, string? Item) : IMudEvent
+{
+    public EquipmentAction Action { get; init; } = EquipmentAction.Unknown;
+    public long SourceSequence { get; init; }
+}
 public sealed record EquipmentSnapshotObserved(
     IReadOnlyList<EquipmentSlotState> Slots,
     ObservationCompleteness Completeness = ObservationCompleteness.Complete) : IMudEvent;
@@ -97,6 +112,8 @@ public sealed record InventorySnapshotObserved(
     IReadOnlyList<string> Items,
     ObservationCompleteness Completeness = ObservationCompleteness.Complete) : IMudEvent;
 public sealed record ItemIdentified(ItemIdentification Item) : IMudEvent;
+public sealed record EntityObservedEvent(EntityObservation Entity) : IMudEvent;
+public sealed record CorpseObserved(EntityObservation Entity) : IMudEvent;
 public enum ItemAcquisitionSourceKind
 {
     Unknown,
@@ -108,7 +125,10 @@ public sealed record ItemAcquired(
     string ItemName,
     string? SourceDescription,
     ItemAcquisitionSourceKind SourceKind,
-    string RawText) : IMudEvent;
+    string RawText) : IMudEvent
+{
+    public long SourceSequence { get; init; }
+}
 
 public sealed record AbilityHelpObserved(AbilityHelpDocument Help) : IMudEvent;
 public sealed record CharacterConditionChanged(string Condition, bool Active) : IMudEvent;
@@ -131,8 +151,9 @@ public sealed record RoomObservationObserved(
 {
     public IReadOnlyList<string> RecentObservations { get; init; } = Array.Empty<string>();
     public Guid ObservationId { get; init; }
-    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Normal;
+    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Visible;
     public long SourceSequence { get; init; }
+    public RoomObservation? Observation { get; init; }
 }
 
 // Retained for compatibility with focused tests and callers which only have post-exit contents.
@@ -240,6 +261,7 @@ public sealed record AutomationWorkflowStateChanged(
     string? Detail = null) : IMudEvent;
 
 public sealed record CombatStateChanged(bool Active, string? TargetId) : IMudEvent;
+public sealed record CombatTargetObserved(string TargetName, long SourceSequence) : IMudEvent;
 public sealed record CombatDamageObserved(DamageObservation Damage) : IMudEvent;
 public sealed record CombatAttackObserved(CombatAttackObservation Attack) : IMudEvent;
 public sealed record CombatTargetConditionObserved(string TargetName, string Condition) : IMudEvent
@@ -250,10 +272,19 @@ public sealed record CombatTargetConditionObserved(string TargetName, string Con
 public sealed record EnemyKilled(string TargetName) : IMudEvent;
 public sealed record CorpseDestroyed(string TargetName) : IMudEvent;
 public sealed record EffectStateChanged(string Effect, bool Active) : IMudEvent;
+public sealed record EffectApplied(ActiveEffect Effect, long SourceSequence) : IMudEvent;
+public sealed record EffectRemoved(string EffectName, long SourceSequence) : IMudEvent;
+public sealed record CombatFleeSucceeded(long SourceSequence) : IMudEvent;
+public sealed record CombatFleeFailed(long SourceSequence, string Detail) : IMudEvent;
+public sealed record CombatMovementRestricted(long SourceSequence, string Detail) : IMudEvent;
+public sealed record EntityDied(string DisplayName, long SourceSequence) : IMudEvent;
 
 public sealed record ExperienceGained(int Amount) : IMudEvent;
 public sealed record ExplorationGained(int Amount, int ExperienceAmount) : IMudEvent;
-public sealed record CurrencyGained(string Currency, int Amount) : IMudEvent;
+public sealed record CurrencyGained(string Currency, int Amount) : IMudEvent
+{
+    public long SourceSequence { get; init; }
+}
 public sealed record CharacterPromoted(int HitPointGain, int ManaGain, int MovementGain) : IMudEvent;
 public sealed record CorpseHarvested(string ItemName, string CorpseDescription, long SourceSequence) : IMudEvent;
 public sealed record CorpseSacrificed(string ItemName, string? Deity, long SourceSequence) : IMudEvent;

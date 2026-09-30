@@ -8,7 +8,10 @@ namespace NexMud.Adapters.Avendar;
 
 public static partial class AvendarItemIdentificationParser
 {
-    public static bool TryParse(IReadOnlyList<string> lines, out ItemIdentified? observed)
+    public static bool TryParse(
+        IReadOnlyList<string> lines,
+        out ItemIdentified? observed,
+        long sourceSequence = 0)
     {
         observed = null;
         if (lines.Count == 0)
@@ -97,6 +100,12 @@ public static partial class AvendarItemIdentificationParser
             .Where(pair => !knownKeys.Contains(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 
+        ItemProperty[] properties = fields
+            .Where(pair => pair.Key.StartsWith("affect ", StringComparison.OrdinalIgnoreCase) ||
+                           pair.Key.StartsWith("effect ", StringComparison.OrdinalIgnoreCase))
+            .Select(pair => new ItemProperty(pair.Key, pair.Value))
+            .ToArray();
+
         ItemIdentification item = new(
             name.Trim(),
             SplitFlags(Value(fields, "flags")),
@@ -114,7 +123,9 @@ public static partial class AvendarItemIdentificationParser
             string.Join("\n", lines))
         {
             Spells = new ReadOnlyCollection<string>(spells.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
-            Size = Value(fields, "size")
+            Size = Value(fields, "size"),
+            Properties = new ReadOnlyCollection<ItemProperty>(properties),
+            SourceSequence = sourceSequence
         };
 
         observed = new ItemIdentified(item);

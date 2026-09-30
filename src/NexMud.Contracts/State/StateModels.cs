@@ -139,6 +139,8 @@ public enum AbilityHelpKind
     Spell
 }
 
+public sealed record ItemProperty(string Name, string Value);
+
 public sealed record ItemIdentification(
     string Name,
     IReadOnlyList<string> Flags,
@@ -155,9 +157,12 @@ public sealed record ItemIdentification(
     IReadOnlyDictionary<string, string> ExtraFields,
     string RawText)
 {
+    public string DisplayName => Name;
     public string? Size { get; init; }
     public IReadOnlyList<string> Spells { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<ItemProperty> Properties { get; init; } = Array.Empty<ItemProperty>();
     public IReadOnlyDictionary<string, string> RawFields => ExtraFields;
+    public long SourceSequence { get; init; }
 }
 
 public sealed record AbilityHelpDocument(
@@ -288,8 +293,10 @@ public sealed record RoomState(
     IReadOnlyList<RoomContentObservation> Contents)
 {
     public IReadOnlyList<string> RecentObservations { get; init; } = Array.Empty<string>();
-    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Unknown;
+    public RoomVisibilityQuality VisibilityQuality { get; init; } = RoomVisibilityQuality.Partial;
     public long LastObservedSequence { get; init; }
+    public DateTimeOffset LastObservedAt { get; init; } = DateTimeOffset.UnixEpoch;
+    public ResolutionQuality ResolutionQuality { get; init; } = ResolutionQuality.Unknown;
 
     public IReadOnlyList<RoomContentObservation> Occupants =>
         Contents.Where(content => content.Kind == RoomEntityKind.Occupant).ToArray();
@@ -369,6 +376,8 @@ public sealed record CombatState(
 {
     public ConditionRange? TargetConditionRange { get; init; }
     public long LastObservedSequence { get; init; }
+    public DateTimeOffset LastObservedAt { get; init; } = DateTimeOffset.UnixEpoch;
+    public ResolutionQuality ResolutionQuality { get; init; } = ResolutionQuality.Unknown;
 }
 
 public sealed record StateSnapshot(
@@ -383,6 +392,7 @@ public sealed record StateSnapshot(
 {
     public ScanObservation? LastScan { get; init; }
     public MovementObservation? LastMovement { get; init; }
+    public long LastSourceSequence { get; init; }
 
     public static StateSnapshot Initial { get; } = new(
         Version: 0,

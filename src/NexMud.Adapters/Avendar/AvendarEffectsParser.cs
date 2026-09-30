@@ -10,7 +10,7 @@ public static partial class AvendarEffectsParser
     public static bool TryParse(
         IReadOnlyList<string> lines,
         long sourceSequence,
-        out ActiveEffectsSnapshot? snapshot)
+        out EffectSnapshot? snapshot)
     {
         snapshot = null;
         List<EffectBuilder> builders = [];
@@ -48,12 +48,12 @@ public static partial class AvendarEffectsParser
                 return false;
             }
 
-            snapshot = new ActiveEffectsSnapshot(Array.Empty<ActiveEffect>(), sourceSequence);
+            snapshot = new EffectSnapshot(Array.Empty<ActiveEffect>(), sourceSequence);
             return true;
         }
 
         ActiveEffect[] effects = builders.Select(builder => builder.Build()).ToArray();
-        snapshot = new ActiveEffectsSnapshot(
+        snapshot = new EffectSnapshot(
             new ReadOnlyCollection<ActiveEffect>(effects),
             sourceSequence);
         return true;
@@ -80,11 +80,11 @@ public static partial class AvendarEffectsParser
             modifier[(by + 4)..].Trim()));
     }
 
-    private static ActiveEffectKind ParseKind(string value) => value.ToLowerInvariant() switch
+    private static EffectKind ParseKind(string value) => value.ToLowerInvariant() switch
     {
-        "spell" => ActiveEffectKind.Spell,
-        "skill" => ActiveEffectKind.Skill,
-        _ => ActiveEffectKind.Unknown
+        "spell" => EffectKind.Spell,
+        "skill" => EffectKind.Skill,
+        _ => EffectKind.Unknown
     };
 
     private static EffectDuration ParseDuration(string value)
@@ -103,7 +103,7 @@ public static partial class AvendarEffectsParser
                 CultureInfo.InvariantCulture,
                 out decimal parsed))
         {
-            return new EffectDuration(EffectDurationKind.Hours, parsed);
+            return new EffectDuration(EffectDurationKind.Timed, parsed);
         }
 
         return EffectDuration.Unknown;
@@ -111,7 +111,7 @@ public static partial class AvendarEffectsParser
 
     private sealed class EffectBuilder
     {
-        public EffectBuilder(string name, ActiveEffectKind kind, EffectDuration duration, long sourceSequence)
+        public EffectBuilder(string name, EffectKind kind, EffectDuration duration, long sourceSequence)
         {
             Name = name;
             Kind = kind;
@@ -120,7 +120,7 @@ public static partial class AvendarEffectsParser
         }
 
         public string Name { get; }
-        public ActiveEffectKind Kind { get; }
+        public EffectKind Kind { get; }
         public EffectDuration Duration { get; }
         public long SourceSequence { get; }
         public List<EffectModifier> Modifiers { get; } = [];

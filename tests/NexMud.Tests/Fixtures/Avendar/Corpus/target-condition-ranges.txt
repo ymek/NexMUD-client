@@ -1,0 +1,9 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 15584-15601, 15946-15981
+# Purpose: target health remains an observed inclusive range rather than a point estimate
+A yreg has a few scratches. [90%-100%]
+A yreg has some small wounds and bruises. [75%-90%]
+A yreg has quite a few wounds. [50%-75%]
+A yreg has some big nasty wounds and scratches. [30%-50%]
+A yreg looks pretty hurt. [15%-30%]
+A yreg is in awful condition. [0%-15%]

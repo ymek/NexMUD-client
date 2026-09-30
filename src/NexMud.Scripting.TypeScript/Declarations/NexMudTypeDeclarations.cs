@@ -77,6 +77,7 @@ interface ItemAcquiredEvent {
   readonly sourceKind: string;
 }
 
+type NexMudSemanticEvent = Readonly<Record<string, unknown>>;
 
 interface MapperRouteLifecycleEvent {
   readonly kind: string;
@@ -97,8 +98,39 @@ interface NexMudEventMap {
   "connection.stateChanged": ConnectionStateChangedEvent;
   "room.entered": RoomEnteredEvent;
   "room.updated": RoomEnteredEvent;
+  "room.observed": NexMudSemanticEvent;
+  "character.promptUpdated": NexMudSemanticEvent;
+  "character.statusChanged": NexMudSemanticEvent;
+  "group.snapshotUpdated": NexMudSemanticEvent;
+  "effect.snapshotUpdated": NexMudSemanticEvent;
+  "effect.applied": NexMudSemanticEvent;
+  "effect.removed": NexMudSemanticEvent;
+  "movement.succeeded": NexMudSemanticEvent;
+  "movement.blocked": NexMudSemanticEvent;
+  "movement.unknownDestination": NexMudSemanticEvent;
+  "movement.forced": NexMudSemanticEvent;
+  "movement.teleported": NexMudSemanticEvent;
+  "scan.updated": NexMudSemanticEvent;
   "combat.started": CombatStateEvent;
   "combat.ended": CombatStateEvent;
+  "combat.targetObserved": NexMudSemanticEvent;
+  "combat.targetConditionUpdated": NexMudSemanticEvent;
+  "combat.damageObserved": NexMudSemanticEvent;
+  "combat.fleeSucceeded": NexMudSemanticEvent;
+  "combat.fleeFailed": NexMudSemanticEvent;
+  "combat.movementRestricted": NexMudSemanticEvent;
+  "entity.observed": NexMudSemanticEvent;
+  "entity.died": NexMudSemanticEvent;
+  "item.identified": NexMudSemanticEvent;
+  "equipment.changed": NexMudSemanticEvent;
+  "item.looted": ItemAcquiredEvent;
+  "currency.received": NexMudSemanticEvent;
+  "corpse.observed": NexMudSemanticEvent;
+  "corpse.harvested": NexMudSemanticEvent;
+  "corpse.sacrificed": NexMudSemanticEvent;
+  "game.commandQueueCleared": NexMudSemanticEvent;
+  "progress.explorationGained": NexMudSemanticEvent;
+  "progress.experienceGained": NexMudSemanticEvent;
   "item.acquired": ItemAcquiredEvent;
   "mapper.routeStarted": MapperRouteLifecycleEvent;
   "mapper.routePlanned": MapperRouteLifecycleEvent;

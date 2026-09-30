@@ -1,0 +1,5 @@
+# Source: Xiganath.txt
+# Source-Lines: 500-529, 23281-23298
+# Purpose: teleport and summon causes are retained only when explicit source evidence exists
+You feel a slight tingling.
+Nyogthua has summoned you!

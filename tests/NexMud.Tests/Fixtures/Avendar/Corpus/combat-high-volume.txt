@@ -1,0 +1,20 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 15946-16015
+# Purpose: sustained real combat excerpt exercises ordered parse/reduce throughput
+A yreg looks pretty hurt. [15%-30%]
+After your healing, Aistyla has a few scratches. [90%-100%]
+Vilayren utters the words 'spiritwrack'
+Vilayren's <<< TREMENDOUS >>> spiritwrack maims a yreg!
+A yreg is in awful condition. [0%-15%]
+Aistyla's *** MIGHTY *** holy divine power mutilates a yreg!
+Vilayren's telling holy searing light tears into a yreg!
+Your POTENT divine wrath mauls a yreg!
+Your FORCEFUL divine wrath mutilates a yreg!
+A yreg is in awful condition. [0%-15%]
+Vilayren utters the words 'spiritwrack'
+Vilayren's <<< TREMENDOUS >>> spiritwrack kills a yreg!
+A yreg is DESTROYED!
+The defeated yreg shrieks piercingly, then slumps to the ground, still.
+You hear a yreg's death cry.
+A yreg's average raking claw injures Aistyla.
+Aistyla's *** MIGHTY *** holy divine power injures a yreg!

@@ -1,0 +1,4 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 7051-7062
+# Purpose: successful flee is combat and movement evidence without invented direction
+You flee from combat!

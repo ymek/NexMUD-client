@@ -2,6 +2,27 @@ using System.Collections.ObjectModel;
 
 namespace NexMud.Contracts.Gameplay;
 
+public readonly record struct SessionId(Guid Value)
+{
+    public static SessionId Empty { get; } = new(Guid.Empty);
+
+    public static SessionId New() => new(Guid.NewGuid());
+
+    public static bool TryParse(string? value, out SessionId sessionId)
+    {
+        if (Guid.TryParse(value, out Guid parsed))
+        {
+            sessionId = new SessionId(parsed);
+            return true;
+        }
+
+        sessionId = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("N");
+}
+
 public enum ObservationKind
 {
     Text,
@@ -45,7 +66,7 @@ public sealed record ObservationMetadata(
 public sealed record GameObservation(
     long Sequence,
     DateTimeOffset ReceivedAt,
-    string SessionId,
+    SessionId SessionId,
     ObservationKind Kind,
     string RawText,
     string PlainText,
@@ -80,19 +101,19 @@ public sealed record CharacterPromptSnapshot(
 
 public sealed record GroupMemberSnapshot(
     string DisplayName,
-    int Level,
-    string ClassCode,
+    int? Level,
+    string? ClassCode,
     ResourceValue Health,
     ResourceValue Mana,
     ResourceValue Movement,
     long ObservedSequence);
 
 public sealed record GroupSnapshot(
-    string? LeaderName,
+    string? LeaderDisplayName,
     IReadOnlyList<GroupMemberSnapshot> Members,
     long SourceSequence);
 
-public enum ActiveEffectKind
+public enum EffectKind
 {
     Unknown,
     Spell,
@@ -101,9 +122,9 @@ public enum ActiveEffectKind
 
 public enum EffectDurationKind
 {
-    Unknown,
-    Hours,
-    Permanent
+    Timed,
+    Permanent,
+    Unknown
 }
 
 public sealed record EffectDuration(EffectDurationKind Kind, decimal? Hours = null)
@@ -116,19 +137,31 @@ public sealed record EffectModifier(string Attribute, string Value);
 
 public sealed record ActiveEffect(
     string Name,
-    ActiveEffectKind Kind,
+    EffectKind Kind,
     EffectDuration Duration,
     IReadOnlyList<EffectModifier> Modifiers,
     long SourceSequence);
 
-public sealed record ActiveEffectsSnapshot(
+public sealed record EffectSnapshot(
     IReadOnlyList<ActiveEffect> Effects,
     long SourceSequence);
 
 public sealed record ConditionRange(
-    int MinPercent,
-    int MaxPercent,
-    string Descriptor);
+    int MinPercentInclusive,
+    int MaxPercentInclusive,
+    string Descriptor)
+{
+    public int MinPercent => MinPercentInclusive;
+    public int MaxPercent => MaxPercentInclusive;
+}
+
+public enum ResolutionQuality
+{
+    Authoritative,
+    Observed,
+    Provisional,
+    Unknown
+}
 
 public enum EntityObservationKind
 {
@@ -149,12 +182,29 @@ public sealed record EntityObservation(
     IReadOnlyList<string> Qualifiers,
     int Count,
     IReadOnlyList<string> StateFlags,
-    Guid? RoomObservationId = null);
+    Guid? RoomObservationId = null,
+    long SourceSequence = 0);
+
+public sealed record ExitObservation(
+    string Direction,
+    string RawToken,
+    IReadOnlyList<string> Qualifiers);
+
+public sealed record RoomObservation(
+    Guid ObservationId,
+    string? Name,
+    string? Description,
+    IReadOnlyList<ExitObservation> Exits,
+    IReadOnlyList<EntityObservation> Entities,
+    RoomVisibilityQuality VisibilityQuality,
+    long SourceSequenceStart,
+    long SourceSequenceEnd,
+    string? RoomId = null);
 
 public enum RoomVisibilityQuality
 {
-    Unknown,
-    Normal,
+    Visible,
+    Partial,
     Opaque
 }
 
@@ -172,7 +222,7 @@ public enum MovementCause
     Unknown
 }
 
-public enum MovementResult
+public enum MovementResultKind
 {
     SucceededKnownRoom,
     SucceededUnknownRoom,
@@ -184,14 +234,25 @@ public enum MovementResult
     Unknown
 }
 
+public enum MovementBlockReason
+{
+    None,
+    NoExit,
+    CombatRestriction,
+    DoorClosed,
+    DoorLocked,
+    Unknown
+}
+
 public sealed record MovementObservation(
     MovementCause Cause,
-    MovementResult Result,
+    MovementResultKind Result,
     string? Direction,
     string? DestinationRoomId,
     string? Detail,
     long SourceSequence,
-    Guid? CommandId = null);
+    Guid? CommandId = null,
+    MovementBlockReason BlockReason = MovementBlockReason.None);
 
 public enum ScanVisibility
 {

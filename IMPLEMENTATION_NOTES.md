@@ -1,4 +1,17 @@
-# NexMUD 0.30.1
+# NexMUD 0.31.0
+
+## Gameplay observation, semantic normalization, and state reconciliation
+
+- Introduced the immutable `GameObservation` envelope and `GameFrameAssembler` as the canonical live/replay boundary after protocol/text decoding.
+- Preserved raw text, plain text, ANSI runs, wall-clock observation time, session identity, and monotonic source sequence before Avendar semantics are parsed.
+- Reworked Avendar prompt parsing into composable resource/TNL/EP/game-clock/terrain/light/unknown-field components with signed, unclamped resource values.
+- Added conservative outbound command journaling and explicit server command-queue clear semantics without treating prompts as command acknowledgement.
+- Normalized room, movement, scan, group, effect, combat, entity, item, equipment, corpse/loot, status, and progress evidence into typed semantic events and reducer-owned state.
+- Added semantic envelope traceability (`EventId`, `SessionId`, `SourceSequence`, `ObservedAt`) plus parser/reducer fault isolation.
+- Migrated Mapper/Codex and script/Automation event projections away from hidden rendered-transcript domain parsing while preserving raw-text triggers and presentation-only transformations.
+- Added the four-log Avendar regression corpus fixture harness, semantic/reducer/Mapper/Codex golden coverage, high-volume combat ordering test, parser inventory, and formal acceptance audit.
+- Jev and Connection Profiles are intentionally unchanged by this slice.
+- SemVer release: 0.31.0. macOS build: 31000.
 
 ## Startup regression fix
 

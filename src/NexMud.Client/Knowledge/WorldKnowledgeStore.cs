@@ -4,6 +4,7 @@ using System.Threading.Channels;
 using NexMud.Adapters.Avendar;
 using NexMud.Client.Settings;
 using NexMud.Contracts.Events;
+using NexMud.Contracts.Gameplay;
 using NexMud.Contracts.Jev;
 using NexMud.Contracts.State;
 using NexMud.Core.Events;
@@ -1807,25 +1808,38 @@ public sealed class WorldKnowledgeStore
             case NavigationResponseCompleted response when MapperRecordingEnabled() && !response.RoomObserved:
                 TakePendingTraversalByAction(response.ActionId, response.Direction, envelope.Timestamp);
                 break;
-            case NavigationFailed failed when MapperRecordingEnabled():
+            case MovementObserved movement when MapperRecordingEnabled() &&
+                movement.Movement.Result is MovementResultKind.Blocked or MovementResultKind.CombatRestricted:
             {
+                if (movement.Movement.Result == MovementResultKind.CombatRestricted)
+                {
+                    break;
+                }
+
                 string? failedRoomId = _currentRoomId ?? state.Room.Id;
                 PendingTraversal? failedTraversal = TakePendingTraversal(
-                    failed.Direction,
+                    movement.Movement.Direction,
                     failedRoomId,
                     envelope.Timestamp);
-                string? failedDirection = failedTraversal?.Direction ?? failed.Direction;
-                if (MapperPersistenceEnabled() && !string.IsNullOrWhiteSpace(failedRoomId) && !string.IsNullOrWhiteSpace(failedDirection))
+                string? failedDirection = failedTraversal?.Direction ?? movement.Movement.Direction;
+                if (MapperPersistenceEnabled() &&
+                    !string.IsNullOrWhiteSpace(failedRoomId) &&
+                    !string.IsNullOrWhiteSpace(failedDirection))
                 {
-                    ExitDoorState doorState = failed.Reason.Contains("locked", StringComparison.OrdinalIgnoreCase)
-                        ? ExitDoorState.Locked
-                        : failed.Reason.Contains("closed", StringComparison.OrdinalIgnoreCase)
-                            ? ExitDoorState.Closed
-                            : ExitDoorState.Unknown;
+                    ExitDoorState doorState = movement.Movement.BlockReason switch
+                    {
+                        MovementBlockReason.DoorLocked => ExitDoorState.Locked,
+                        MovementBlockReason.DoorClosed => ExitDoorState.Closed,
+                        _ => ExitDoorState.Unknown
+                    };
                     await PersistExitStateAsync(
                         connection,
                         failedRoomId!,
-                        new RoomExitStateChanged(failedDirection!, doorState, ExitTraversability.Blocked, failed.Reason),
+                        new RoomExitStateChanged(
+                            failedDirection!,
+                            doorState,
+                            ExitTraversability.Blocked,
+                            movement.Movement.Detail),
                         envelope.Timestamp,
                         cancellationToken).ConfigureAwait(false);
                     NotifyMapperKnowledgeChanged();

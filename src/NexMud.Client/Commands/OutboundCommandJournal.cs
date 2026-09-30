@@ -2,12 +2,13 @@ using System.Collections.ObjectModel;
 using System.Threading.Channels;
 using NexMud.Contracts.Actions;
 using NexMud.Contracts.Events;
+using NexMud.Contracts.Gameplay;
 
 namespace NexMud.Client.Commands;
 
 /// <summary>
-/// Bounded evidence journal for commands sent to the MUD. It intentionally does not
-/// infer command completion from prompts or ordinary server output.
+/// Bounded evidence journal for commands sent to the MUD. Prompt arrival is never
+/// interpreted as command completion or acknowledgement.
 /// </summary>
 public sealed class OutboundCommandJournal
 {
@@ -15,6 +16,8 @@ public sealed class OutboundCommandJournal
     private readonly object _sync = new();
     private readonly List<OutboundCommandRecord> _records = [];
     private readonly int _capacity;
+    private SessionId _sessionId = SessionId.Empty;
+    private long? _lastSourceSequence;
 
     public OutboundCommandJournal(ChannelReader<EventEnvelope> events, int capacity = 1024)
     {
@@ -39,6 +42,9 @@ public sealed class OutboundCommandJournal
             {
                 switch (envelope.Payload)
                 {
+                    case GameObservationReceived observed:
+                        ObserveSource(observed.Observation);
+                        break;
                     case ActionDispatching dispatch:
                         RecordDispatch(envelope, dispatch);
                         break;
@@ -49,7 +55,7 @@ public sealed class OutboundCommandJournal
                         MarkQueueCleared(cleared.SourceSequence);
                         break;
                     case ConnectionStateChanged { Status: ConnectionStatus.Connected }:
-                        BeginSession();
+                        BeginSession(SessionId.Empty);
                         break;
                     case ConnectionStateChanged { Status: ConnectionStatus.Disconnected }:
                         MarkSessionEnded();
@@ -62,21 +68,35 @@ public sealed class OutboundCommandJournal
         }
     }
 
+    private void ObserveSource(GameObservation observation)
+    {
+        lock (_sync)
+        {
+            if (_sessionId != observation.SessionId)
+            {
+                _records.Clear();
+                _sessionId = observation.SessionId;
+            }
+            _lastSourceSequence = observation.Sequence;
+        }
+    }
+
     private void RecordDispatch(EventEnvelope envelope, ActionDispatching dispatch)
     {
         CommandOrigin origin = dispatch.Provenance?.Origin ?? CommandOrigin.User;
         string text = dispatch.Sensitive ? "<redacted>" : dispatch.Command;
-        OutboundCommandRecord record = new(
-            dispatch.ActionId,
-            origin,
-            text,
-            envelope.Sequence,
-            envelope.Timestamp,
-            OutboundCommandState.Dispatched,
-            dispatch.Provenance?.ParentOperationId);
-
         lock (_sync)
         {
+            OutboundCommandRecord record = new(
+                dispatch.ActionId,
+                _sessionId,
+                origin,
+                text,
+                envelope.Timestamp,
+                _lastSourceSequence,
+                OutboundCommandState.Dispatched,
+                dispatch.Provenance?.ParentOperationId);
+
             _records.Add(record);
             if (_records.Count > _capacity)
             {
@@ -101,27 +121,38 @@ public sealed class OutboundCommandJournal
     {
         lock (_sync)
         {
-            for (int index = 0; index < _records.Count; index++)
+            _lastSourceSequence = sourceSequence;
+            int clearIndex = _records.FindLastIndex(record =>
+                record.SessionId == _sessionId &&
+                record.Text.Equals("clear", StringComparison.OrdinalIgnoreCase));
+            if (clearIndex < 0)
+            {
+                return;
+            }
+
+            // The server confirms its queue was cleared, but does not report which
+            // individual queued commands had already executed. Preserve the clear
+            // command itself and only mark later unresolved commands conservatively.
+            for (int index = clearIndex + 1; index < _records.Count; index++)
             {
                 OutboundCommandRecord record = _records[index];
-                if (record.State == OutboundCommandState.SessionEnded)
+                if (record.SessionId != _sessionId ||
+                    record.State is OutboundCommandState.ServerQueueCleared or OutboundCommandState.SessionEnded)
                 {
                     continue;
                 }
-
-                // SourceSequence is the game-observation sequence rather than the global
-                // event sequence, so it is evidence only. Do not try to identify which
-                // commands executed before the server cleared its queue.
                 _records[index] = record with { State = OutboundCommandState.ServerQueueCleared };
             }
         }
     }
 
-    private void BeginSession()
+    private void BeginSession(SessionId sessionId)
     {
         lock (_sync)
         {
             _records.Clear();
+            _sessionId = sessionId;
+            _lastSourceSequence = null;
         }
     }
 

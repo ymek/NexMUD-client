@@ -1,0 +1,8 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 428-447
+# Purpose: follow is explicit movement-cause evidence
+Ialoes leaves west.
+Tyaderin leaves west.
+You follow Ialoes.
+A Black-Stoned Passage
+[Exits: east west]

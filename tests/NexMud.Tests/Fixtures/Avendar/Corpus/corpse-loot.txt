@@ -1,0 +1,11 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 13807-13841
+# Purpose: death and harvest normalize while external-player loot/currency remain raw evidence
+Nyogthua is DEAD!!
+Nyogthua's heart is torn from its chest.
+Ialoes gets a runed amulet wrought from red metal from the corpse of Nyogthua.
+Ialoes gets 5 copper coins from the corpse of Nyogthua.
+Ialoes gets 2 silver coins from the corpse of Nyogthua.
+Ialoes gets 5 gold coins from the corpse of Nyogthua.
+Ialoes gets 2 platinum coins from the corpse of Nyogthua.
+You bend down, and cut a bit of hair off the corpse of Nyogthua.

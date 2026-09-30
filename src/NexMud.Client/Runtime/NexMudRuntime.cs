@@ -46,7 +46,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
         SettingsStore = settingsStore ?? new ClientSettingsStore();
         SecretStore = secretStore ?? SecretStoreFactory.CreateDefault();
         Events = new EventPipeline();
-        State = new StateReducer(Events.StateEvents);
+        State = new StateReducer(Events.StateEvents, Events);
         CommandJournal = new OutboundCommandJournal(Events.SubscribeLossless());
         Transport = new TcpMudTransport(Events);
         Authority = new JevAuthorityService(Events);
@@ -341,7 +341,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
                 Eor: protocols.Eor != ProtocolPolicy.Disabled),
             ClientName: "NexMUD",
-            ClientVersion: "0.30.1");
+            ClientVersion: "0.31.0");
     }
 
     public MudConnectionOptions CreateConnectionOptions(string? host, int? port, bool? useTls)
