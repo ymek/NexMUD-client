@@ -13,6 +13,21 @@ public static class NexMudTypeDeclarations
     public const string ModuleSpecifier = "@nexmud/api";
 
     public const string Source = """
+type AutomationInvocationSourceKind =
+  | "Alias" | "Keybinding" | "TextTrigger" | "SemanticTrigger"
+  | "Timer" | "StateRule" | "Workflow" | "ManualScriptRun";
+
+interface AutomationInvocationContext<TArguments = Readonly<Record<string, unknown>>> {
+  readonly invocationId: string;
+  readonly profileId: string;
+  readonly sourceKind: AutomationInvocationSourceKind;
+  readonly sourceDefinitionId: string;
+  readonly startedAt: string;
+  readonly arguments: TArguments;
+  readonly captures: Readonly<Record<string, string>>;
+  readonly semanticEvent: Readonly<Record<string, unknown>> | null;
+}
+
 interface NexMudResourceState {
   readonly current: number | null;
   readonly maximum: number | null;
@@ -195,12 +210,12 @@ interface NexMudStorageApi {
 }
 
 interface NexMudLogApi {
+  trace(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
   debug(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
   info(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
   warn(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
   error(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
 }
-
 
 interface NexMudMapperRoomRef { readonly roomId: string; }
 
@@ -264,6 +279,17 @@ interface NexMudMapperApi {
   move(direction: NexMudDirection | string, options?: NexMudMapperMoveOptions): Promise<NexMudMovementResult>;
 }
 
+interface NexMudCodexResult {
+  readonly kind: string;
+  readonly key: string;
+  readonly title: string;
+  readonly subtitle: string | null;
+}
+
+interface NexMudCodexApi {
+  search(query: string, limit?: number): Promise<readonly NexMudCodexResult[]>;
+}
+
 interface NexMudApi {
   readonly events: NexMudEventsApi;
   readonly commands: NexMudCommandsApi;
@@ -272,12 +298,15 @@ interface NexMudApi {
   readonly timers: NexMudTimersApi;
   readonly storage: NexMudStorageApi;
   readonly mapper: NexMudMapperApi;
+  readonly codex: NexMudCodexApi;
 }
 
 declare const nex: NexMudApi;
 
 declare module "@nexmud/api" {
   export {
+    AutomationInvocationContext,
+    AutomationInvocationSourceKind,
     CharacterVitalsChangedEvent,
     CombatStateEvent,
     ConnectionStateChangedEvent,
@@ -286,6 +315,8 @@ declare module "@nexmud/api" {
     RoomEnteredEvent,
     NexMudApi,
     NexMudCharacterStateSnapshot,
+    NexMudCodexApi,
+    NexMudCodexResult,
     NexMudCommandResult,
     NexMudCommandsApi,
     NexMudEventMap,

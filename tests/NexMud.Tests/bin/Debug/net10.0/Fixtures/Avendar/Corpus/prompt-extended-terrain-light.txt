@@ -1,0 +1,5 @@
+# Source: Xiganath.txt
+# Extraction: exact prompt observed repeatedly near the Shrine of Xiganath where output
+# Purpose: extended prompt fields retain terrain and light tokens
+<1044(1044)hp 522(580)m 448(448)mv 8869ep |inside|light|
+7:30> where

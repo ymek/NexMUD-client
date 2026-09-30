@@ -27,6 +27,7 @@ public enum KeybindingActionKind
     SearchScrollback,
     SendCommand,
     RunAutomation,
+    RunScriptFunction,
     TogglePane,
     ToggleJev,
     MapperPause,

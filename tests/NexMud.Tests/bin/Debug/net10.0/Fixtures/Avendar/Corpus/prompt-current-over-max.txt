@@ -1,0 +1,5 @@
+# Source: Xiganath.txt
+# Source-Lines: 13999-14003
+# Purpose: current health exceeds displayed maximum and must not be clamped
+<1043(1028)hp 580(590)m 448(448)mv 8794ep |inside|light|
+6:00> You stop using a pair of runed spectacles.

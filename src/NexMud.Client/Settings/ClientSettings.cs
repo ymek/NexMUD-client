@@ -36,7 +36,8 @@ public sealed record ClientSettings(
     IReadOnlyList<ConnectionProfile>? ConnectionProfiles = null,
     string? ActiveConnectionProfileId = null,
     GeneralPreferences? General = null,
-    AppearancePreferences? Appearance = null)
+    AppearancePreferences? Appearance = null,
+    IReadOnlyList<SemanticTriggerRule>? SemanticTriggers = null)
 {
     public static ClientSettings Default { get; } = new(
         JevPreset.Off,
@@ -71,7 +72,8 @@ public sealed record ClientSettings(
         [ConnectionProfile.Default],
         ConnectionProfile.Default.Id,
         new GeneralPreferences(),
-        new AppearancePreferences());
+        new AppearancePreferences(),
+        []);
 
     [JsonIgnore]
     public IReadOnlyList<ConnectionProfile> EffectiveConnectionProfiles =>

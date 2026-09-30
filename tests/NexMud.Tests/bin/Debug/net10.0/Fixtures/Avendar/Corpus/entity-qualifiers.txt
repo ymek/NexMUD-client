@@ -1,0 +1,5 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 2625-2641
+# Purpose: known and unknown entity qualifiers remain source evidence
+(Translucent) (White Aura) Vilayren the ch'taren is flying here.
+(White Aura) Aistyla the aelin is flying here.

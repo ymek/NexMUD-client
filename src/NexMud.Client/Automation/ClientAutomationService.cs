@@ -319,6 +319,20 @@ public sealed class ClientAutomationService
             }
         }
 
+        if (workflow.Actions is { Count: > 0 } && _compiledAutomation is not null)
+        {
+            bool dispatched = await _compiledAutomation.RunWorkflowActionsAsync(
+                workflow,
+                context.Event,
+                Variables,
+                cancellationToken).ConfigureAwait(false);
+            if (!dispatched && workflow.FailureMode == AutomationWorkflowFailureMode.Stop)
+            {
+                await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Failed, steps.Length, steps.Length, "Compiled workflow actions were not dispatched.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
         await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Completed, steps.Length, steps.Length, null, cancellationToken).ConfigureAwait(false);
     }
 

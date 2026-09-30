@@ -1,0 +1,6 @@
+# Source: Xiganath.txt
+# Source-Lines: 10578-10596
+# Purpose: entering a portal is non-directional movement with a known resulting room
+You enter the darkened portal.
+Within a Vast Corridor
+[Exits: north]

@@ -271,6 +271,7 @@ public sealed partial class AvendarRoomContentsParser
         AvendarEntityObservationParser.ParsedEntityText parsed =
             AvendarEntityObservationParser.ParseDecorators(description);
         string undecorated = parsed.Undecorated;
+        IReadOnlyList<string> rawDecorators = StripDecorators(description).Decorators;
 
         RoomContentObservation content;
         if (LooksLikeCorpse(undecorated))
@@ -309,7 +310,7 @@ public sealed partial class AvendarRoomContentsParser
         return content with
         {
             Count = parsed.Count,
-            Decorators = parsed.Qualifiers.Count == 0 ? null : parsed.Qualifiers,
+            Decorators = rawDecorators.Count == 0 ? null : rawDecorators,
             StateFlags = parsed.StateFlags
         };
     }
@@ -367,6 +368,7 @@ public sealed partial class AvendarRoomContentsParser
     {
         List<string> decorators = [];
         string remaining = description;
+        bool first = true;
         while (true)
         {
             Match match = DecoratorRegex().Match(remaining);
@@ -375,8 +377,18 @@ public sealed partial class AvendarRoomContentsParser
                 break;
             }
 
-            decorators.Add(match.Groups["decorator"].Value);
+            string decorator = match.Groups["decorator"].Value;
             remaining = remaining[match.Length..].TrimStart();
+            if (first)
+            {
+                first = false;
+                string inner = decorator[1..^1].Trim();
+                if (int.TryParse(inner, out _))
+                {
+                    continue;
+                }
+            }
+            decorators.Add(decorator);
         }
 
         return (remaining, new ReadOnlyCollection<string>(decorators.ToArray()));

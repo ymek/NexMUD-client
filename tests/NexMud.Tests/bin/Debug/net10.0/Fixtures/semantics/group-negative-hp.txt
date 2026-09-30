@@ -1,0 +1,6 @@
+# Source: Void Drake Fight.txt
+Yisharja's group:
+[51 VSc] Sueisha          1080/1080 hp 1356/1356 mana  459/ 459 mv
+[51 Alc] Anahkra          1199/1199 hp 1336/1336 mana  495/ 495 mv
+[51 Brd] Olyeasa           -19/1154 hp  929/1041 mana  490/ 490 mv
+[51 ETe] A large hen        25/  25 hp  704/ 704 mana  467/ 467 mv

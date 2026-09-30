@@ -36,6 +36,7 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
         IScriptScheduler? scheduler = null,
         ScriptEventHub? eventHub = null,
         IScriptCommands? commands = null,
+        Func<string>? activeProfileId = null,
         CancellationToken applicationCancellation = default)
     {
         _ownsSupervisor = supervisor is null;
@@ -49,6 +50,9 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
         JavaScriptRuntime = new JintScriptRuntime(
             Supervisor,
             diagnostics: new ClientScriptDiagnosticsSink(EventSink));
+        Functions = new ClientScriptFunctionInvoker(
+            JavaScriptRuntime,
+            activeProfileId ?? (() => "default"));
         Commands = commands ?? new ClientScriptCommands(actions, state, Scheduler);
         State = new ClientScriptStateHost(state);
         Mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
@@ -61,6 +65,7 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
     public ScriptEventHub EventHub { get; }
     public IScriptRuntime Runtime { get; }
     public IJavaScriptRuntime JavaScriptRuntime { get; }
+    public IScriptFunctions Functions { get; }
     public IScriptCommands Commands { get; }
     public IScriptState State { get; }
     public IScriptMapper Mapper { get; }
@@ -115,6 +120,7 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
             Scheduler,
             new ClientScriptUiHost(moduleId, EventSink),
             new ClientScriptLogHost(moduleId, EventSink),
+            Functions,
             commandOrigin,
             ownerName);
     }

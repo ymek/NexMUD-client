@@ -1,0 +1,4 @@
+# Source: Void Drake Fight.txt
+# Source-Lines: 64-77
+# Purpose: combat movement restriction is a structured combat and movement failure
+No way! You are still fighting!

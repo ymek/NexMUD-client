@@ -97,7 +97,9 @@ public sealed class NexMudRuntime : IAsyncDisposable
             supervisor: ScriptExecution,
             scheduler: ScriptScheduler,
             commands: ScriptCommands,
+            activeProfileId: () => ActiveConnectionProfile.Id,
             applicationCancellation: _cts.Token);
+        ScriptWorkspace = new ScriptWorkspaceService(Scripting, Events, () => ActiveConnectionProfile.Id);
         Navigator = new AutoMoveService(
             _routeControlEvents,
             State,
@@ -159,6 +161,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
     public MapperMovementCoordinator MovementCoordinator { get; }
     public IScriptMapper ScriptMapper { get; }
     public ClientScriptPlatform Scripting { get; }
+    public ScriptWorkspaceService ScriptWorkspace { get; }
     public AvendarGameAdapter Avendar { get; }
     public JevDecisionCoordinator JevCoordinator { get; }
     public ClientAutomationService Automation { get; }
@@ -225,6 +228,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
         JevAuthoritySnapshot authority = JevAuthoritySnapshot.Create(loaded.JevPreset, loaded.JevDomains);
         await Authority.ApplyProfileAsync(authority, cancellationToken).ConfigureAwait(false);
         await Authority.SetEnabledAsync(loaded.JevEnabled, cancellationToken).ConfigureAwait(false);
+        await ScriptWorkspace.ActivateProfileAsync(loaded.ActiveConnectionProfile.Id, cancellationToken).ConfigureAwait(false);
         await AutomationCompiler.ReloadAsync(loaded, cancellationToken).ConfigureAwait(false);
     }
 
@@ -374,6 +378,39 @@ public sealed class NexMudRuntime : IAsyncDisposable
         }
     }
 
+    public async Task SaveAutomationCompositionAsync(
+        IReadOnlyList<CommandAlias> aliases,
+        IReadOnlyList<TriggerRule> triggers,
+        IReadOnlyList<SemanticTriggerRule> semanticTriggers,
+        IReadOnlyList<GameRule> gameRules,
+        IReadOnlyList<AutomationWorkflow> workflows,
+        IReadOnlyList<CommandTimer> timers,
+        IReadOnlyList<CommandKeyBinding> keyBindings,
+        CancellationToken cancellationToken = default)
+    {
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with
+            {
+                Aliases = aliases.ToArray(),
+                Triggers = triggers.ToArray(),
+                SemanticTriggers = semanticTriggers.ToArray(),
+                GameRules = gameRules.ToArray(),
+                Workflows = workflows.ToArray(),
+                Timers = timers.ToArray(),
+                KeyBindings = keyBindings.ToArray()
+            };
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+            Interaction.Configure(Settings);
+            await AutomationCompiler.ReloadAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
     public async Task SaveMapperPreferencesAsync(
         MapperPreferences mapper,
         CancellationToken cancellationToken = default)
@@ -463,6 +500,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
         {
             _settingsGate.Release();
         }
+        await ScriptWorkspace.ActivateProfileAsync(active.Id, cancellationToken).ConfigureAwait(false);
     }
 
     private static ProtocolPreferences ToLegacyProtocolPreferences(ConnectionProtocolPreferences protocols) => new(

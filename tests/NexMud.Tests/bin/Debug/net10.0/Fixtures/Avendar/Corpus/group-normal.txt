@@ -1,0 +1,8 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 51-62
+# Purpose: authoritative group snapshot with ordinary signed resources
+Saelinu's group:
+[51 Mob] The water elemental 1269/1269 hp    0/   0 mana  100/ 100 mv
+[51 Fig] Aistyla          1231/1267 hp  177/ 640 mana  492/ 500 mv
+[51 SSc] Vilayren         1197/1197 hp  920/1698 mana  559/ 571 mv
+[51 WSc] Saelinu          1049/1049 hp 1104/1104 mana  470/ 486 mv

@@ -1,0 +1,10 @@
+# Source: Xiganath.txt
+# Source-Lines: 500-529
+# Purpose: visible room observation with exits, player qualifier, and hidden mob
+A Black-Stoned Passage
+  You stand in a low tunnel walled with rough, black stones.  The ceiling
+and floor seem to be made of the same hard coal-like mineral.
+
+[Exits: east south west]
+(White Aura) Elaenetra the chaja is here.
+(Hide) A demonic m'elsoth hides in the shadows, fangs dripping.

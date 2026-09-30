@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -17,6 +18,7 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
 {
     private readonly string _executable;
     private readonly IScriptCompileCache _cache;
+    private readonly ConcurrentDictionary<string, IReadOnlyList<ExportedScriptFunction>> _exportCache = new(StringComparer.Ordinal);
     private string _compilerIdentity = "typescript-external";
     private readonly SemaphoreSlim _identityGate = new(1, 1);
 
@@ -64,8 +66,11 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         }
 
         string cacheKey = ScriptCompileCacheKey.Compute(request, compilerIdentity, ScriptApiVersion.Current);
-        if (_cache.TryGet(cacheKey, out CompiledScriptPackage? cached) && cached is not null)
-            return new ScriptCompileResult(true, cached, Array.Empty<ScriptCompilerDiagnostic>());
+        if (_cache.TryGet(cacheKey, out CompiledScriptPackage? cached) && cached is not null &&
+            _exportCache.TryGetValue(cacheKey, out IReadOnlyList<ExportedScriptFunction>? cachedExports))
+        {
+            return new ScriptCompileResult(true, cached, Array.Empty<ScriptCompilerDiagnostic>(), cachedExports);
+        }
 
         string root = Path.Combine(Path.GetTempPath(), $"nexmud-ts-{Guid.NewGuid():N}");
         string sourceRoot = Path.Combine(root, "src");
@@ -105,7 +110,7 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                         ScriptDiagnosticSeverity.Error,
                         "NEXTS0004",
                         string.IsNullOrWhiteSpace(process.Output) ? "TypeScript compilation failed." : process.Output.Trim())];
-                return new ScriptCompileResult(false, null, diagnostics);
+                return new ScriptCompileResult(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
             }
 
             List<CompiledScriptModule> modules = [];
@@ -113,8 +118,10 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
             {
                 string sourceExtension = Path.GetExtension(source.Path);
                 if (!sourceExtension.Equals(".ts", StringComparison.OrdinalIgnoreCase) &&
-                    !sourceExtension.Equals(".tsx", StringComparison.OrdinalIgnoreCase))
+                    !sourceExtension.Equals(".tsx", StringComparison.OrdinalIgnoreCase) &&
+                    !sourceExtension.Equals(".js", StringComparison.OrdinalIgnoreCase))
                     continue;
+                if (source.Path.EndsWith(".d.ts", StringComparison.OrdinalIgnoreCase)) continue;
 
                 string emittedRelative = (Path.ChangeExtension(source.Path, ".js")
                     ?? throw new InvalidOperationException("Unable to derive emitted module path.")).Replace('\\', '/');
@@ -142,9 +149,14 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 request.Manifest.Permissions,
                 request.Manifest.OwnerKind,
                 request.Manifest.RuntimeProfile);
-            CompiledScriptPackage package = new(compiledManifest, modules, compilerIdentity, cacheKey);
+            IReadOnlyList<ExportedScriptFunction> exports = TypeScriptDeclarationExportReader.Discover(
+                request.Manifest.Id,
+                request.Sources,
+                outputRoot);
+            CompiledScriptPackage package = new(compiledManifest, modules, compilerIdentity, cacheKey, exports);
             _cache.Put(package);
-            return new ScriptCompileResult(true, package, diagnostics);
+            _exportCache[cacheKey] = exports;
+            return new ScriptCompileResult(true, package, diagnostics, exports);
         }
         catch (System.ComponentModel.Win32Exception)
         {
@@ -180,8 +192,12 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 ["module"] = "ES2022",
                 ["moduleResolution"] = "Bundler",
                 ["strict"] = options.Strict,
+                ["allowJs"] = true,
+                ["checkJs"] = true,
                 ["sourceMap"] = options.EmitSourceMaps,
                 ["inlineSources"] = options.EmitSourceMaps,
+                ["declaration"] = true,
+                ["declarationMap"] = options.EmitSourceMaps,
                 ["noEmitOnError"] = true,
                 ["skipLibCheck"] = true,
                 ["rootDir"] = sourceRoot,
@@ -189,7 +205,12 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 ["lib"] = new[] { "ES2022" },
                 ["types"] = Array.Empty<string>()
             },
-            include = new[] { Path.Combine(sourceRoot, "**", "*.ts"), Path.Combine(sourceRoot, "**", "*.d.ts") }
+            include = new[]
+            {
+                Path.Combine(sourceRoot, "**", "*.ts"),
+                Path.Combine(sourceRoot, "**", "*.d.ts"),
+                Path.Combine(sourceRoot, "**", "*.js")
+            }
         };
         return JsonSerializer.Serialize(config);
     }

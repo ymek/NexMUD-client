@@ -1006,6 +1006,21 @@ public sealed class CapabilityScriptHost : IScriptHost
         { _permissions.Demand(ScriptCapability.Log); return _inner.WriteAsync(level, message, dataJson, cancellationToken); }
     }
 
+    private sealed class FunctionsGate : IScriptFunctions
+    {
+        private readonly IScriptPermissionSet _permissions;
+        private readonly IScriptFunctions _inner;
+
+        public FunctionsGate(IScriptPermissionSet permissions, IScriptFunctions inner)
+        {
+            _permissions = permissions;
+            _inner = inner;
+        }
+
+        public Task<ScriptFunctionInvocationResult> InvokeAsync(ScriptFunctionInvocationDescriptor descriptor, CancellationToken cancellationToken = default)
+        { _permissions.Demand(ScriptCapability.InvokeScriptFunctions); return _inner.InvokeAsync(descriptor, cancellationToken); }
+    }
+
     private sealed class EventGate : IScriptEvents
     {
         private readonly IScriptPermissionSet _permissions;
@@ -1032,6 +1047,7 @@ public sealed class CapabilityScriptHost : IScriptHost
         IScriptScheduler timers,
         IScriptUi ui,
         IScriptLog log,
+        IScriptFunctions functions,
         ScriptCommandOrigin commandOrigin = ScriptCommandOrigin.Script,
         string? ownerName = null)
     {
@@ -1051,6 +1067,7 @@ public sealed class CapabilityScriptHost : IScriptHost
         Timers = new SchedulerGate(permissions, timers);
         Ui = new UiGate(permissions, ui);
         Log = new LogGate(permissions, log);
+        Functions = new FunctionsGate(permissions, functions);
     }
 
     public ScriptModuleId ModuleId { get; }
@@ -1064,4 +1081,5 @@ public sealed class CapabilityScriptHost : IScriptHost
     public IScriptScheduler Timers { get; }
     public IScriptUi Ui { get; }
     public IScriptLog Log { get; }
+    public IScriptFunctions Functions { get; }
 }

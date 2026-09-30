@@ -1,0 +1,3 @@
+# Source: Mines 3_31_15.txt
+east
+It is pitch black ...

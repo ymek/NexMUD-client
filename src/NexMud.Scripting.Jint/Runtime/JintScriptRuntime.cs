@@ -66,7 +66,6 @@ public sealed class JintScriptRuntime : IJavaScriptRuntime
         }
     }
 
-
     public async Task ReloadAsync(CompiledScriptPackage package, IScriptHost host, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -112,6 +111,22 @@ public sealed class JintScriptRuntime : IJavaScriptRuntime
             await previous.DisposeAsync().ConfigureAwait(false);
     }
 
+    public Task<ScriptFunctionInvocationResult> InvokeExportAsync(
+        ScriptFunctionInvocationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!_instances.TryGetValue(request.FunctionRef.PackageId, out JintScriptInstance? instance) ||
+            instance.State != ScriptInstanceState.Running)
+        {
+            return Task.FromResult(ScriptFunctionInvocationResult.Failed(
+                "ScriptRuntimeUnavailable",
+                $"Script package '{request.FunctionRef.PackageId}' is not running."));
+        }
+        return instance.InvokeExportAsync(request, cancellationToken);
+    }
+
     public async Task<bool> UnloadAsync(ScriptModuleId moduleId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -125,7 +140,6 @@ public sealed class JintScriptRuntime : IJavaScriptRuntime
         .OrderBy(instance => instance.Name, StringComparer.OrdinalIgnoreCase)
         .Select(instance => instance.Snapshot())
         .ToArray();
-
 
     private static void ValidateHostBinding(CompiledScriptPackage package, IScriptHost host)
     {

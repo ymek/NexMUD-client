@@ -79,6 +79,7 @@ expected_packages = {
     (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia", "12.1.2"),
     (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia.Desktop", "12.1.2"),
     (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia.Themes.Fluent", "12.1.2"),
+    (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj", "Avalonia.Controls.WebView", "12.1.0"),
     (ROOT / "src/NexMud.Client/NexMud.Client.csproj", "Microsoft.Data.Sqlite", "10.0.12"),
     (ROOT / "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj", "Jint", "4.16.3"),
 }
@@ -512,8 +513,9 @@ for literal in (
     "EnsureRoomMetadata(_snapshot.Room.Id, force: true)",
     "string.Equals(memory?.RoomId, _snapshot.Room.Id, StringComparison.Ordinal)",
     "_workspaceColumn.MinWidth = 380",
-    'NavigationButton("Scripting", ToolView.Scripting, NexIconKind.Scripting)',
-    'new("NAVIGATE", "Scripting"',
+    'NexNavItem automationStudio = new("Automation", NexIconKind.Automation);',
+    "AutomationStudioWindow? _automationStudioWindow",
+    "ShowAutomationStudio()",
     "ApplyWorkspaceLayout(ToolView view)",
     "_workspaceHost.Content = _mapperWorkspace",
     "_workspaceHost.Content = _codexWorkspace",
@@ -847,9 +849,9 @@ bootstrap_text = (ROOT / "src/NexMud.Scripting.Jint/Bootstrap/NexMudJavaScriptBo
 for literal in ("'__nexResolve'", "'__nexReject'", "'__nexDispatchEvent'", "'__nexDispatchTimer'", "@nexmud/api", "globalThis, 'nex'", "function deepFreeze", "delay(milliseconds)", "after(milliseconds, handler)", "every(milliseconds, handler)", "has(key)"):
     if literal not in bootstrap_text:
         fail(f"NexMUD JavaScript bootstrap invariant missing: {literal}")
-if "const nex = Object.freeze({ events, commands, state, log, timers, storage, mapper });" not in bootstrap_text:
-    fail("SDK v1 bootstrap must expose events/commands/state/log/timers/storage plus the Mapper orchestration namespace")
-for reserved_namespace in ("codex,", "ui,", "jev,"):
+if "const nex = Object.freeze({ events, commands, state, log, timers, storage, mapper, codex, __automation });" not in bootstrap_text:
+    fail("Automation Studio bootstrap must expose the SDK v1 surface, Mapper, read-only Codex, and the capability-gated internal Automation bridge")
+for reserved_namespace in ("ui,", "jev,"):
     if reserved_namespace in bootstrap_text.split("const nex = Object.freeze(", 1)[-1].split(");", 1)[0]:
         fail(f"reserved scripting namespace exposed before its architecture slice: {reserved_namespace.rstrip(',')}")
 

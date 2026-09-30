@@ -1,0 +1,7 @@
+# Source: Xiganath.txt
+You say, 'Kallshic nashmelideq hrikkar zha'
+You feel a slight tingling.
+A Black-Stoned Passage
+  You stand in a low tunnel walled with rough, black stones.
+
+[Exits: east south west]

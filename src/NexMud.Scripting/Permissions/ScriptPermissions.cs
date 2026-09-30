@@ -20,7 +20,8 @@ public enum ScriptCapability
     ReadScriptStorage = 1 << 13,
     MapperPathfind = 1 << 14,
     MapperMove = 1 << 15,
-    MapperRouteObserve = 1 << 16
+    MapperRouteObserve = 1 << 16,
+    InvokeScriptFunctions = 1 << 17
 }
 
 public interface IScriptPermissionSet

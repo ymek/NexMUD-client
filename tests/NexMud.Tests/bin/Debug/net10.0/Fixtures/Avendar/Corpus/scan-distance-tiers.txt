@@ -1,0 +1,10 @@
+# Source: Xiganath.txt
+# Source-Lines: 1554-1565
+# Purpose: directional remote observations preserve distance tiers without changing current room
+You peer intently east.
+=== 1 east ===
+
+=== 2 east ===
+
+=== 3 east ===
+(Hide) A demonic m'elsoth hides in the shadows, fangs dripping.

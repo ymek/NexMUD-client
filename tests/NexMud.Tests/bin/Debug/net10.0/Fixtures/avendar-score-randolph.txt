@@ -1,0 +1,34 @@
+Name: Randolph the Smuggler
+Lineage: human
+Class: thief
+Level: 6
+Gender: male
+Age: 18 (youthful)
+Hours: 8
+
+Str: 15(15)
+Int: 15(15)
+Wis: 15(15)
+Dex: 20(18)
+Con: 16(15)
+Chr: 15(15)
+
+Hit: 195/195
+Mana: 148/148
+Move: 280/280
+
+Experience: 12858
+Exper/level: 1727
+Exploration: 190
+
+Hitroll: 15
+Damroll: 6
+Saves: -5
+
+Resonance: None
+Alignment: Chaotic Neutral
+Total AC: vulnerable (87)
+
+Items: 14 / 100
+Weight: 73 / 352
+Wealth: 2g 111c

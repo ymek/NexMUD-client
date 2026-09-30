@@ -1,0 +1,30 @@
+@@ The Adventurer's Lounge
+The Adventurer's Lounge
+  The lower level of the School of Heroes serves as a gathering place for
+young adventurers. This corner of the lounge includes a small fountain.
+
+A prominent bulletin board hangs from the northern wall.
+
+[Exits: east south west]
+     A small fountain gurgles here.
+A kankoran student looks consideringly to the western stairs.
+Koranna tells you, 'One piece of advice: If you want to win, never let them see you coming.'
+@@ END
+@@ Office of Applied Theology
+Office of Applied Theology
+  The office interior exudes an air of cold formality, dominated by sleek
+white marble walls and polished floors.
+
+[Exits: south west]
+     A number of neatly-sorted bins rest against the walls.
+An armed enforcer of Var Bandor patrols here.
+An armed enforcer of Var Bandor patrols here.
+@@ END
+@@ The Hall of Fates
+The Hall of Fates
+  The spiral stairwell rises up into a three-way junction.
+
+[Exits: (north) (east) west down]
+(!) An olive-green ethron clad in brown robes directs young adventurers.
+Loqel Arastha tells you, 'If you wish my direction, Randolph, I will grant it. Do you?'
+@@ END

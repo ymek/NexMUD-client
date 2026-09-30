@@ -1,0 +1,5 @@
+# Source: Mines 3_31_15.txt
+A yreg is in excellent condition. [100%]
+A yreg has quite a few wounds. [50%-75%]
+A yreg looks pretty hurt. [15%-30%]
+A yreg is in awful condition. [0%-15%]

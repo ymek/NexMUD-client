@@ -96,7 +96,8 @@ public sealed class CompiledScriptPackage
         ScriptManifest manifest,
         IEnumerable<CompiledScriptModule> modules,
         string compilerIdentity,
-        string cacheKey)
+        string cacheKey,
+        IReadOnlyList<ExportedScriptFunction>? exportedFunctions = null)
     {
         Manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         ArgumentNullException.ThrowIfNull(modules);
@@ -104,6 +105,7 @@ public sealed class CompiledScriptPackage
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheKey);
         CompilerIdentity = compilerIdentity;
         CacheKey = cacheKey;
+        ExportedFunctions = exportedFunctions ?? Array.Empty<ExportedScriptFunction>();
 
         Dictionary<string, CompiledScriptModule> normalized = new(StringComparer.Ordinal);
         foreach (CompiledScriptModule module in modules)
@@ -121,6 +123,7 @@ public sealed class CompiledScriptPackage
     public string CompilerIdentity { get; }
     public string CacheKey { get; }
     public IReadOnlyDictionary<string, CompiledScriptModule> Modules => _modules;
+    public IReadOnlyList<ExportedScriptFunction> ExportedFunctions { get; }
 
     public static string NormalizeModulePath(string path)
     {
@@ -135,10 +138,11 @@ public sealed class CompiledScriptPackage
 public sealed record ScriptCompileResult(
     bool Success,
     CompiledScriptPackage? Package,
-    IReadOnlyList<ScriptCompilerDiagnostic> Diagnostics)
+    IReadOnlyList<ScriptCompilerDiagnostic> Diagnostics,
+    IReadOnlyList<ExportedScriptFunction>? ExportedFunctions = null)
 {
     public static ScriptCompileResult Failed(params ScriptCompilerDiagnostic[] diagnostics) =>
-        new(false, null, diagnostics);
+        new(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
 }
 
 public interface IScriptCompiler

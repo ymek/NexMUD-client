@@ -10,6 +10,7 @@
     <PackageReference Include="Avalonia" Version="12.1.2" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Controls.WebView" Version="12.1.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../NexMud.Client/NexMud.Client.csproj" />
@@ -17,8 +18,10 @@
     <ProjectReference Include="../NexMud.Adapters/NexMud.Adapters.csproj" />
     <ProjectReference Include="../NexMud.Jev/NexMud.Jev.csproj" />
     <ProjectReference Include="../NexMud.Transport/NexMud.Transport.csproj" />
+    <ProjectReference Include="../NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <AvaloniaResource Include="Assets/**" />
+    <AvaloniaResource Include="Assets/**" Exclude="Assets/Monaco/**" />
+    <Content Include="Assets/Monaco/**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,7 @@
+# Source: Mines 3_31_15.txt
+# Source-Lines: 2625-2641
+# Purpose: explicit duplicate corpse counts survive entity normalization
+[Exits: east up]
+( 3) The corpse of a yreg is lying here.
+     The corpse of a spindly-legged korakk is lying here.
+     A flat brown stone is here.

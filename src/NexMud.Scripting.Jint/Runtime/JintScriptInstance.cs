@@ -147,6 +147,17 @@ public sealed class JintScriptInstance : IAsyncDisposable
         Record(ScriptDiagnosticKind.ScriptUnloaded, "Script stopped.");
     }
 
+    public Task<ScriptFunctionInvocationResult> InvokeExportAsync(
+        ScriptFunctionInvocationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (State != ScriptInstanceState.Running)
+            return Task.FromResult(ScriptFunctionInvocationResult.Failed("ScriptRuntimeUnavailable", $"Script '{Id}' is not running."));
+        if (!request.FunctionRef.PackageId.Equals(Id.Value, StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult(ScriptFunctionInvocationResult.Failed("ScriptPackageMismatch", "Function reference does not target this runtime."));
+        return _bridge.InvokeExportAsync(request, cancellationToken);
+    }
+
     public ScriptModuleSnapshot Snapshot() => new(
         Id,
         Name,

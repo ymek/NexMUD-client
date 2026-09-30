@@ -164,10 +164,12 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
         bool typeMatches = (program.Type, program.Trigger) switch
         {
             (AutomationProgramType.Alias, AliasAutomationTrigger) => true,
+            (AutomationProgramType.Keybinding, KeybindingAutomationTrigger) => true,
             (AutomationProgramType.TextTrigger, TextAutomationTrigger) => true,
             (AutomationProgramType.SemanticTrigger, SemanticAutomationTrigger) => true,
             (AutomationProgramType.Timer, TimerAutomationTrigger) => true,
             (AutomationProgramType.StateRule, StateAutomationTrigger) => true,
+            (AutomationProgramType.Workflow, WorkflowAutomationTrigger) => true,
             _ => false
         };
         if (!typeMatches)
@@ -177,6 +179,8 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
         {
             case AliasAutomationTrigger alias when string.IsNullOrWhiteSpace(alias.Pattern):
                 throw new InvalidOperationException($"Alias '{program.Id}' requires a pattern.");
+            case KeybindingAutomationTrigger keybinding when string.IsNullOrWhiteSpace(keybinding.Gesture):
+                throw new InvalidOperationException($"Keybinding '{program.Id}' requires a gesture.");
             case TextAutomationTrigger text when string.IsNullOrWhiteSpace(text.Pattern):
                 throw new InvalidOperationException($"Text trigger '{program.Id}' requires a pattern.");
             case TextAutomationTrigger { MatchMode: HighlightMatchMode.Regex } regexTrigger:
@@ -216,6 +220,8 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
                 throw new InvalidOperationException($"Automation '{program.Id}' contains an invalid contains condition.");
             case StorageValueAutomationCondition storage when string.IsNullOrWhiteSpace(storage.Key) || !IsComparisonOperator(storage.Operator):
                 throw new InvalidOperationException($"Automation '{program.Id}' contains an invalid storage comparison.");
+            case ScriptPredicateAutomationCondition predicate when string.IsNullOrWhiteSpace(predicate.FunctionRef.ExportName):
+                throw new InvalidOperationException($"Automation '{program.Id}' contains an invalid script predicate.");
             case AllAutomationCondition all when all.Conditions.Count == 0:
                 throw new InvalidOperationException($"Automation '{program.Id}' contains an empty AND condition.");
             case AnyAutomationCondition any when any.Conditions.Count == 0:
@@ -249,6 +255,8 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
                 throw new InvalidOperationException($"Automation '{program.Id}' contains an empty storage key.");
             case DeleteStorageAutomationAction storage when string.IsNullOrWhiteSpace(storage.Key):
                 throw new InvalidOperationException($"Automation '{program.Id}' contains an empty storage key.");
+            case RunScriptFunctionAutomationAction script when string.IsNullOrWhiteSpace(script.FunctionRef.ExportName):
+                throw new InvalidOperationException($"Automation '{program.Id}' contains an invalid script function reference.");
         }
     }
 
@@ -276,6 +284,7 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
                     DelayAutomationAction => ScriptCapability.CreateTimers,
                     LogAutomationAction => ScriptCapability.Log,
                     SetStorageAutomationAction or DeleteStorageAutomationAction => ScriptCapability.WriteScriptStorage,
+                    RunScriptFunctionAutomationAction => ScriptCapability.InvokeScriptFunctions,
                     _ => ScriptCapability.None
                 };
             }
@@ -287,6 +296,7 @@ public sealed class AutomationJavaScriptCompiler : IAutomationCompiler
     {
         StateExpressionAutomationCondition => ScriptCapability.ReadState,
         StorageValueAutomationCondition => ScriptCapability.ReadScriptStorage,
+        ScriptPredicateAutomationCondition => ScriptCapability.InvokeScriptFunctions,
         AllAutomationCondition all => all.Conditions.Aggregate(ScriptCapability.None, (current, item) => current | ConditionPermissions(item)),
         AnyAutomationCondition any => any.Conditions.Aggregate(ScriptCapability.None, (current, item) => current | ConditionPermissions(item)),
         NotAutomationCondition not => ConditionPermissions(not.Condition),
@@ -331,6 +341,51 @@ function compare(left, right, op) {
   }
 }
 
+function sourceKind(program) {
+  switch (program.type) {
+    case 'alias': return 'Alias';
+    case 'keybinding': return 'Keybinding';
+    case 'textTrigger': return 'TextTrigger';
+    case 'semanticTrigger': return 'SemanticTrigger';
+    case 'timer': return 'Timer';
+    case 'stateRule': return 'StateRule';
+    case 'workflow': return 'Workflow';
+    default: return 'Workflow';
+  }
+}
+
+function captureMap(context) {
+  const result = {};
+  const captures = context?.captures;
+  if (Array.isArray(captures)) {
+    for (let index = 0; index < captures.length; index++) result[String(index)] = String(captures[index] ?? '');
+  } else if (captures && typeof captures === 'object') {
+    for (const [key, value] of Object.entries(captures)) result[key] = String(value ?? '');
+  }
+  if (context?.values && typeof context.values === 'object') {
+    for (const [key, value] of Object.entries(context.values)) if (value != null) result[key] = String(value);
+  }
+  return result;
+}
+
+async function invokeScript(program, functionRef, args, context, requireBooleanResult = false) {
+  const result = await nex.__automation.invokeScriptFunction({
+    functionRef,
+    sourceKind: sourceKind(program),
+    sourceDefinitionId: program.id,
+    arguments: args ?? {},
+    captures: captureMap(context),
+    semanticEvent: program.type === 'semanticTrigger' ? context ?? null : null,
+    requireBooleanResult
+  });
+  if (!result?.success) {
+    const error = new Error(result?.errorMessage ?? 'Script function invocation failed.');
+    error.code = result?.errorCode ?? 'ScriptRuntimeError';
+    throw error;
+  }
+  return result.value ?? null;
+}
+
 async function conditionPasses(condition, context, program) {
   switch (condition.kind) {
     case 'stateExpression': return context?.conditionPassed === true;
@@ -346,6 +401,7 @@ async function conditionPasses(condition, context, program) {
       return actual.includes(expected);
     }
     case 'storageValue': return compare(await nex.storage.get(storageKey(program, condition.key)), condition.value, condition.operator);
+    case 'scriptPredicate': return await invokeScript(program, condition.functionRef, condition.arguments, context, true) === true;
     case 'all': {
       for (const nested of condition.conditions ?? []) if (!await conditionPasses(nested, context, program)) return false;
       return true;
@@ -408,6 +464,20 @@ async function executeAction(program, action, context, actionIndex) {
     case 'deleteStorage':
       await nex.storage.delete(storageKey(program, action.key));
       break;
+    case 'runScriptFunction':
+      try {
+        await invokeScript(program, action.functionRef, action.arguments, context, false);
+      } catch (error) {
+        if (action.failurePolicy === 'continueCurrentAutomation') {
+          await nex.log.warn(error?.message ?? 'Script function failed; continuing Automation.', logData(program, context, {
+            actionIndex,
+            errorCode: error?.code ?? 'ScriptRuntimeError'
+          }));
+          break;
+        }
+        throw error;
+      }
+      break;
     default:
       throw new Error(`Unsupported Automation action '${action.kind}'.`);
   }
@@ -454,6 +524,10 @@ function dispatchMatched(event) {
 export function activate() {
   if (programs.some(program => program.trigger.kind === 'alias'))
     subscriptions.push(nex.events.on('automation.aliasMatched', dispatchMatched));
+  if (programs.some(program => program.trigger.kind === 'keybinding'))
+    subscriptions.push(nex.events.on('automation.keybindingMatched', dispatchMatched));
+  if (programs.some(program => program.trigger.kind === 'workflow'))
+    subscriptions.push(nex.events.on('automation.workflowMatched', dispatchMatched));
   if (programs.some(program => program.trigger.kind === 'text'))
     subscriptions.push(nex.events.on('automation.textTriggerMatched', dispatchMatched));
   if (programs.some(program => program.trigger.kind === 'state'))

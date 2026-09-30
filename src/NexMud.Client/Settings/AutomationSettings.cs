@@ -1,3 +1,4 @@
+using NexMud.Client.Automation;
 using NexMud.Client.Interaction;
 
 namespace NexMud.Client.Settings;
@@ -31,7 +32,10 @@ public enum AutomationWorkflowFailureMode
 public sealed record CommandAlias(
     string Name,
     string Expansion,
-    bool Enabled = true);
+    bool Enabled = true,
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null,
+    IReadOnlyList<AutomationCondition>? Conditions = null);
 
 public sealed record TriggerRule(
     string Pattern,
@@ -44,7 +48,20 @@ public sealed record TriggerRule(
     int CooldownMilliseconds = 250,
     bool StopProcessing = false,
     TriggerScope Scope = TriggerScope.Line,
-    bool OneShot = false);
+    bool OneShot = false,
+    IReadOnlyList<AutomationCondition>? Conditions = null,
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null);
+
+public sealed record SemanticTriggerRule(
+    string Name,
+    string EventName,
+    bool Enabled = true,
+    string Group = "Default",
+    int Priority = 0,
+    IReadOnlyList<AutomationCondition>? Conditions = null,
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null);
 
 public sealed record GameRule(
     string Name,
@@ -56,29 +73,15 @@ public sealed record GameRule(
     int Priority = 0,
     bool StopProcessing = false,
     GameRuleActivation Activation = GameRuleActivation.OnEnter,
-    bool OneShot = false);
+    bool OneShot = false,
+    IReadOnlyList<AutomationCondition>? Conditions = null,
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null);
 
 /// <summary>
-/// A first-party deterministic workflow. Steps use a deliberately small declarative DSL:
-/// send &lt;command&gt;
-/// delay &lt;milliseconds&gt;
-/// wait &lt;state expression&gt; [timeout=&lt;milliseconds&gt;]
-/// wait-event &lt;event type&gt; [timeout=&lt;milliseconds&gt;]
-/// if &lt;state expression&gt; :: &lt;step&gt;
-/// unless &lt;state expression&gt; :: &lt;step&gt;
-/// retry &lt;count&gt; [delay=&lt;milliseconds&gt;] :: &lt;step&gt;
-/// assert &lt;state expression&gt;
-/// navigate &lt;room/MOB/object/item-source query&gt;
-/// set &lt;name&gt;=&lt;value&gt;
-/// unset &lt;name&gt;
-/// jev combat|navigation|recovery
-/// stop
-///
-/// Step arguments support ${...} templates using workflow variables, state expressions, and
-/// fields from the triggering/waited event such as ${event.target} and ${event.item}.
-///
-/// TriggerCondition uses the same state expression language as GameRule. TriggerEvent may be
-/// an IMudEvent type name (for example EnemyKilled) or "*". If both are supplied both must match.
+/// A first-party deterministic workflow. Steps use a deliberately small declarative DSL and may
+/// finish with typed Automation actions. Script calls use the same RunScriptFunction action model
+/// as aliases, keybindings, triggers, timers and state rules.
 /// </summary>
 public sealed record AutomationWorkflow(
     string Name,
@@ -90,7 +93,9 @@ public sealed record AutomationWorkflow(
     int Priority = 0,
     int CooldownMilliseconds = 1000,
     AutomationWorkflowFailureMode FailureMode = AutomationWorkflowFailureMode.Stop,
-    bool OneShot = false);
+    bool OneShot = false,
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null);
 
 public sealed record CommandTimer(
     string Name,
@@ -98,7 +103,10 @@ public sealed record CommandTimer(
     string Command,
     bool Repeat = true,
     bool Enabled = false,
-    string Group = "Default");
+    string Group = "Default",
+    IReadOnlyList<AutomationAction>? Actions = null,
+    string? Id = null,
+    IReadOnlyList<AutomationCondition>? Conditions = null);
 
 public sealed record CommandKeyBinding(
     string Gesture,
@@ -107,7 +115,11 @@ public sealed record CommandKeyBinding(
     string? Name = null,
     KeybindingContext Context = KeybindingContext.Global,
     KeybindingActionKind Action = KeybindingActionKind.SendCommand,
-    int Priority = 0);
+    int Priority = 0,
+    RunScriptFunctionAutomationAction? ScriptAction = null,
+    string? Id = null,
+    IReadOnlyList<AutomationCondition>? Conditions = null,
+    IReadOnlyList<AutomationAction>? Actions = null);
 
 public sealed record AutomationPreferences(
     bool Enabled = true,

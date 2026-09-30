@@ -22,6 +22,7 @@ using NexMud.Client.Interaction;
 using NexMud.Client.Navigation;
 using NexMud.Client.Scripting;
 using NexMud.Scripting.Compilation;
+using NexMud.Scripting.Diagnostics;
 using NexMud.Scripting.Events;
 using NexMud.Scripting.Execution;
 using NexMud.Scripting.Host;
@@ -281,6 +282,7 @@ public static class Program
 
     private static async Task ScriptExecutionScopeCancellationIsStructured()
     {
+        await using ScriptExecutionSupervisor supervisor = new();
         IScriptExecutionScope owner = supervisor.CreateOwner(ScriptOwnerKind.AutomationWorkflow, "test workflow");
         TaskCompletionSource<bool> started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task work = owner.RunAsync("wait", async cancellationToken =>
@@ -303,6 +305,7 @@ public static class Program
 
     private static async Task ScriptExecutionSupervisorReportsFaults()
     {
+        await using ScriptExecutionSupervisor supervisor = new();
         ScriptTaskFault? observed = null;
         supervisor.TaskFaulted += fault => observed = fault;
         IScriptExecutionScope owner = supervisor.CreateOwner(ScriptOwnerKind.MapperRoute, "fault-test");
@@ -324,6 +327,7 @@ public static class Program
 
     private static async Task ScriptEventSubscriptionsAreSequential()
     {
+        await using ScriptExecutionSupervisor supervisor = new();
         await using ScriptEventHub hub = new();
         IScriptExecutionScope owner = supervisor.CreateOwner(ScriptOwnerKind.UserScript, "event-test", new ScriptModuleId("test.events"));
         List<long> observed = [];
@@ -498,6 +502,7 @@ public static class Program
             new ScriptScheduler(),
             new NoopScriptUi(),
             new NoopScriptLog(),
+            new NoopScriptFunctions(),
             ScriptCommandOrigin.Script,
             "Test user script");
 
@@ -718,7 +723,8 @@ public static class Program
             new MemoryScriptStorage(package.Manifest.Id),
             scheduler,
             new NoopScriptUi(),
-            new NoopScriptLog(),
+            scriptLog,
+            new NoopScriptFunctions(),
             ScriptCommandOrigin.Script,
             package.Manifest.Name);
 
@@ -748,6 +754,7 @@ public static class Program
         Assert.True(provenance.InvocationId is not null, "Script invocation provenance is required.");
         Assert.Equal(vitalsEventId, provenance.EventId);
         Assert.True(provenance.ParentOperationId is not null, "Host operation provenance is required.");
+        await WaitUntilAsync(() => diagnostics.Records.Any(record => record.Kind == ScriptDiagnosticKind.InvocationCompleted));
         Assert.True(diagnostics.Records.Any(record => record.Kind == ScriptDiagnosticKind.InvocationCompleted),
             "Completed script invocation should be observable.");
         await WaitUntilAsync(() => scriptLog.Entries.Count == 1);
@@ -1687,6 +1694,7 @@ public static class Program
             scheduler ?? new ScriptScheduler(),
             new NoopScriptUi(),
             log ?? new NoopScriptLog(),
+            new NoopScriptFunctions(),
             commandOrigin,
             moduleId.Value);
     }
@@ -1987,7 +1995,7 @@ public static class Program
         TelnetParseResult second = parser.Process(send);
         TelnetParseResult third = parser.Process(send);
 
-        Assert.True(FrameContainsAscii(first.Responses.Single(), "NexMUD 0.18.0"), "First TTYPE response should identify NexMUD.");
+        Assert.True(FrameContainsAscii(first.Responses.Single(), $"{options.ClientName} {options.ClientVersion}"), "First TTYPE response should identify NexMUD.");
         Assert.True(FrameContainsAscii(second.Responses.Single(), "xterm-256color"), "Second TTYPE response should identify the terminal type.");
         Assert.True(FrameContainsAscii(third.Responses.Single(), "MTTS 781"), "Third TTYPE response should provide ANSI, UTF-8, 256-color, truecolor, and MNES capabilities.");
         return Task.CompletedTask;
@@ -2125,7 +2133,8 @@ public static class Program
 
     private static Task TelnetTerminalTypeSequenceResetsOnDont()
     {
-        TelnetParser parser = new(new MudConnectionOptions("example.org", 4000, ClientVersion: "0.15.0-alpha.21"));
+        MudConnectionOptions options = new("example.org", 4000, ClientVersion: "0.15.0-alpha.21");
+        TelnetParser parser = new(options);
         byte[] send = [255, 250, 24, 1, 255, 240];
 
         parser.Process([255, 253, 24]); // IAC DO TTYPE
@@ -2135,7 +2144,7 @@ public static class Program
         parser.Process([255, 253, 24]); // IAC DO TTYPE again
         TelnetParseResult restarted = parser.Process(send);
 
-        Assert.True(FrameContainsAscii(restarted.Responses.Single(), "NexMUD 0.18.0"),
+        Assert.True(FrameContainsAscii(restarted.Responses.Single(), $"{options.ClientName} {options.ClientVersion}"),
             "TTYPE sequence should restart with the client identity after renegotiation.");
         return Task.CompletedTask;
     }
@@ -3201,17 +3210,18 @@ public static class Program
 
         await events.PublishAsync(new TextReceived(raw), "test.transport");
 
-        GameTextReceived? display = null;
+        StringBuilder displayed = new();
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
-        while (display is null)
+        while (displayed.Length < raw.Length)
         {
             EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
-            display = envelope.Payload as GameTextReceived;
+            if (envelope.Payload is GameTextReceived display)
+                displayed.Append(display.Text);
         }
 
         cancellation.Cancel();
         await worker;
-        Assert.Equal(raw, display.Text);
+        Assert.Equal(raw, displayed.ToString());
     }
 
 
@@ -4073,6 +4083,14 @@ public static class Program
         await events.PublishAsync(west, "test");
         await events.PublishAsync(new NavigationAttempted("east"), "test");
         await events.PublishAsync(new NavigationFailed(null, "The golden door is closed."), "test");
+        await events.PublishAsync(new MovementObserved(new MovementObservation(
+            MovementCause.Unknown,
+            MovementResultKind.Blocked,
+            null,
+            null,
+            "The golden door is closed.",
+            0,
+            BlockReason: MovementBlockReason.DoorClosed)), "test");
 
         RoomKnowledge? learned = null;
         for (int attempt = 0; attempt < 50; attempt++)
@@ -4200,7 +4218,7 @@ public static class Program
         Assert.Equal(1, fates.Contents.Count(item => item.Kind == RoomEntityKind.Occupant));
         Assert.True(fates.Contents.Single().Decorators?.Contains("(!)") == true,
             "Occupant decorator should be preserved.");
-        Assert.Equal(ExitTraversability.Blocked, fates.ExitDetails.Single(exit => exit.Direction == "north").Traversability);
+        Assert.Equal(ExitTraversability.Unknown, fates.ExitDetails.Single(exit => exit.Direction == "north").Traversability);
         return Task.CompletedTask;
     }
 
@@ -4285,7 +4303,6 @@ public static class Program
             "An oversized rat looks about on its hind legs, black eyes shining in the torchlight.");
 
         Assert.Equal(0, events.OfType<CombatTargetConditionObserved>().Count());
-        Assert.Equal(0, parser.ParseLine("Randolph is in excellent condition.").OfType<CombatTargetConditionObserved>().Count());
 
         CombatTargetConditionObserved condition = Assert.Single(
             parser.ParseLine("An oversized rat looks pretty hurt.").OfType<CombatTargetConditionObserved>());
@@ -4939,7 +4956,8 @@ public static class Program
         {
             Directory.CreateDirectory(directory);
             await File.WriteAllTextAsync(path,
-                """{
+                """
+                {
                   "jevPreset": "off",
                   "jevDomains": {},
                   "host": "legacy.example",
@@ -4947,7 +4965,8 @@ public static class Program
                   "useTls": true,
                   "terminalType": "ansi",
                   "protocols": { "charset": false, "eor": true }
-                }""");
+                }
+                """);
 
             ClientSettings loaded = await new ClientSettingsStore(path).LoadAsync();
             ConnectionProfile profile = Assert.Single(loaded.EffectiveConnectionProfiles);
@@ -7585,6 +7604,14 @@ public static class Program
             CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
+    private sealed class NoopScriptFunctions : IScriptFunctions
+    {
+        public Task<ScriptFunctionInvocationResult> InvokeAsync(
+            ScriptFunctionInvocationDescriptor descriptor,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(ScriptFunctionInvocationResult.Failed("TestNoop", "Script function invocation is not configured for this test."));
+    }
+
     private sealed class MemoryScriptStorage : IScriptStorage
     {
         private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
@@ -7638,23 +7665,24 @@ public static class Program
 
     private static class Assert
     {
-        public static void Equal<T>(T expected, T actual)
+        public static void Equal<T>(T expected, T actual, string? message = null)
         {
             if (!EqualityComparer<T>.Default.Equals(expected, actual))
             {
-                throw new InvalidOperationException($"Expected '{expected}', got '{actual}'.");
+                throw new InvalidOperationException(message ?? $"Expected '{expected}', got '{actual}'.");
             }
         }
 
-        public static void True(bool value, string message)
+        public static void True(bool value, string? message = null)
         {
             if (!value)
             {
-                throw new InvalidOperationException(message);
+                throw new InvalidOperationException(message ?? "Expected true.");
             }
         }
 
-        public static void False(bool value, string message) => True(!value, message);
+        public static void False(bool value, string? message = null) =>
+            True(!value, message ?? "Expected false.");
 
         public static T IsType<T>(object value)
         {

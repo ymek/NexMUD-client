@@ -11,6 +11,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using NexMud.Gui.AutomationStudio;
 using NexMud.Adapters.Avendar;
 using NexMud.Client.Commands;
 using NexMud.Client.Interaction;
@@ -84,6 +85,7 @@ public sealed class MainWindow : Window
     private readonly CodexWorkspace _codexWorkspace;
     private readonly AutomationWorkspace _automationWorkspace;
     private readonly ScriptingWorkspace _scriptingWorkspace;
+    private AutomationStudioWindow? _automationStudioWindow;
     private readonly GameplayHudPanel _gameplayHudPanel = new();
     private readonly CharacterHudPanel _characterHudPanel;
     private readonly CharacterInventoryWorkspace _characterWorkspace;
@@ -420,8 +422,9 @@ public sealed class MainWindow : Window
         navigation.Children.Add(NavigationButton("Abilities", ToolView.Abilities, NexIconKind.Abilities));
         navigation.Children.Add(NavigationButton("Codex", ToolView.Knowledge, NexIconKind.Codex));
         navigation.Children.Add(NavigationButton("Map", ToolView.Map, NexIconKind.Map));
-        navigation.Children.Add(NavigationButton("Automation", ToolView.Automation, NexIconKind.Automation));
-        navigation.Children.Add(NavigationButton("Scripting", ToolView.Scripting, NexIconKind.Scripting));
+        NexNavItem automationStudio = new("Automation", NexIconKind.Automation);
+        automationStudio.Click += (_, _) => ShowAutomationStudio();
+        navigation.Children.Add(automationStudio);
         navigation.Children.Add(NavigationButton("Jev", ToolView.Jev, NexIconKind.Jev));
         Border navigationViewport = new()
         {
@@ -502,6 +505,23 @@ public sealed class MainWindow : Window
         button.Click += (_, _) => ShowTool(view);
         _navigationButtons[view] = button;
         return button;
+    }
+
+    private void ShowAutomationStudio()
+    {
+        if (_automationStudioWindow is { } existing)
+        {
+            if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
+            existing.Show();
+            existing.Activate();
+            existing.Focus();
+            return;
+        }
+
+        AutomationStudioWindow studio = new(_runtime);
+        studio.Closed += (_, _) => _automationStudioWindow = null;
+        _automationStudioWindow = studio;
+        studio.Show(this);
     }
 
     private static Button UtilityButton(string label, string accessibleLabel)
@@ -1113,6 +1133,9 @@ public sealed class MainWindow : Window
     {
         try
         {
+            if (await _runtime.AutomationCompiler.TryHandleKeybindingAsync(binding, _runtime.CancellationToken).ConfigureAwait(true))
+                return;
+
             await _runtime.Events.PublishAsync(
                 new AutomationKeybindingInvoked(
                     binding.Gesture,
@@ -1393,10 +1416,8 @@ public sealed class MainWindow : Window
                 () => { ShowTool(ToolView.Abilities); return Task.CompletedTask; }),
             new("NAVIGATE", "Spells", "Open the consolidated ability catalog", null,
                 () => { ShowTool(ToolView.Abilities); return Task.CompletedTask; }),
-            new("NAVIGATE", "Automation", "Aliases, keybindings, triggers, state rules, workflows and activity", null,
-                () => { ShowTool(ToolView.Automation); return Task.CompletedTask; }),
-            new("NAVIGATE", "Scripting", "Open runtime, script-package and Jint module tooling without hiding World", null,
-                () => { ShowTool(ToolView.Scripting); return Task.CompletedTask; }),
+            new("NAVIGATE", "Automation Studio", "Open visual Automation and TypeScript authoring in the companion Studio", null,
+                () => { ShowAutomationStudio(); return Task.CompletedTask; }),
             new("NAVIGATE", "Jev decision inspector", "Typed Choice / Score / Noul decisions and authority", null,
                 () => { ShowTool(ToolView.Jev); return Task.CompletedTask; }),
             new("NAVIGATE", "Codex", "Persistent world, entity and encounter memory", null,

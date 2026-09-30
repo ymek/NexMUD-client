@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Jint;
+using Jint.Native;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Diagnostics;
 using NexMud.Scripting.Events;
@@ -26,22 +27,41 @@ public sealed class JintHostBridge : IAsyncDisposable
         private bool _handlerCompleted;
         private bool _disposed;
         private ScriptInvocationStatus _status = ScriptInvocationStatus.Queued;
+        private string? _resultJson;
+        private string? _error;
 
-        public InvocationContext(Guid invocationId, Guid eventId, Guid? correlationId, CancellationToken ownerCancellation)
+        public InvocationContext(
+            Guid invocationId,
+            Guid eventId,
+            Guid? correlationId,
+            CancellationToken ownerCancellation,
+            AutomationInvocationContext? automationContext = null,
+            Guid? parentOperationId = null,
+            bool requireBooleanResult = false,
+            bool external = false)
         {
             InvocationId = invocationId;
             EventId = eventId;
             CorrelationId = correlationId;
+            AutomationContext = automationContext;
+            ParentOperationId = parentOperationId;
+            RequireBooleanResult = requireBooleanResult;
             Cancellation = CancellationTokenSource.CreateLinkedTokenSource(ownerCancellation);
+            if (external)
+                ExternalCompletion = new TaskCompletionSource<ScriptFunctionInvocationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
         public Guid InvocationId { get; }
         public Guid EventId { get; }
         public Guid? CorrelationId { get; }
+        public AutomationInvocationContext? AutomationContext { get; }
+        public Guid? ParentOperationId { get; }
+        public bool RequireBooleanResult { get; }
         public CancellationTokenSource Cancellation { get; }
         public ScriptInvocationStatus Status { get { lock (_gate) return _status; } }
         public TaskCompletionSource<ScriptInvocationStatus> Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<ScriptFunctionInvocationResult>? ExternalCompletion { get; }
 
         public void MarkRunning()
         {
@@ -71,12 +91,17 @@ public sealed class JintHostBridge : IAsyncDisposable
             }
         }
 
-        public bool CompleteHandler(ScriptInvocationStatus status = ScriptInvocationStatus.Completed)
+        public bool CompleteHandler(
+            ScriptInvocationStatus status = ScriptInvocationStatus.Completed,
+            string? resultJson = null,
+            string? error = null)
         {
             lock (_gate)
             {
                 _handlerCompleted = true;
                 _status = status;
+                _resultJson = resultJson;
+                _error = error;
                 return _pendingRequests == 0;
             }
         }
@@ -84,6 +109,27 @@ public sealed class JintHostBridge : IAsyncDisposable
         public ScriptInvocationSnapshot Snapshot()
         {
             lock (_gate) return new ScriptInvocationSnapshot(InvocationId, EventId, CorrelationId, _status);
+        }
+
+        public ScriptFunctionInvocationResult BuildExternalResult()
+        {
+            lock (_gate)
+            {
+                if (_status == ScriptInvocationStatus.Cancelled)
+                    return ScriptFunctionInvocationResult.Failed("CancelledError", "Script invocation was cancelled.");
+                if (_status != ScriptInvocationStatus.Completed)
+                    return ScriptFunctionInvocationResult.Failed("ScriptRuntimeError", string.IsNullOrWhiteSpace(_error) ? "Script invocation failed." : _error);
+
+                JsonElement? value = null;
+                if (!string.IsNullOrWhiteSpace(_resultJson))
+                {
+                    using JsonDocument document = JsonDocument.Parse(_resultJson);
+                    value = document.RootElement.Clone();
+                }
+                if (RequireBooleanResult && (!value.HasValue || value.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)))
+                    return ScriptFunctionInvocationResult.Failed("ScriptPredicateResultError", "Script predicate must return a boolean value.");
+                return new ScriptFunctionInvocationResult(true, value);
+            }
         }
 
         public void Cancel()
@@ -156,7 +202,7 @@ public sealed class JintHostBridge : IAsyncDisposable
         engine.SetValue("__nexCancelRaw", new Action<string>(CancelRequest));
         engine.SetValue("__nexSubscribeRaw", new Action<string, string>(Subscribe));
         engine.SetValue("__nexUnsubscribeRaw", new Action<string>(Unsubscribe));
-        engine.SetValue("__nexInvocationCompleteRaw", new Action<string, bool, string>(CompleteInvocation));
+        engine.SetValue("__nexInvocationCompleteRaw", new Action<string, bool, string, string>(CompleteInvocation));
         engine.SetValue("__nexScheduleRaw", new Action<string, double, bool>(Schedule));
         engine.SetValue("__nexCancelTimerRaw", new Action<string>(CancelTimer));
 
@@ -172,6 +218,69 @@ public sealed class JintHostBridge : IAsyncDisposable
             }
             """,
             "<nexmud-host-bridge>");
+    }
+
+    public async Task<ScriptFunctionInvocationResult> InvokeExportAsync(
+        ScriptFunctionInvocationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfStopped();
+        ArgumentNullException.ThrowIfNull(request);
+        string modulePath = ResolveCompiledModulePath(request.FunctionRef.ModulePath);
+        Guid invocationId = Guid.NewGuid();
+        InvocationContext invocation = new(
+            invocationId,
+            Guid.NewGuid(),
+            request.Context.InvocationId,
+            _scope.CancellationToken,
+            request.Context,
+            request.ParentAutomationInvocationId,
+            request.RequireBooleanResult,
+            external: true);
+        if (!_invocations.TryAdd(invocationId, invocation))
+        {
+            invocation.Dispose();
+            return ScriptFunctionInvocationResult.Failed("ScriptInvocationRegistrationError", "Unable to register script invocation.");
+        }
+
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, invocation.Cancellation.Token);
+        Record(ScriptDiagnosticKind.InvocationStarted, Guid.NewGuid(), $"export:{request.FunctionRef.ModulePath}#{request.FunctionRef.ExportName}", invocation);
+        try
+        {
+            invocation.MarkRunning();
+            string contextJson = JsonSerializer.Serialize(request.Context, JsonOptions);
+            await EnqueueWithInvocationAsync(
+                invocation,
+                engine =>
+                {
+                    var module = engine.Modules.Import(modulePath);
+                    JsValue function = module.Get(request.FunctionRef.ExportName);
+                    if (function.IsUndefined() || function.IsNull())
+                        throw new MissingMethodException($"Export '{request.FunctionRef.ExportName}' was not found in '{request.FunctionRef.ModulePath}'.");
+                    engine.Invoke("__nexInvokeCallable", function, contextJson, invocationId.ToString("D"));
+                },
+                linked.Token).ConfigureAwait(false);
+            return await invocation.ExternalCompletion!.Task.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            CancelInvocation(invocation, "Invocation cancelled.");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            FaultInvocation(invocation, exception);
+            return invocation.BuildExternalResult();
+        }
+    }
+
+    private string ResolveCompiledModulePath(string sourcePath)
+    {
+        string normalized = CompiledScriptPackage.NormalizeModulePath(sourcePath);
+        if (_package.Modules.ContainsKey(normalized)) return normalized;
+        string? changed = Path.ChangeExtension(normalized, ".js")?.Replace('\\', '/');
+        if (changed is not null && _package.Modules.ContainsKey(changed)) return changed;
+        throw new FileNotFoundException($"Compiled module for '{sourcePath}' was not found in package '{_package.Manifest.Id}'.", sourcePath);
     }
 
     private string Query(string operation, string payload)
@@ -275,6 +384,7 @@ public sealed class JintHostBridge : IAsyncDisposable
                 string command = GetString(root, "command") ?? string.Empty;
                 string? reason = GetString(root, "reason");
                 bool sensitive = GetBoolean(root, "sensitive");
+                AutomationInvocationContext? automation = invocation?.AutomationContext;
                 ScriptCommandResult result = await _host.Commands.SendAsync(
                     new ScriptCommandRequest(
                         command,
@@ -288,12 +398,12 @@ public sealed class JintHostBridge : IAsyncDisposable
                         ScriptInstanceId: _identity.InstanceId,
                         InvocationId: invocation?.InvocationId,
                         EventId: invocation?.EventId,
-                        ParentOperationId: operationId,
-                        AutomationId: GetString(root, "automationId"),
-                        AutomationType: GetString(root, "automationType"),
-                        TriggerId: GetString(root, "triggerId")),
+                        ParentOperationId: invocation?.ParentOperationId ?? automation?.InvocationId ?? operationId,
+                        AutomationId: GetString(root, "automationId") ?? automation?.SourceDefinitionId,
+                        AutomationType: GetString(root, "automationType") ?? automation?.SourceKind.ToString(),
+                        TriggerId: GetString(root, "triggerId") ?? automation?.SourceDefinitionId),
                     cancellationToken).ConfigureAwait(false);
-                Record(ScriptDiagnosticKind.CommandEmitted, result.ActionId, command, invocation, operationId);
+                Record(ScriptDiagnosticKind.CommandEmitted, result.ActionId, command, invocation, invocation?.ParentOperationId ?? automation?.InvocationId ?? operationId);
                 return result;
             }
             case "mapper.currentRoom":
@@ -349,6 +459,36 @@ public sealed class JintHostBridge : IAsyncDisposable
                 string? prefix = GetString(root, "prefix");
                 IReadOnlyList<ScriptStorageEntry> entries = await _host.Storage.ListAsync(prefix, cancellationToken).ConfigureAwait(false);
                 return entries.Select(entry => new { entry.Key, value = ParseStoredJson(entry.JsonValue) }).ToArray();
+            }
+            case "scripts.invoke":
+            {
+                ScriptFunctionRef functionRef = JsonSerializer.Deserialize<ScriptFunctionRef>(
+                    root.GetProperty("functionRef").GetRawText(),
+                    JsonOptions) ?? throw new ArgumentException("'functionRef' is required.");
+                string sourceKindText = RequireString(root, "sourceKind");
+                if (!Enum.TryParse(sourceKindText, true, out AutomationInvocationSourceKind sourceKind))
+                    throw new ArgumentException($"Unsupported Automation source kind '{sourceKindText}'.");
+                JsonElement arguments = root.TryGetProperty("arguments", out JsonElement argumentElement)
+                    ? argumentElement.Clone()
+                    : JsonSerializer.SerializeToElement(new { }, JsonOptions);
+                IReadOnlyDictionary<string, string>? captures = root.TryGetProperty("captures", out JsonElement captureElement) && captureElement.ValueKind == JsonValueKind.Object
+                    ? captureElement.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.ToString(), StringComparer.Ordinal)
+                    : null;
+                JsonElement? semanticEvent = root.TryGetProperty("semanticEvent", out JsonElement semanticElement) && semanticElement.ValueKind != JsonValueKind.Null
+                    ? semanticElement.Clone()
+                    : null;
+                bool requireBoolean = root.TryGetProperty("requireBooleanResult", out JsonElement requireBooleanElement) && requireBooleanElement.ValueKind == JsonValueKind.True;
+                return await _host.Functions.InvokeAsync(
+                    new ScriptFunctionInvocationDescriptor(
+                        functionRef,
+                        sourceKind,
+                        RequireString(root, "sourceDefinitionId"),
+                        arguments,
+                        captures,
+                        semanticEvent,
+                        requireBoolean,
+                        invocation?.InvocationId),
+                    cancellationToken).ConfigureAwait(false);
             }
             case "ui.notify":
             {
@@ -438,7 +578,7 @@ public sealed class JintHostBridge : IAsyncDisposable
         }
     }
 
-    private void CompleteInvocation(string invocationIdText, bool succeeded, string error)
+    private void CompleteInvocation(string invocationIdText, bool succeeded, string resultJson, string error)
     {
         if (!Guid.TryParse(invocationIdText, out Guid invocationId)) return;
         if (!_invocations.TryGetValue(invocationId, out InvocationContext? invocation)) return;
@@ -447,7 +587,10 @@ public sealed class JintHostBridge : IAsyncDisposable
             Guid.NewGuid(),
             succeeded ? "Invocation completed." : string.IsNullOrWhiteSpace(error) ? "Script handler failed." : error,
             invocation);
-        if (invocation.CompleteHandler(succeeded ? ScriptInvocationStatus.Completed : ScriptInvocationStatus.Faulted))
+        if (invocation.CompleteHandler(
+                succeeded ? ScriptInvocationStatus.Completed : ScriptInvocationStatus.Faulted,
+                string.IsNullOrWhiteSpace(resultJson) ? null : resultJson,
+                error))
             FinalizeInvocation(invocation);
     }
 
@@ -466,14 +609,14 @@ public sealed class JintHostBridge : IAsyncDisposable
         ScriptInvocationStatus status = error.Kind == ScriptErrorKind.CancelledError
             ? ScriptInvocationStatus.Cancelled
             : ScriptInvocationStatus.Faulted;
-        if (invocation.CompleteHandler(status)) FinalizeInvocation(invocation);
+        if (invocation.CompleteHandler(status, error: error.Message)) FinalizeInvocation(invocation);
     }
 
     private void CancelInvocation(InvocationContext invocation, string message)
     {
         Record(ScriptDiagnosticKind.InvocationCancelled, Guid.NewGuid(), message, invocation);
         invocation.Cancel();
-        if (invocation.CompleteHandler(ScriptInvocationStatus.Cancelled)) FinalizeInvocation(invocation);
+        if (invocation.CompleteHandler(ScriptInvocationStatus.Cancelled, error: message)) FinalizeInvocation(invocation);
     }
 
     public IReadOnlyList<ScriptInvocationSnapshot> SnapshotInvocations() => _invocations.Values
@@ -486,6 +629,7 @@ public sealed class JintHostBridge : IAsyncDisposable
         if (_invocations.TryRemove(invocation.InvocationId, out InvocationContext? removed))
         {
             removed.Completion.TrySetResult(removed.Status);
+            removed.ExternalCompletion?.TrySetResult(removed.BuildExternalResult());
             removed.Dispose();
         }
     }
@@ -504,8 +648,8 @@ public sealed class JintHostBridge : IAsyncDisposable
                 action(engine);
                 // Jint 4.16.x keeps RunAvailableContinuations internal. Enter through the public
                 // Execute API instead: ScriptEvaluation drains the engine event loop before it
-                // returns, so Promise reactions queued by __nexResolve/__nexReject resume on this
-                // same serialized mailbox turn without reaching into Jint internals.
+                // returns, so Promise reactions queued by host completions resume on this same
+                // serialized mailbox turn without reaching into Jint internals.
                 engine.Execute("void 0;", "<nexmud-continuation-pump>");
             }
             finally
@@ -592,7 +736,11 @@ public sealed class JintHostBridge : IAsyncDisposable
         foreach ((_, IScriptScheduledTask timer) in _timers)
             await timer.DisposeAsync().ConfigureAwait(false);
         _timers.Clear();
-        foreach ((_, InvocationContext invocation) in _invocations) invocation.Dispose();
+        foreach ((_, InvocationContext invocation) in _invocations)
+        {
+            invocation.ExternalCompletion?.TrySetResult(ScriptFunctionInvocationResult.Failed("CancelledError", "Script runtime stopped."));
+            invocation.Dispose();
+        }
         _invocations.Clear();
     }
 
@@ -623,7 +771,7 @@ public sealed class JintHostBridge : IAsyncDisposable
             InvocationId: invocation?.InvocationId,
             EventId: invocation?.EventId,
             OperationId: operationId,
-            ParentOperationId: parentOperationId,
+            ParentOperationId: parentOperationId ?? invocation?.ParentOperationId ?? invocation?.AutomationContext?.InvocationId,
             Location: location,
             Message: message));
 
@@ -646,6 +794,12 @@ public sealed class JintHostBridge : IAsyncDisposable
         }
         values["invocationId"] = invocation.InvocationId;
         values["eventId"] = invocation.EventId;
+        if (invocation.AutomationContext is { } automation)
+        {
+            values["automationInvocationId"] = automation.InvocationId;
+            values["automationSourceKind"] = automation.SourceKind.ToString();
+            values["automationSourceDefinitionId"] = automation.SourceDefinitionId;
+        }
         return JsonSerializer.Serialize(values, JsonOptions);
     }
 
@@ -655,6 +809,8 @@ public sealed class JintHostBridge : IAsyncDisposable
         OperationCanceledException => "Script operation was cancelled.",
         ArgumentException argument => argument.Message,
         InvalidOperationException invalid => invalid.Message,
+        MissingMethodException missing => missing.Message,
+        FileNotFoundException missing => missing.Message,
         _ => "Host operation failed."
     };
 

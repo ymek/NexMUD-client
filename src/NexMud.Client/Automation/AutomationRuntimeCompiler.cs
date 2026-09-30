@@ -201,6 +201,68 @@ public sealed class AutomationRuntimeCompiler
         return false;
     }
 
+    public async Task<bool> TryHandleKeybindingAsync(
+        CommandKeyBinding binding,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        if (!CanAutomate(_state.Current)) return false;
+        if (!await EnsureRuntimeRunningAsync(cancellationToken).ConfigureAwait(false)) return false;
+
+        AutomationProgram? program = Programs.FirstOrDefault(candidate =>
+            candidate.Trigger is KeybindingAutomationTrigger trigger &&
+            trigger.Gesture.Equals(binding.Gesture, StringComparison.OrdinalIgnoreCase));
+        if (program is null) return false;
+
+        await PublishMatchAsync(
+            "automation.keybindingMatched",
+            program,
+            new
+            {
+                automationId = program.Id,
+                runtimeGeneration = _activeGeneration,
+                triggerId = $"keybinding:{program.Id}",
+                captures = Array.Empty<string>(),
+                values = new Dictionary<string, string?>()
+            },
+            cancellationToken).ConfigureAwait(false);
+        await PublishObservedMatchAsync(program, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    public async Task<bool> RunWorkflowActionsAsync(
+        AutomationWorkflow workflow,
+        IMudEvent? currentEvent,
+        IReadOnlyDictionary<string, string>? variables = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        if (!CanAutomate(_state.Current)) return false;
+        if (!await EnsureRuntimeRunningAsync(cancellationToken).ConfigureAwait(false)) return false;
+
+        AutomationProgram? program = Programs.FirstOrDefault(candidate =>
+            candidate.Type == AutomationProgramType.Workflow &&
+            candidate.Name.Equals(workflow.Name, StringComparison.OrdinalIgnoreCase));
+        if (program is null) return false;
+
+        Dictionary<string, string?> values = ResolveTemplateValues(program, _state.Current, variables, currentEvent);
+        await PublishMatchAsync(
+            "automation.workflowMatched",
+            program,
+            new
+            {
+                automationId = program.Id,
+                runtimeGeneration = _activeGeneration,
+                triggerId = $"workflow:{program.Id}",
+                conditionPassed = true,
+                eventType = currentEvent?.GetType().Name,
+                values
+            },
+            cancellationToken).ConfigureAwait(false);
+        await PublishObservedMatchAsync(program, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
     public async Task ProcessGameTextAsync(
         string text,
         IReadOnlyDictionary<string, string>? variables = null,
@@ -373,22 +435,24 @@ public sealed class AutomationRuntimeCompiler
 
         foreach ((CommandAlias alias, int index) in (settings.Aliases ?? Array.Empty<CommandAlias>()).Select((value, index) => (value, index)))
         {
-            if (!alias.Enabled || string.IsNullOrWhiteSpace(alias.Name) || string.IsNullOrWhiteSpace(alias.Expansion)) continue;
+            IReadOnlyList<AutomationAction> actions = ResolveActions(alias.Actions, alias.Expansion, separator);
+            if (!alias.Enabled || string.IsNullOrWhiteSpace(alias.Name) || actions.Count == 0) continue;
             yield return new AutomationProgram(
-                StableId("alias", $"{alias.Name}\n{alias.Expansion}"),
+                ResolveId(alias.Id, "alias", $"{alias.Name}\n{alias.Expansion}"),
                 alias.Name,
                 AutomationProgramType.Alias,
                 new AliasAutomationTrigger(alias.Name),
-                [],
-                [ToCommandAction(alias.Expansion, separator)],
+                alias.Conditions?.ToArray() ?? [],
+                actions,
                 Order: index);
         }
 
         foreach ((TriggerRule rule, int index) in (settings.Triggers ?? Array.Empty<TriggerRule>()).Select((value, index) => (value, index)))
         {
-            if (!rule.Enabled || disabledGroups.Contains(rule.Group) || string.IsNullOrWhiteSpace(rule.Pattern) || string.IsNullOrWhiteSpace(rule.Command)) continue;
+            IReadOnlyList<AutomationAction> actions = ResolveActions(rule.Actions, rule.Command, separator);
+            if (!rule.Enabled || disabledGroups.Contains(rule.Group) || string.IsNullOrWhiteSpace(rule.Pattern) || actions.Count == 0) continue;
             yield return new AutomationProgram(
-                StableId("trigger", $"{rule.Pattern}\n{rule.Command}\n{rule.MatchMode}\n{rule.CaseSensitive}\n{rule.Scope}\n{rule.Group}"),
+                ResolveId(rule.Id, "trigger", $"{rule.Pattern}\n{rule.Command}\n{rule.MatchMode}\n{rule.CaseSensitive}\n{rule.Scope}\n{rule.Group}"),
                 rule.Pattern,
                 AutomationProgramType.TextTrigger,
                 new TextAutomationTrigger(
@@ -399,8 +463,24 @@ public sealed class AutomationRuntimeCompiler
                     rule.CooldownMilliseconds,
                     rule.StopProcessing,
                     rule.OneShot),
-                [],
-                [ToCommandAction(rule.Command, separator)],
+                rule.Conditions?.ToArray() ?? [],
+                actions,
+                Group: rule.Group,
+                Priority: rule.Priority,
+                Order: index);
+        }
+
+        foreach ((SemanticTriggerRule rule, int index) in (settings.SemanticTriggers ?? Array.Empty<SemanticTriggerRule>()).Select((value, index) => (value, index)))
+        {
+            AutomationAction[] actions = rule.Actions?.ToArray() ?? [];
+            if (!rule.Enabled || disabledGroups.Contains(rule.Group) || string.IsNullOrWhiteSpace(rule.EventName) || actions.Length == 0) continue;
+            yield return new AutomationProgram(
+                ResolveId(rule.Id, "semantic", $"{rule.Name}\n{rule.EventName}\n{rule.Group}"),
+                rule.Name,
+                AutomationProgramType.SemanticTrigger,
+                new SemanticAutomationTrigger(rule.EventName),
+                rule.Conditions?.ToArray() ?? [],
+                actions,
                 Group: rule.Group,
                 Priority: rule.Priority,
                 Order: index);
@@ -408,9 +488,10 @@ public sealed class AutomationRuntimeCompiler
 
         foreach ((GameRule rule, int index) in (settings.GameRules ?? Array.Empty<GameRule>()).Select((value, index) => (value, index)))
         {
-            if (!rule.Enabled || disabledGroups.Contains(rule.Group) || string.IsNullOrWhiteSpace(rule.Condition) || string.IsNullOrWhiteSpace(rule.Command)) continue;
+            IReadOnlyList<AutomationAction> actions = ResolveActions(rule.Actions, rule.Command, separator);
+            if (!rule.Enabled || disabledGroups.Contains(rule.Group) || string.IsNullOrWhiteSpace(rule.Condition) || actions.Count == 0) continue;
             yield return new AutomationProgram(
-                StableId("rule", $"{rule.Name}\n{rule.Condition}\n{rule.Command}\n{rule.Activation}\n{rule.Group}"),
+                ResolveId(rule.Id, "rule", $"{rule.Name}\n{rule.Condition}\n{rule.Command}\n{rule.Activation}\n{rule.Group}"),
                 rule.Name,
                 AutomationProgramType.StateRule,
                 new StateAutomationTrigger(
@@ -419,8 +500,8 @@ public sealed class AutomationRuntimeCompiler
                     rule.CooldownMilliseconds,
                     rule.StopProcessing,
                     rule.OneShot),
-                [new StateExpressionAutomationCondition(rule.Condition)],
-                [ToCommandAction(rule.Command, separator)],
+                rule.Conditions?.ToArray() ?? [new StateExpressionAutomationCondition(rule.Condition)],
+                actions,
                 Group: rule.Group,
                 Priority: rule.Priority,
                 Order: index);
@@ -428,18 +509,64 @@ public sealed class AutomationRuntimeCompiler
 
         foreach ((CommandTimer timer, int index) in (settings.Timers ?? Array.Empty<CommandTimer>()).Select((value, index) => (value, index)))
         {
-            if (!timer.Enabled || disabledGroups.Contains(timer.Group) || timer.IntervalSeconds <= 0 || string.IsNullOrWhiteSpace(timer.Command)) continue;
+            IReadOnlyList<AutomationAction> actions = ResolveActions(timer.Actions, timer.Command, separator);
+            if (!timer.Enabled || disabledGroups.Contains(timer.Group) || timer.IntervalSeconds <= 0 || actions.Count == 0) continue;
             yield return new AutomationProgram(
-                StableId("timer", $"{timer.Name}\n{timer.IntervalSeconds}\n{timer.Repeat}\n{timer.Command}\n{timer.Group}"),
+                ResolveId(timer.Id, "timer", $"{timer.Name}\n{timer.IntervalSeconds}\n{timer.Repeat}\n{timer.Command}\n{timer.Group}"),
                 timer.Name,
                 AutomationProgramType.Timer,
                 new TimerAutomationTrigger(Math.Min(timer.IntervalSeconds, int.MaxValue / 1000) * 1000, timer.Repeat),
-                [],
-                [ToCommandAction(timer.Command, separator)],
+                timer.Conditions?.ToArray() ?? [],
+                actions,
                 Group: timer.Group,
                 Order: index);
         }
+
+        foreach ((CommandKeyBinding binding, int index) in (settings.KeyBindings ?? Array.Empty<CommandKeyBinding>()).Select((value, index) => (value, index)))
+        {
+            IReadOnlyList<AutomationAction> actions = binding.Actions is { Count: > 0 }
+                ? binding.Actions.ToArray()
+                : binding.ScriptAction is not null ? [binding.ScriptAction] : [];
+            if (!binding.Enabled || actions.Count == 0) continue;
+            yield return new AutomationProgram(
+                ResolveId(binding.Id, "keybinding", $"{binding.Gesture}\n{binding.Name}\n{binding.Priority}"),
+                string.IsNullOrWhiteSpace(binding.Name) ? binding.Gesture : binding.Name,
+                AutomationProgramType.Keybinding,
+                new KeybindingAutomationTrigger(binding.Gesture),
+                binding.Conditions?.ToArray() ?? [],
+                actions,
+                Priority: binding.Priority,
+                Order: index);
+        }
+
+        foreach ((AutomationWorkflow workflow, int index) in (settings.Workflows ?? Array.Empty<AutomationWorkflow>()).Select((value, index) => (value, index)))
+        {
+            AutomationAction[] actions = workflow.Actions?.ToArray() ?? [];
+            if (!workflow.Enabled || disabledGroups.Contains(workflow.Group) || actions.Length == 0) continue;
+            yield return new AutomationProgram(
+                ResolveId(workflow.Id, "workflow", $"{workflow.Name}\n{workflow.TriggerEvent}\n{workflow.TriggerCondition}\n{workflow.Group}"),
+                workflow.Name,
+                AutomationProgramType.Workflow,
+                new WorkflowAutomationTrigger(workflow.TriggerEvent, workflow.TriggerCondition),
+                [],
+                actions,
+                Group: workflow.Group,
+                Priority: workflow.Priority,
+                Order: index);
+        }
     }
+
+    private static IReadOnlyList<AutomationAction> ResolveActions(
+        IReadOnlyList<AutomationAction>? actions,
+        string command,
+        string? separator)
+    {
+        if (actions is { Count: > 0 }) return actions.ToArray();
+        return string.IsNullOrWhiteSpace(command) ? [] : [ToCommandAction(command, separator)];
+    }
+
+    private static string ResolveId(string? explicitId, string type, string key) =>
+        string.IsNullOrWhiteSpace(explicitId) ? StableId(type, key) : explicitId.Trim();
 
     private static AutomationAction ToCommandAction(string command, string? separator)
     {

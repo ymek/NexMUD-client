@@ -72,6 +72,9 @@ public interface IJavaScriptRuntime : IScriptRuntime
 {
     Task LoadAsync(CompiledScriptPackage package, IScriptHost host, CancellationToken cancellationToken = default);
     Task ReloadAsync(CompiledScriptPackage package, IScriptHost host, CancellationToken cancellationToken = default);
+    Task<ScriptFunctionInvocationResult> InvokeExportAsync(
+        ScriptFunctionInvocationRequest request,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>

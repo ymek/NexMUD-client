@@ -1,0 +1,4 @@
+# Source: Xiganath 06.27.2015.txt
+# Extraction: repeated blocked movement in opaque tunnel sequence
+# Purpose: blocked movement leaves the current room unchanged
+Alas, you cannot go that way.

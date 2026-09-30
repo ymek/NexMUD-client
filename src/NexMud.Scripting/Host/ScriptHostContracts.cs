@@ -169,6 +169,14 @@ public interface IScriptLog
         WriteAsync(level, message, cancellationToken);
 }
 
+/// <summary>
+/// Cross-package invocation is intentionally narrower than the public script SDK. Generated
+/// Automation receives this capability; ordinary user packages do not.
+/// </summary>
+public interface IScriptFunctions : IScriptFunctionInvoker
+{
+}
+
 public interface IScriptHost
 {
     ScriptModuleId ModuleId { get; }
@@ -182,4 +190,5 @@ public interface IScriptHost
     IScriptScheduler Timers { get; }
     IScriptUi Ui { get; }
     IScriptLog Log { get; }
+    IScriptFunctions Functions { get; }
 }

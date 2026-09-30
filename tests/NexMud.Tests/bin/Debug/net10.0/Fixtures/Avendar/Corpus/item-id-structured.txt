@@ -1,0 +1,17 @@
+# Source: Xiganath 06.27.2015.txt
+# Source-Lines: 15910-15930
+# Purpose: structured item identification retains known fields and effect properties
++-------------------------------------------------+
+| Object:   a runed amulet wrought from red metal |
+| Flags:    hum dark evil magic nodestroy         |
+| Weight:   2.0                                   |
+| Size:     tiny                                  |
+| Level:    65                                    |
+| Material: metal                                 |
+| ----------------------------------------------- |
+| Type: key                                       |
+| ----------------------------------------------- |
+| Effect Modifies    Modifier                     |
+| -      armor class -45                          |
+| -      hp          80                           |
++-------------------------------------------------+

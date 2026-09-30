@@ -36,8 +36,28 @@ function begin(operation, value) {
     globalThis.__nexBeginRaw(operation, requestId, payload(value));
   });
 }
-function completeInvocation(invocationId, succeeded, error = '') {
-  globalThis.__nexInvocationCompleteRaw(invocationId, succeeded, String(error ?? ''));
+function completeInvocation(invocationId, succeeded, resultJson = '', error = '') {
+  globalThis.__nexInvocationCompleteRaw(invocationId, succeeded, String(resultJson ?? ''), String(error ?? ''));
+}
+function invokeCallable(fn, contextJson, invocationId) {
+  if (typeof fn !== 'function') {
+    completeInvocation(invocationId, false, '', 'Selected export is not callable.');
+    return;
+  }
+  try {
+    const context = deepFreeze(parse(contextJson));
+    const result = fn(context);
+    if (result && typeof result.then === 'function') {
+      result.then(
+        value => completeInvocation(invocationId, true, payload(value), ''),
+        error => completeInvocation(invocationId, false, '', error?.message ?? 'Script function failed.')
+      );
+    } else {
+      completeInvocation(invocationId, true, payload(result), '');
+    }
+  } catch (error) {
+    completeInvocation(invocationId, false, '', error?.message ?? 'Script function failed.');
+  }
 }
 
 Object.defineProperty(globalThis, '__nexResolve', { value: (requestId, json) => {
@@ -61,13 +81,13 @@ Object.defineProperty(globalThis, '__nexDispatchEvent', { value: (id, json, invo
     if (result && typeof result.then === 'function') {
       result.then(
         () => completeInvocation(invocationId, true),
-        error => completeInvocation(invocationId, false, error?.message ?? 'Script handler failed.')
+        error => completeInvocation(invocationId, false, '', error?.message ?? 'Script handler failed.')
       );
     } else {
       completeInvocation(invocationId, true);
     }
   } catch (error) {
-    completeInvocation(invocationId, false, error?.message ?? 'Script handler failed.');
+    completeInvocation(invocationId, false, '', error?.message ?? 'Script handler failed.');
   }
 }, writable: false, configurable: false });
 Object.defineProperty(globalThis, '__nexDispatchTimer', { value: (id, invocationId) => {
@@ -79,15 +99,16 @@ Object.defineProperty(globalThis, '__nexDispatchTimer', { value: (id, invocation
     if (result && typeof result.then === 'function') {
       result.then(
         () => completeInvocation(invocationId, true),
-        error => completeInvocation(invocationId, false, error?.message ?? 'Timer handler failed.')
+        error => completeInvocation(invocationId, false, '', error?.message ?? 'Timer handler failed.')
       );
     } else {
       completeInvocation(invocationId, true);
     }
   } catch (error) {
-    completeInvocation(invocationId, false, error?.message ?? 'Timer handler failed.');
+    completeInvocation(invocationId, false, '', error?.message ?? 'Timer handler failed.');
   }
 }, writable: false, configurable: false });
+Object.defineProperty(globalThis, '__nexInvokeCallable', { value: invokeCallable, writable: false, configurable: false });
 Object.defineProperty(globalThis, '__nexParseHostJson', { value: (json) => parse(json), writable: false, configurable: false });
 
 const events = Object.freeze({
@@ -131,6 +152,9 @@ const mapper = Object.freeze({
     return begin('mapper.move', { direction: String(direction ?? ''), ...options });
   }
 });
+const codex = Object.freeze({
+  search(queryText, limit = 50) { return begin('codex.search', { query: String(queryText ?? ''), limit: Number(limit) }); }
+});
 const storage = Object.freeze({
   get(key) { return begin('storage.get', { key }); },
   set(key, value) { return begin('storage.set', { key, value }); },
@@ -159,7 +183,13 @@ const log = Object.freeze({
   error(message, data) { return logWrite('Error', message, data); }
 });
 
-const nex = Object.freeze({ events, commands, state, log, timers, storage, mapper });
+// Deliberately omitted from @nexmud/api declarations. Only the generated Automation package is
+// granted InvokeScriptFunctions; capability gating remains authoritative at the C# host boundary.
+const __automation = Object.freeze({
+  invokeScriptFunction(request) { return begin('scripts.invoke', request ?? {}); }
+});
+
+const nex = Object.freeze({ events, commands, state, log, timers, storage, mapper, codex, __automation });
 Object.defineProperty(globalThis, 'nex', { value: nex, writable: false, configurable: false });
 export { nex };
 """;

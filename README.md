@@ -1,4 +1,17 @@
-# NexMUD Client v0.31.0
+# NexMUD Client v0.32.0
+
+## v0.32.0 - Automation Studio and unified script composition
+
+- Added the non-modal Automation Studio companion window, consolidating user-facing Automation and Scripting workflows into one workspace while keeping the main game window gameplay-focused.
+- Integrated Monaco Editor through Avalonia NativeWebView with locally bundled/offline assets, a C#-owned filesystem boundary, and an editor bridge for loading, editing, and saving TypeScript source.
+- Added Connection Profile-scoped script workspaces and package operations for create, read, save, rename, duplicate, delete, build, enable, disable, manual run, and search, plus stable `ScriptFunctionRef` package/module/export identity.
+- Added one shared script-function invocation path across aliases, keybindings, text triggers, semantic triggers, timers, state rules, workflows, and manual execution, with invocation context, cancellation, and command provenance preserved end to end.
+- Extended Automation IR with script-backed actions and predicates, including `RunScriptFunction`, capability-derived generated packages, and reference indexing for Studio `Used By` relationships and reference maintenance.
+- Kept Jint as the isolated in-process runtime, added exported-function invocation inside each package engine, and added invocation lifecycle diagnostics for started, waiting, completed, faulted, and cancelled execution.
+- Added build-driven hot reload with last-known-good behavior: successful builds replace the active package while failed builds leave the previously working runtime active.
+- Extended the scripting SDK with read/query Codex access and internal Automation invocation support while retaining capability gating, disabled dynamic string compilation, restricted module resolution, and no unrestricted CLR or filesystem access.
+- Preserved the existing Connection Profiles architecture and left Jev behavior unchanged; the Studio architecture is designed for later Jev integration without coupling Jev into this release.
+- SemVer release: 0.32.0. macOS build: 32000.
 
 ## v0.31.0 - Gameplay observation and semantic reconciliation
 
