@@ -20,7 +20,7 @@ namespace NexMud.Gui.AutomationStudio;
 /// </summary>
 internal sealed class AutomationStudioWindow : Window
 {
-    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFile }
+    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFolder, SourceFile }
     private sealed record StudioNode(
         NodeKind Kind,
         string Label,
@@ -541,10 +541,7 @@ internal sealed class AutomationStudioWindow : Window
                     IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
                         SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
                     item.IsExpanded = true;
-                    item.ItemsSource = files
-                        .Where(file => StudioFilter.Matches(file.RelativePath, filter))
-                        .Select(file => Node(new StudioNode(NodeKind.SourceFile, file.RelativePath, PackageId: package.Definition.PackageId, Path: file.RelativePath)))
-                        .ToArray();
+                    item.ItemsSource = BuildScriptNodes(package.Definition.PackageId, files, filter);
                     roots.Add(item);
                 }
             }
@@ -562,6 +559,30 @@ internal sealed class AutomationStudioWindow : Window
         finally { _refreshingNavigator = false; }
         await RefreshRuntimePanelAsync().ConfigureAwait(true);
         RefreshReferencePanel();
+    }
+
+
+    private IReadOnlyList<TreeViewItem> BuildScriptNodes(
+        string packageId,
+        IReadOnlyList<ScriptWorkspaceSourceFile> files,
+        string? filter) =>
+        ScriptExplorerTree.Build(files, filter)
+            .Select(entry => ScriptExplorerNode(packageId, entry))
+            .ToArray();
+
+    private TreeViewItem ScriptExplorerNode(string packageId, ScriptExplorerEntry entry)
+    {
+        TreeViewItem node = Node(new StudioNode(
+            entry.IsFolder ? NodeKind.SourceFolder : NodeKind.SourceFile,
+            entry.IsFolder ? $"▸ {entry.Name}" : entry.Name,
+            PackageId: packageId,
+            Path: entry.RelativePath));
+        if (entry.IsFolder)
+        {
+            node.ItemsSource = entry.Children.Select(child => ScriptExplorerNode(packageId, child)).ToArray();
+            node.IsExpanded = !string.IsNullOrWhiteSpace(_filter.Text);
+        }
+        return node;
     }
 
     private IReadOnlyList<TreeViewItem> BuildAutomationNodes(
@@ -657,6 +678,9 @@ internal sealed class AutomationStudioWindow : Window
                 case NodeKind.Package when node.PackageId is { } packageId:
                     await SelectPackageAsync(packageId).ConfigureAwait(true);
                     RenderActive();
+                    break;
+                case NodeKind.SourceFolder:
+                    item.IsExpanded = !item.IsExpanded;
                     break;
                 case NodeKind.SourceFile when node.PackageId is { } package && node.Path is { } path:
                     await OpenSourceAsync(package, path).ConfigureAwait(true);

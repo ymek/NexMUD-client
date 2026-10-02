@@ -457,6 +457,32 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio script explorer builds nested package-relative tree", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceSourceFile[] files =
+            [
+                new("main.ts", 10),
+                new("src/combat.ts", 20),
+                new("src/util/math.ts", 30),
+                new("types/api.d.ts", 40)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files);
+
+            Assert.SequenceEqual(["src", "types", "main.ts"], roots.Select(node => node.Name));
+            NexMud.Gui.AutomationStudio.ScriptExplorerEntry src = roots[0];
+            Assert.True(src.IsFolder);
+            Assert.SequenceEqual(["util", "combat.ts"], src.Children.Select(node => node.Name));
+            Assert.Equal("src/util/math.ts", src.Children[0].Children[0].RelativePath);
+
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> filtered =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files, "combat");
+            Assert.Equal(1, filtered.Count);
+            Assert.Equal("src", filtered[0].Name);
+            Assert.Equal("combat.ts", Assert.Single(filtered[0].Children).Name);
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
