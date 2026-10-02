@@ -268,6 +268,35 @@ public static class Program
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
         await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
         await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
+        await RunAsync("studio document set tracks dirty state", () =>
+        {
+            var set = new NexMud.Gui.AutomationStudio.StudioDocumentSet();
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                "automation:Alias:0",
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "cake");
+            set.OpenOrFocus(document);
+            set.SetDirty(document.Key, true);
+            Assert.Equal(document.Key, Assert.Single(set.Dirty).Key);
+            set.SetDirty(document.Key, false);
+            Assert.False(set.Dirty.Any());
+            return Task.CompletedTask;
+        });
+        await RunAsync("script workspace paths reject traversal", () =>
+        {
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("src/../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeIdentifier("bad/package", "packageId"));
+
+            string root = Path.Combine(Path.GetTempPath(), "nexmud-workspace-containment");
+            string inside = ScriptWorkspacePath.CombineInside(root, "src/main.ts");
+            string canonicalRoot = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
+            Assert.True(inside.StartsWith(canonicalRoot, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
