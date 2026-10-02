@@ -16,7 +16,8 @@ internal sealed record AutomationEditorServices(
     NexMudRuntime Runtime,
     Func<ScriptFunctionRef, Task> OpenDefinition,
     Func<ScriptFunctionRef?, Task<ScriptFunctionRef?>> ChooseFunction,
-    Func<ScriptFunctionRef, ExportedScriptFunction?> ResolveExport);
+    Func<ScriptFunctionRef, ExportedScriptFunction?> ResolveExport,
+    Func<StudioDocumentKind, string, int?> ResolveAutomationIndex);
 
 /// <summary>
 /// Full-width visual designer for one Automation definition. Sections follow the workbench model:
@@ -29,16 +30,19 @@ internal sealed class AutomationDocumentEditor
     private const double ControlHeight = 30;
 
     private readonly StudioDocumentKind _kind;
-    private readonly int _index;
+    private readonly string _automationId;
     private readonly AutomationEditorServices _services;
     private readonly CheckBox _enabled = new() { Content = "Enabled", Foreground = UiTheme.Text, VerticalAlignment = VerticalAlignment.Center };
     private Func<object> _collect = () => throw new InvalidOperationException("Editor not built.");
     private bool _loading = true;
 
-    private AutomationDocumentEditor(StudioDocumentKind kind, int index, AutomationEditorServices services)
+    private AutomationDocumentEditor(
+        StudioDocumentKind kind,
+        string automationId,
+        AutomationEditorServices services)
     {
         _kind = kind;
-        _index = index;
+        _automationId = automationId;
         _services = services;
     }
 
@@ -48,22 +52,30 @@ internal sealed class AutomationDocumentEditor
     public event Action? Changed;
     public event Action<string>? Saved;
 
-    public static AutomationDocumentEditor? Create(StudioDocumentKind kind, int index, AutomationEditorServices services)
+    public static AutomationDocumentEditor? Create(
+        StudioDocumentKind kind,
+        string automationId,
+        AutomationEditorServices services)
     {
+        int? index = services.ResolveAutomationIndex(kind, automationId);
+        if (index is null) return null;
+
         AutomationCollections collections = AutomationCollections.From(services.Runtime.Settings);
-        if (collections.Get(kind, index) is not { } value) return null;
-        AutomationDocumentEditor editor = new(kind, index, services);
-        editor.Build(value, collections.NameOf(kind, index) ?? kind.Label());
+        if (collections.Get(kind, index.Value) is not { } value) return null;
+        AutomationDocumentEditor editor = new(kind, automationId, services);
+        editor.Build(value, collections.NameOf(kind, index.Value) ?? kind.Label());
         editor._loading = false;
         return editor;
     }
 
     public async Task SaveAsync(CancellationToken cancellationToken = default)
     {
+        int index = _services.ResolveAutomationIndex(_kind, _automationId)
+            ?? throw new InvalidOperationException($"{_kind.Label()} '{_automationId}' no longer exists.");
         object updated = _collect();
-        AutomationCollections collections = AutomationCollections.From(_services.Runtime.Settings).Replace(_kind, _index, updated);
+        AutomationCollections collections = AutomationCollections.From(_services.Runtime.Settings).Replace(_kind, index, updated);
         await collections.SaveAsync(_services.Runtime, cancellationToken).ConfigureAwait(true);
-        Title = collections.NameOf(_kind, _index) ?? Title;
+        Title = collections.NameOf(_kind, index) ?? Title;
         Saved?.Invoke(Title);
     }
 

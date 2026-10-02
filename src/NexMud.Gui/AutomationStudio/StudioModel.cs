@@ -88,7 +88,6 @@ internal sealed class StudioDocument
     public string Title { get; set; }
     public bool IsDirty { get; set; }
     public IReadOnlyList<string> Breadcrumb { get; set; } = [];
-    public int Index { get; init; } = -1;
     public string? AutomationId { get; init; }
     public string? ProfileId { get; init; }
     public string? PackageId { get; init; }

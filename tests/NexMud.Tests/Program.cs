@@ -420,6 +420,43 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio open automation identity survives sibling deletion", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("first", "look"),
+                        new CommandAlias("second", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"open_{++sequence}");
+            string openId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                NexMud.Gui.AutomationStudio.StudioDocument.AutomationKey(
+                    "profile",
+                    NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                    openId),
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "second")
+            {
+                AutomationId = openId,
+                ProfileId = "profile"
+            };
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(openId, document.AutomationId);
+            Assert.Equal(0, catalog.SourceIndexFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                document.AutomationId!));
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
