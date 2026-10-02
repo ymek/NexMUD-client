@@ -297,6 +297,19 @@ public static class Program
             Assert.True(inside.StartsWith(canonicalRoot, StringComparison.Ordinal));
             return Task.CompletedTask;
         });
+        await RunAsync("studio profile switch cancels previous generation", () =>
+        {
+            using var session = new NexMud.Gui.AutomationStudio.StudioSessionController("avendar");
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot first = session.Current;
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot second = session.SwitchProfile("test-profile");
+
+            Assert.True(first.CancellationToken.IsCancellationRequested);
+            Assert.Equal(1L, second.Generation);
+            Assert.Equal("test-profile", second.ProfileId);
+            Assert.True(session.IsCurrent(second));
+            Assert.False(session.IsCurrent(first));
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
