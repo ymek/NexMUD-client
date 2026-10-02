@@ -102,6 +102,19 @@ internal static class ScriptExplorerTree
                candidate.StartsWith(ancestor + "/", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static string Rebase(string path, string sourceRoot, string destinationRoot)
+    {
+        string normalizedPath = Normalize(path);
+        string source = Normalize(sourceRoot);
+        if (!IsSameOrDescendant(normalizedPath, source))
+            throw new ArgumentException("Path is not inside the source root.", nameof(path));
+        string suffix = normalizedPath.Length == source.Length
+            ? string.Empty
+            : normalizedPath[(source.Length + 1)..];
+        string destination = Normalize(destinationRoot);
+        return string.IsNullOrEmpty(suffix) ? destination : $"{destination}/{suffix}";
+    }
+
     private static IReadOnlyList<ScriptExplorerEntry> FreezeChildren(MutableNode parent, string? filter) =>
         parent.Children.Values
             .OrderBy(node => node.Kind == ScriptExplorerEntryKind.File)

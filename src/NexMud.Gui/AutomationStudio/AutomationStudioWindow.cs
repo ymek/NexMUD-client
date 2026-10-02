@@ -54,6 +54,7 @@ internal sealed class AutomationStudioWindow : Window
         VerticalAlignment = VerticalAlignment.Center
     };
     private sealed record FolderChoice(string? FolderId, string Label);
+    private sealed record ScriptFolderChoice(string Path, string Label);
 
     private Button _newButton = new();
     private Button _organizeButton = new();
@@ -317,6 +318,10 @@ internal sealed class AutomationStudioWindow : Window
         (string PackageId, string ParentPath)? location = SelectedScriptLocation();
         if (location is not null)
         {
+            menu.Items.Add(new Separator());
+            MenuItem folder = new() { Header = "New Folder…" };
+            folder.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+            menu.Items.Add(folder);
             menu.Items.Add(new Separator());
             AddScriptFileMenuItem(menu, "New TypeScript File…", ".ts");
             AddScriptFileMenuItem(menu, "New JavaScript File…", ".js");
@@ -739,10 +744,14 @@ internal sealed class AutomationStudioWindow : Window
         node ??= _navigator.SelectedItem is TreeViewItem selected && _nodes.TryGetValue(selected, out StudioNode? found)
             ? found
             : null;
-        _organizeButton.IsVisible = node?.Kind is NodeKind.Entry or NodeKind.Folder or NodeKind.SourceFile;
+        bool automationNode = node?.Kind is NodeKind.Entry or NodeKind.Folder;
+        bool scriptNode = _activity == StudioActivity.Scripts &&
+                          node?.Kind is NodeKind.Package or NodeKind.SourceFolder or NodeKind.SourceFile;
+        _organizeButton.IsVisible = automationNode || scriptNode;
         _organizeButton.Content = node?.Kind switch
         {
-            NodeKind.Folder => "Folder…",
+            NodeKind.Folder or NodeKind.SourceFolder => "Folder…",
+            NodeKind.Package => "Package…",
             NodeKind.SourceFile => "File…",
             _ => "Move"
         };
@@ -754,6 +763,16 @@ internal sealed class AutomationStudioWindow : Window
         if (node.Kind == NodeKind.Entry)
         {
             await MoveAutomationAsync(node).ConfigureAwait(true);
+            return;
+        }
+        if (node.Kind == NodeKind.Package)
+        {
+            ShowScriptPackageMenu(node);
+            return;
+        }
+        if (node.Kind == NodeKind.SourceFolder)
+        {
+            ShowScriptFolderMenu(node);
             return;
         }
         if (node.Kind == NodeKind.SourceFile)
@@ -776,17 +795,56 @@ internal sealed class AutomationStudioWindow : Window
         menu.Open(_organizeButton);
     }
 
+    private void ShowScriptPackageMenu(StudioNode node)
+    {
+        ContextMenu menu = new();
+        MenuItem folder = new() { Header = "New Folder…" };
+        folder.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
+        menu.Items.Add(folder);
+        menu.Items.Add(reveal);
+        menu.Open(_organizeButton);
+    }
+
+    private void ShowScriptFolderMenu(StudioNode node)
+    {
+        ContextMenu menu = new();
+        MenuItem child = new() { Header = "New Subfolder…" };
+        child.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+        MenuItem move = new() { Header = "Move Folder…" };
+        move.Click += async (_, _) => await MoveScriptFolderAsync(node).ConfigureAwait(true);
+        MenuItem rename = new() { Header = "Rename…" };
+        rename.Click += async (_, _) => await RenameScriptFolderAsync(node).ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
+        MenuItem delete = new() { Header = "Delete Folder…" };
+        delete.Click += async (_, _) => await DeleteScriptFolderAsync(node).ConfigureAwait(true);
+        menu.Items.Add(child);
+        menu.Items.Add(move);
+        menu.Items.Add(rename);
+        menu.Items.Add(reveal);
+        menu.Items.Add(delete);
+        menu.Open(_organizeButton);
+    }
+
     private void ShowScriptFileMenu(StudioNode node)
     {
         ContextMenu menu = new();
+        MenuItem move = new() { Header = "Move…" };
+        move.Click += async (_, _) => await MoveScriptFileAsync(node).ConfigureAwait(true);
         MenuItem rename = new() { Header = "Rename…" };
         rename.Click += async (_, _) => await RenameScriptFileAsync(node).ConfigureAwait(true);
         MenuItem duplicate = new() { Header = "Duplicate…" };
         duplicate.Click += async (_, _) => await DuplicateScriptFileAsync(node).ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
         MenuItem delete = new() { Header = "Delete…" };
         delete.Click += async (_, _) => await DeleteScriptFileAsync(node).ConfigureAwait(true);
+        menu.Items.Add(move);
         menu.Items.Add(rename);
         menu.Items.Add(duplicate);
+        menu.Items.Add(reveal);
         menu.Items.Add(delete);
         menu.Open(_organizeButton);
     }
@@ -794,64 +852,69 @@ internal sealed class AutomationStudioWindow : Window
     private async Task RenameScriptFileAsync(StudioNode node)
     {
         if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        string? newName = await PromptAsync("Rename Script File", "File name", System.IO.Path.GetFileName(sourcePath)).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(newName)) return;
+        try
+        {
+            string destinationPath = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), newName.Trim());
+            if (!ScriptWorkspaceService.IsSupportedSourcePath(destinationPath))
+                throw new InvalidOperationException("Script files must use .ts, .js, .d.ts, or .json.");
+            await RelocateScriptFileAsync(packageId, sourcePath, destinationPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task MoveScriptFileAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        ScriptFolderChoice? folder = await ChooseScriptFolderAsync(
+            packageId,
+            "Move Script File",
+            ScriptExplorerTree.ParentPath(sourcePath)).ConfigureAwait(true);
+        if (folder is null) return;
+        try
+        {
+            string destinationPath = ScriptExplorerTree.Combine(folder.Path, System.IO.Path.GetFileName(sourcePath));
+            await RelocateScriptFileAsync(packageId, sourcePath, destinationPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RelocateScriptFileAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        if (destinationPath.Equals(sourcePath, StringComparison.Ordinal)) return;
         await SelectPackageAsync(packageId).ConfigureAwait(true);
         if (_activePackage is not null &&
             sourcePath.Equals(_activePackage.Definition.Entrypoint, StringComparison.OrdinalIgnoreCase))
-        {
-            AddProblem("Scripts", "The package entrypoint cannot be renamed until package metadata editing is available.");
-            return;
-        }
+            throw new InvalidOperationException("The package entrypoint cannot be moved until package metadata editing is available.");
 
         string sourceUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, sourcePath);
         StudioDocument? open = _documents.Find(sourceUri);
         if (open?.IsDirty == true)
-        {
-            AddProblem("Scripts", "Save or close the dirty file before renaming it.");
-            return;
-        }
-
-        string? newName = await PromptAsync("Rename Script File", "File name", System.IO.Path.GetFileName(sourcePath)).ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(newName)) return;
-        string destinationPath;
-        try
-        {
-            destinationPath = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), newName.Trim());
-            if (!ScriptWorkspaceService.IsSupportedSourcePath(destinationPath))
-                throw new InvalidOperationException("Script files must use .ts, .js, .d.ts, or .json.");
-        }
-        catch (Exception exception)
-        {
-            AddProblem("Scripts", exception.Message);
-            return;
-        }
-        if (destinationPath.Equals(sourcePath, StringComparison.Ordinal)) return;
+            throw new InvalidOperationException("Save or close the dirty file before moving it.");
 
         bool reopen = open is not null;
         string? previousActiveKey = _documents.Active?.Key;
-        try
+        if (open is not null)
         {
-            if (open is not null)
-            {
-                await _monaco.CloseDocumentAsync(sourceUri, _cts.Token).ConfigureAwait(true);
-                _documents.Close(sourceUri);
-            }
-            await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
-
-            ClientSettings rewritten = _referencesIndex.RewriteModulePath(
-                _runtime.Settings,
-                packageId,
-                sourcePath,
-                destinationPath);
-            await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
-            await RefreshNavigatorAsync().ConfigureAwait(true);
-            if (reopen)
-            {
-                await OpenSourceAsync(packageId, destinationPath).ConfigureAwait(true);
-                if (previousActiveKey is not null && previousActiveKey != sourceUri)
-                    _documents.Activate(previousActiveKey);
-            }
+            await _monaco.CloseDocumentAsync(sourceUri, _cts.Token).ConfigureAwait(true);
+            _documents.Close(sourceUri);
         }
-        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+        await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
+
+        ClientSettings rewritten = _referencesIndex.RewriteModulePath(
+            _runtime.Settings,
+            packageId,
+            sourcePath,
+            destinationPath);
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        if (reopen)
+        {
+            await OpenSourceAsync(packageId, destinationPath).ConfigureAwait(true);
+            if (previousActiveKey is not null && previousActiveKey != sourceUri)
+                _documents.Activate(previousActiveKey);
+        }
     }
 
     private async Task DuplicateScriptFileAsync(StudioNode node)
@@ -909,6 +972,184 @@ internal sealed class AutomationStudioWindow : Window
             }
             await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
             await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task CreateScriptFolderAsync()
+    {
+        (string PackageId, string ParentPath)? location = SelectedScriptLocation();
+        if (location is null) { AddProblem("Scripts", "Select a script package or folder first."); return; }
+        string? name = await PromptAsync("New Script Folder", "Folder name", "folder").ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            string path = ScriptExplorerTree.Combine(location.Value.ParentPath, name.Trim());
+            await _workspace.CreateFolderAsync(SelectedProfileId, location.Value.PackageId, path, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RenameScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        string? name = await PromptAsync("Rename Script Folder", "Folder name", System.IO.Path.GetFileName(sourcePath)).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            string destination = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), name.Trim());
+            await RelocateScriptFolderAsync(packageId, sourcePath, destination).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task MoveScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        ScriptFolderChoice? folder = await ChooseScriptFolderAsync(
+            packageId,
+            "Move Script Folder",
+            ScriptExplorerTree.ParentPath(sourcePath),
+            sourcePath).ConfigureAwait(true);
+        if (folder is null) return;
+        try
+        {
+            string destination = ScriptExplorerTree.Combine(folder.Path, System.IO.Path.GetFileName(sourcePath));
+            await RelocateScriptFolderAsync(packageId, sourcePath, destination).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RelocateScriptFolderAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        if (destinationPath.Equals(sourcePath, StringComparison.Ordinal)) return;
+        if (ScriptExplorerTree.IsSameOrDescendant(destinationPath, sourcePath))
+            throw new InvalidOperationException("A script folder cannot be moved into itself.");
+
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null &&
+            ScriptExplorerTree.IsSameOrDescendant(_activePackage.Definition.Entrypoint, sourcePath))
+            throw new InvalidOperationException("A folder containing the package entrypoint cannot be moved until package metadata editing is available.");
+
+        IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        string[] affected = files
+            .Select(file => file.RelativePath)
+            .Where(path => ScriptExplorerTree.IsSameOrDescendant(path, sourcePath))
+            .ToArray();
+        StudioDocument[] open = affected
+            .Select(path => _documents.Find(MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, path)))
+            .Where(document => document is not null)
+            .Cast<StudioDocument>()
+            .ToArray();
+        if (open.Any(document => document.IsDirty))
+            throw new InvalidOperationException("Save or close dirty files in the folder before moving it.");
+
+        string? previousActiveKey = _documents.Active?.Key;
+        Dictionary<string, string> movedUris = new(StringComparer.Ordinal);
+        foreach (StudioDocument document in open)
+        {
+            string oldPath = document.Path!;
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            movedUris[document.Key] = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, newPath);
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _documents.Close(document.Key);
+        }
+
+        await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
+        ClientSettings rewritten = _runtime.Settings;
+        foreach (string oldPath in affected)
+        {
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            rewritten = _referencesIndex.RewriteModulePath(rewritten, packageId, oldPath, newPath);
+        }
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        foreach (StudioDocument document in open)
+        {
+            string newPath = ScriptExplorerTree.Rebase(document.Path!, sourcePath, destinationPath);
+            await OpenSourceAsync(packageId, newPath).ConfigureAwait(true);
+        }
+        if (previousActiveKey is not null)
+        {
+            if (movedUris.TryGetValue(previousActiveKey, out string? movedActive)) _documents.Activate(movedActive);
+            else _documents.Activate(previousActiveKey);
+        }
+    }
+
+    private async Task DeleteScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } path) return;
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null && ScriptExplorerTree.IsSameOrDescendant(_activePackage.Definition.Entrypoint, path))
+        {
+            AddProblem("Scripts", "A folder containing the package entrypoint cannot be deleted.");
+            return;
+        }
+
+        IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        string[] affected = files.Select(file => file.RelativePath)
+            .Where(file => ScriptExplorerTree.IsSameOrDescendant(file, path))
+            .ToArray();
+        StudioDocument[] open = affected
+            .Select(file => _documents.Find(MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, file)))
+            .Where(document => document is not null)
+            .Cast<StudioDocument>()
+            .ToArray();
+        if (open.Any(document => document.IsDirty))
+        {
+            AddProblem("Scripts", "Save or close dirty files in the folder before deleting it.");
+            return;
+        }
+        int referenceCount = _referencesIndex.Build(_runtime.Settings).Count(reference =>
+            reference.FunctionRef.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+            affected.Contains(reference.FunctionRef.ModulePath, StringComparer.Ordinal));
+        string warning = referenceCount == 0 ? string.Empty : $" {referenceCount} Automation reference(s) will become unresolved.";
+        if (await ConfirmAsync("Delete Script Folder", $"Delete \"{path}\" and all of its contents?{warning}", "Delete").ConfigureAwait(true) != true) return;
+
+        try
+        {
+            foreach (StudioDocument document in open)
+            {
+                await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+                _documents.Close(document.Key);
+            }
+            await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task<ScriptFolderChoice?> ChooseScriptFolderAsync(
+        string packageId,
+        string title,
+        string currentPath,
+        string? excludedRoot = null)
+    {
+        IReadOnlyList<ScriptWorkspaceEntry> entries = await _workspace.ListEntriesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        List<ScriptFolderChoice> choices = [new ScriptFolderChoice(string.Empty, "/")];
+        choices.AddRange(entries
+            .Where(entry => entry.IsDirectory)
+            .Where(entry => excludedRoot is null || !ScriptExplorerTree.IsSameOrDescendant(entry.RelativePath, excludedRoot))
+            .Select(entry => new ScriptFolderChoice(entry.RelativePath, entry.RelativePath))
+            .OrderBy(choice => choice.Path, StringComparer.OrdinalIgnoreCase));
+        ScriptFolderChoice? initial = choices.FirstOrDefault(choice => choice.Path.Equals(currentPath, StringComparison.OrdinalIgnoreCase));
+        return await ChooseAsync(title, choices, choice => choice.Label, initial).ConfigureAwait(true);
+    }
+
+    private async Task RevealScriptPathAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId) return;
+        try
+        {
+            await _workspace.RevealInFileManagerAsync(
+                SelectedProfileId,
+                packageId,
+                node.Path,
+                _cts.Token).ConfigureAwait(true);
         }
         catch (Exception exception) { AddProblem("Scripts", exception.Message); }
     }

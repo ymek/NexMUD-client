@@ -512,6 +512,22 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio script explorer rebases moved folder paths", () =>
+        {
+            Assert.Equal(
+                "lib/combat/actions.ts",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase(
+                    "src/combat/actions.ts",
+                    "src",
+                    "lib"));
+            Assert.Equal(
+                "lib",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("src", "src", "lib"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("other/file.ts", "src", "lib"));
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
