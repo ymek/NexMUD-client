@@ -368,6 +368,30 @@ public static class Program
                 NexMud.Gui.AutomationStudio.StudioActivity.Scripts));
             return Task.CompletedTask;
         });
+        await RunAsync("studio automation organization keeps stable item identity", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("one", "look"),
+                        new CommandAlias("two", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"test_{++sequence}");
+            string first = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+            string second = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(second, catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            Assert.False(first == catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;

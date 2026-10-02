@@ -21,12 +21,21 @@ namespace NexMud.Gui.AutomationStudio;
 internal sealed class AutomationStudioWindow : Window
 {
     private enum NodeKind { Category, Entry, Scripts, Package, SourceFile }
-    private sealed record StudioNode(NodeKind Kind, string Label, StudioDocumentKind? DocKind = null, int Index = -1, string? PackageId = null, string? Path = null);
+    private sealed record StudioNode(
+        NodeKind Kind,
+        string Label,
+        StudioDocumentKind? DocKind = null,
+        int Index = -1,
+        string? AutomationId = null,
+        string? PackageId = null,
+        string? Path = null);
 
     private const int MaximumEventRows = 500;
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
     private readonly StudioSessionController _session;
+    private readonly AutomationOrganizationStore _organizationStore = new();
+    private AutomationOrganizationCatalog _organization = AutomationOrganizationCatalog.Empty;
     private readonly AutomationReferenceIndex _referencesIndex = new();
     private readonly StudioDocumentSet _documents = new();
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
@@ -324,8 +333,10 @@ internal sealed class AutomationStudioWindow : Window
         foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
             foreach (AutomationEntryInfo entry in collections.Entries(kind))
             {
-                StudioDocumentKind k = kind; int i = entry.Index;
-                items.Add(($"{kind.Label()}  ·  {entry.Name}", () => { OpenAutomation(k, i); return Task.CompletedTask; }));
+                StudioDocumentKind k = kind;
+                int i = entry.Index;
+                string automationId = _organization.IdFor(kind, entry.Index);
+                items.Add(($"{kind.Label()}  ·  {entry.Name}", () => { OpenAutomation(k, automationId, i); return Task.CompletedTask; }));
             }
         foreach (ScriptPackageSnapshot package in _packages)
             foreach (ScriptWorkspaceSourceFile file in await _workspace.ListSourceFilesAsync(SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true))
@@ -478,6 +489,10 @@ internal sealed class AutomationStudioWindow : Window
     {
         _packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
         AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+        _organization = await _organizationStore.LoadAndReconcileAsync(
+            SelectedProfileId,
+            collections,
+            _cts.Token).ConfigureAwait(true);
         string? filter = _filter.Text;
         _refreshingNavigator = true;
         try
@@ -495,7 +510,12 @@ internal sealed class AutomationStudioWindow : Window
                     category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
                     category.ItemsSource = entries
                         .Where(entry => StudioFilter.Matches(entry.Name, filter))
-                        .Select(entry => Node(new StudioNode(NodeKind.Entry, $"{(entry.Enabled ? "●" : "○")} {entry.Name}", kind, entry.Index)))
+                        .Select(entry => Node(new StudioNode(
+                            NodeKind.Entry,
+                            $"{(entry.Enabled ? "●" : "○")} {entry.Name}",
+                            kind,
+                            entry.Index,
+                            _organization.IdFor(kind, entry.Index))))
                         .ToArray();
                     roots.Add(category);
                 }
@@ -547,8 +567,8 @@ internal sealed class AutomationStudioWindow : Window
         {
             switch (node.Kind)
             {
-                case NodeKind.Entry when node.DocKind is { } kind:
-                    OpenAutomation(kind, node.Index);
+                case NodeKind.Entry when node.DocKind is { } kind && node.AutomationId is { } automationId:
+                    OpenAutomation(kind, automationId, node.Index);
                     break;
                 case NodeKind.Package when node.PackageId is { } packageId:
                     await SelectPackageAsync(packageId).ConfigureAwait(true);
@@ -573,9 +593,16 @@ internal sealed class AutomationStudioWindow : Window
         ChooseFunctionAsync,
         reference => _packages.SelectMany(package => package.Exports).FirstOrDefault(export => export.FunctionRef == reference));
 
-    private void OpenAutomation(StudioDocumentKind kind, int index)
+    private void OpenAutomation(StudioDocumentKind kind, string automationId, int fallbackIndex = -1)
     {
-        string key = StudioDocument.AutomationKey(kind, index);
+        int index = _organization.SourceIndexFor(kind, automationId) ?? fallbackIndex;
+        if (index < 0)
+        {
+            AddProblem("Automation", $"{kind.Label()} '{automationId}' no longer exists.");
+            return;
+        }
+
+        string key = StudioDocument.AutomationKey(SelectedProfileId, kind, automationId);
         if (!_editors.ContainsKey(key))
         {
             AutomationDocumentEditor? editor = AutomationDocumentEditor.Create(kind, index, EditorServices());
@@ -592,6 +619,8 @@ internal sealed class AutomationStudioWindow : Window
         _documents.OpenOrFocus(new StudioDocument(key, kind, _editors[key].Title)
         {
             Index = index,
+            AutomationId = automationId,
+            ProfileId = SelectedProfileId,
             Breadcrumb = ["Automation", kind.CategoryLabel(), _editors[key].Title]
         });
     }
@@ -630,8 +659,11 @@ internal sealed class AutomationStudioWindow : Window
             };
             if (seeded is not null) collections = collections.Replace(kind, index, seeded);
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            _organization = _organization.RegisterAdded(kind, index);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            string automationId = _organization.IdFor(kind, index);
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            OpenAutomation(kind, index);
+            OpenAutomation(kind, automationId, index);
         }
         catch (Exception exception) { AddProblem("Automation", exception.Message); }
     }
@@ -640,11 +672,18 @@ internal sealed class AutomationStudioWindow : Window
     {
         try
         {
-            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).Duplicate(document.Kind, document.Index);
+            if (document.AutomationId is null) return;
+            int sourceIndex = _organization.SourceIndexFor(document.Kind, document.AutomationId) ?? -1;
+            if (sourceIndex < 0) return;
+            string? folderId = _organization.FolderIdFor(document.Kind, document.AutomationId);
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).Duplicate(document.Kind, sourceIndex);
             if (index < 0) return;
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            _organization = _organization.RegisterAdded(document.Kind, index, folderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            string automationId = _organization.IdFor(document.Kind, index);
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            OpenAutomation(document.Kind, index);
+            OpenAutomation(document.Kind, automationId, index);
         }
         catch (Exception exception) { AddProblem("Automation", exception.Message); }
     }
@@ -659,8 +698,13 @@ internal sealed class AutomationStudioWindow : Window
         if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete \"{document.Title}\"? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
         try
         {
-            AutomationCollections collections = AutomationCollections.From(_runtime.Settings).Remove(document.Kind, document.Index);
+            if (document.AutomationId is null) return;
+            int sourceIndex = _organization.SourceIndexFor(document.Kind, document.AutomationId) ?? -1;
+            if (sourceIndex < 0) return;
+            AutomationCollections collections = AutomationCollections.From(_runtime.Settings).Remove(document.Kind, sourceIndex);
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            _organization = _organization.RegisterRemoved(document.Kind, sourceIndex);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
             foreach (StudioDocument open in _documents.Documents.Where(d => d.Kind == document.Kind).ToArray())
             {
                 _editors.Remove(open.Key);

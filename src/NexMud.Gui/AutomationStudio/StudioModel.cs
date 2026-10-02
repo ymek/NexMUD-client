@@ -89,12 +89,14 @@ internal sealed class StudioDocument
     public bool IsDirty { get; set; }
     public IReadOnlyList<string> Breadcrumb { get; set; } = [];
     public int Index { get; init; } = -1;
+    public string? AutomationId { get; init; }
     public string? ProfileId { get; init; }
     public string? PackageId { get; init; }
     public string? Path { get; init; }
     public bool IsScript => Kind == StudioDocumentKind.Script;
 
-    public static string AutomationKey(StudioDocumentKind kind, int index) => $"automation:{kind}:{index}";
+    public static string AutomationKey(string profileId, StudioDocumentKind kind, string automationId) =>
+        $"automation:{profileId}:{kind}:{automationId}";
 }
 
 /// <summary>
