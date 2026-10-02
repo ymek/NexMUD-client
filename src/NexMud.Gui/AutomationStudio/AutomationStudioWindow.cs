@@ -579,10 +579,10 @@ internal sealed class AutomationStudioWindow : Window
                 {
                     TreeViewItem item = Node(new StudioNode(NodeKind.Package,
                         $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
-                    IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+                    IReadOnlyList<ScriptWorkspaceEntry> entries = await _workspace.ListEntriesAsync(
                         SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
                     item.IsExpanded = true;
-                    item.ItemsSource = BuildScriptNodes(package.Definition.PackageId, files, filter);
+                    item.ItemsSource = BuildScriptNodes(package.Definition.PackageId, entries, filter);
                     roots.Add(item);
                 }
             }
@@ -605,9 +605,9 @@ internal sealed class AutomationStudioWindow : Window
 
     private IReadOnlyList<TreeViewItem> BuildScriptNodes(
         string packageId,
-        IReadOnlyList<ScriptWorkspaceSourceFile> files,
+        IReadOnlyList<ScriptWorkspaceEntry> entries,
         string? filter) =>
-        ScriptExplorerTree.Build(files, filter)
+        ScriptExplorerTree.Build(entries, filter)
             .Select(entry => ScriptExplorerNode(packageId, entry))
             .ToArray();
 

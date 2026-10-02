@@ -90,7 +90,7 @@ public sealed record ScriptPackageRuntimeChanged(
 /// never persists source directly. Successful builds replace the active Jint package; failed
 /// builds leave the last-known-good runtime untouched.
 /// </summary>
-public sealed class ScriptWorkspaceService
+public sealed partial class ScriptWorkspaceService
 {
     private const string ManifestFileName = "manifest.json";
     private static readonly string[] SupportedExtensions = [".ts", ".js", ".d.ts", ".json"];

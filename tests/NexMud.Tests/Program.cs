@@ -494,6 +494,24 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio script explorer preserves explicit empty folders", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceEntry[] entries =
+            [
+                new("empty", true, 0, DateTimeOffset.UnixEpoch),
+                new("src", true, 0, DateTimeOffset.UnixEpoch),
+                new("src/main.ts", false, 10, DateTimeOffset.UnixEpoch)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(entries);
+
+            Assert.SequenceEqual(["empty", "src"], roots.Select(node => node.Name));
+            Assert.True(roots[0].IsFolder);
+            Assert.Equal(0, roots[0].Children.Count);
+            Assert.Equal("main.ts", Assert.Single(roots[1].Children).Name);
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
