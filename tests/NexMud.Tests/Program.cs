@@ -483,6 +483,17 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio script explorer derives safe file destinations", () =>
+        {
+            Assert.Equal("src/module.ts", NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "module.ts"));
+            Assert.Equal("src", NexMud.Gui.AutomationStudio.ScriptExplorerTree.ParentPath("src/module.ts"));
+            Assert.True(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("src/util/math.ts", "src"));
+            Assert.False(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("source.ts", "src"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "../escape.ts"));
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
