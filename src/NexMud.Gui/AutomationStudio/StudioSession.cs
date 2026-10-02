@@ -9,6 +9,29 @@ internal enum StudioActivity
     Runtime
 }
 
+internal static class StudioActivityModel
+{
+    public static string ExplorerTitle(StudioActivity activity) => activity switch
+    {
+        StudioActivity.Automations => "AUTOMATIONS",
+        StudioActivity.Scripts => "SCRIPTS",
+        StudioActivity.Workflows => "WORKFLOWS",
+        StudioActivity.Search => "SEARCH",
+        StudioActivity.Runtime => "RUNTIME",
+        _ => "AUTOMATIONS"
+    };
+
+    public static bool IncludesAutomationKind(StudioActivity activity, StudioDocumentKind kind) => activity switch
+    {
+        StudioActivity.Automations => kind is not StudioDocumentKind.Workflow and not StudioDocumentKind.Script,
+        StudioActivity.Workflows => kind == StudioDocumentKind.Workflow,
+        _ => false
+    };
+
+    public static bool ShowsScriptPackages(StudioActivity activity) =>
+        activity == StudioActivity.Scripts;
+}
+
 internal readonly record struct StudioSessionSnapshot(
     string ProfileId,
     long Generation,

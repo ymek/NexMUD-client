@@ -353,6 +353,21 @@ public static class Program
             Assert.Equal(2, index.FindUses(rewritten, destination).Count);
             return Task.CompletedTask;
         });
+        await RunAsync("studio activities partition automation and workflow explorers", () =>
+        {
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias));
+            Assert.False(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Workflows,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.ShowsScriptPackages(
+                NexMud.Gui.AutomationStudio.StudioActivity.Scripts));
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;

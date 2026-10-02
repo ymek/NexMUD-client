@@ -35,6 +35,16 @@ internal sealed class AutomationStudioWindow : Window
     private readonly ComboBox _profile = new() { MinWidth = 210 };
     private readonly TextBox _filter = UiTheme.FieldBox();
     private readonly TreeView _navigator = new();
+    private readonly StackPanel _activityRail = new() { Spacing = 6, Margin = new Thickness(5, 7) };
+    private readonly TextBlock _explorerTitle = new()
+    {
+        Foreground = UiTheme.Accent,
+        FontWeight = FontWeight.SemiBold,
+        FontSize = NexTypography.Metadata,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+    private Button _newButton = new();
+    private StudioActivity _activity;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
     private readonly StackPanel _inspector = new() { Spacing = 8, Margin = new Thickness(12) };
@@ -73,6 +83,7 @@ internal sealed class AutomationStudioWindow : Window
         _workspace = runtime.ScriptWorkspace;
         _session = new StudioSessionController(runtime.ActiveConnectionProfile.Id);
         _bottomCollapsed = _preferences.BottomCollapsed;
+        _activity = _preferences.ResolveActivity();
 
         Title = "NexMUD Automation Studio";
         Width = 1440;
@@ -113,10 +124,12 @@ internal sealed class AutomationStudioWindow : Window
 
         _body = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions($"{_preferences.ExplorerWidth},5,*,5,{_preferences.InspectorWidth}")
+            ColumnDefinitions = new ColumnDefinitions($"44,{_preferences.ExplorerWidth},5,*")
         };
         Grid.SetRow(_body, 1);
         _root.Children.Add(_body);
+
+        _body.Children.Add(BuildActivityRail());
 
         Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
         explorer.Children.Add(BuildExplorerHeader());
@@ -127,9 +140,10 @@ internal sealed class AutomationStudioWindow : Window
         Grid.SetRow(tree, 2);
         explorer.Children.Add(tree);
         _explorerFrame = Frame("EXPLORER", explorer, withHeader: false);
+        Grid.SetColumn(_explorerFrame, 1);
         _body.Children.Add(_explorerFrame);
 
-        _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 1); _body.Children.Add(_leftSplit);
+        _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
         Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
         documentArea.Children.Add(new Border
         {
@@ -146,9 +160,7 @@ internal sealed class AutomationStudioWindow : Window
         Grid.SetRow(surface, 2);
         documentArea.Children.Add(surface);
         Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = documentArea };
-        Grid.SetColumn(centerFrame, 2); _body.Children.Add(centerFrame);
-        _rightSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_rightSplit, 3); _body.Children.Add(_rightSplit);
-        _inspectorFrame = Frame("DETAILS", new ScrollViewer { Content = _inspector }); Grid.SetColumn(_inspectorFrame, 4); _body.Children.Add(_inspectorFrame);
+        Grid.SetColumn(centerFrame, 3); _body.Children.Add(centerFrame);
 
         GridSplitter horizontal = Splitter(GridResizeDirection.Rows); Grid.SetRow(horizontal, 2); _root.Children.Add(horizontal);
         _bottom = new TabControl
@@ -183,25 +195,85 @@ internal sealed class AutomationStudioWindow : Window
         return _root;
     }
 
+    private Control BuildActivityRail()
+    {
+        RenderActivityRail();
+        return new Border
+        {
+            Background = UiTheme.Console,
+            BorderBrush = UiTheme.Divider,
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Child = _activityRail
+        };
+    }
+
+    private void RenderActivityRail()
+    {
+        _activityRail.Children.Clear();
+        _activityRail.Children.Add(ActivityButton("A", "Automations", StudioActivity.Automations));
+        _activityRail.Children.Add(ActivityButton("</>", "Scripts", StudioActivity.Scripts));
+        _activityRail.Children.Add(ActivityButton("W", "Workflows", StudioActivity.Workflows));
+        _activityRail.Children.Add(ActivityButton("⌕", "Search", StudioActivity.Search));
+        _activityRail.Children.Add(ActivityButton("▶", "Runtime", StudioActivity.Runtime));
+    }
+
+    private Button ActivityButton(string glyph, string label, StudioActivity activity)
+    {
+        Button button = UiTheme.QuietButton(glyph);
+        button.Width = 34;
+        button.MinWidth = 34;
+        button.Padding = new Thickness(2);
+        button.Background = _activity == activity ? UiTheme.Raised : Brushes.Transparent;
+        Avalonia.Automation.AutomationProperties.SetName(button, label);
+        ToolTip.SetTip(button, label);
+        button.Click += async (_, _) => await SetActivityAsync(activity).ConfigureAwait(true);
+        return button;
+    }
+
+    private async Task SetActivityAsync(StudioActivity activity)
+    {
+        if (_activity == activity) return;
+        _activity = activity;
+        _preferences.SetActivity(activity);
+        RenderActivityRail();
+        UpdateActivityChrome();
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+    }
+
+    private void UpdateActivityChrome()
+    {
+        _explorerTitle.Text = StudioActivityModel.ExplorerTitle(_activity);
+        _filter.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+        _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+    }
+
     private Control BuildExplorerHeader()
     {
         Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(8, 6) };
-        header.Children.Add(new TextBlock { Text = "EXPLORER", Foreground = UiTheme.Accent, FontWeight = FontWeight.SemiBold, FontSize = NexTypography.Metadata, VerticalAlignment = VerticalAlignment.Center });
-        Button add = UiTheme.QuietButton("+ New");
-        add.Click += (_, _) =>
+        header.Children.Add(_explorerTitle);
+        _newButton = UiTheme.QuietButton("+ New");
+        _newButton.Click += async (_, _) =>
         {
+            if (_activity == StudioActivity.Scripts)
+            {
+                await CreatePackageAsync().ConfigureAwait(true);
+                return;
+            }
+
             ContextMenu menu = new();
-            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds
+                         .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind)))
             {
                 MenuItem item = new() { Header = kind.Label() };
                 StudioDocumentKind captured = kind;
                 item.Click += async (_, _) => await CreateAutomationAsync(captured).ConfigureAwait(true);
                 menu.Items.Add(item);
             }
-            menu.Open(add);
+            menu.Open(_newButton);
         };
-        Grid.SetColumn(add, 1);
-        header.Children.Add(add);
+        Grid.SetColumn(_newButton, 1);
+        header.Children.Add(_newButton);
+        UpdateActivityChrome();
         return header;
     }
 
@@ -412,35 +484,47 @@ internal sealed class AutomationStudioWindow : Window
         {
             _nodes.Clear();
             List<object> roots = [];
-            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+
+            if (_activity is StudioActivity.Automations or StudioActivity.Workflows)
             {
-                IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
-                TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
-                category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
-                category.ItemsSource = entries
-                    .Where(entry => StudioFilter.Matches(entry.Name, filter))
-                    .Select(entry => Node(new StudioNode(NodeKind.Entry, $"{(entry.Enabled ? "●" : "○")} {entry.Name}", kind, entry.Index)))
-                    .ToArray();
-                roots.Add(category);
+                foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds
+                             .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind)))
+                {
+                    IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
+                    TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
+                    category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
+                    category.ItemsSource = entries
+                        .Where(entry => StudioFilter.Matches(entry.Name, filter))
+                        .Select(entry => Node(new StudioNode(NodeKind.Entry, $"{(entry.Enabled ? "●" : "○")} {entry.Name}", kind, entry.Index)))
+                        .ToArray();
+                    roots.Add(category);
+                }
+            }
+            else if (StudioActivityModel.ShowsScriptPackages(_activity))
+            {
+                foreach (ScriptPackageSnapshot package in _packages)
+                {
+                    TreeViewItem item = Node(new StudioNode(NodeKind.Package,
+                        $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
+                    IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+                        SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+                    item.IsExpanded = true;
+                    item.ItemsSource = files
+                        .Where(file => StudioFilter.Matches(file.RelativePath, filter))
+                        .Select(file => Node(new StudioNode(NodeKind.SourceFile, file.RelativePath, PackageId: package.Definition.PackageId, Path: file.RelativePath)))
+                        .ToArray();
+                    roots.Add(item);
+                }
+            }
+            else if (_activity == StudioActivity.Runtime)
+            {
+                foreach (ScriptPackageSnapshot package in _packages)
+                    roots.Add(Node(new StudioNode(
+                        NodeKind.Package,
+                        $"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus}",
+                        PackageId: package.Definition.PackageId)));
             }
 
-            TreeViewItem scripts = Node(new StudioNode(NodeKind.Scripts, "SCRIPTS"));
-            scripts.IsExpanded = true;
-            List<TreeViewItem> packageItems = [];
-            foreach (ScriptPackageSnapshot package in _packages)
-            {
-                TreeViewItem item = Node(new StudioNode(NodeKind.Package,
-                    $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
-                IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
-                    SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-                item.ItemsSource = files
-                    .Where(file => StudioFilter.Matches(file.RelativePath, filter))
-                    .Select(file => Node(new StudioNode(NodeKind.SourceFile, file.RelativePath, PackageId: package.Definition.PackageId, Path: file.RelativePath)))
-                    .ToArray();
-                packageItems.Add(item);
-            }
-            scripts.ItemsSource = packageItems;
-            roots.Add(scripts);
             _navigator.ItemsSource = roots;
         }
         finally { _refreshingNavigator = false; }
@@ -1065,8 +1149,7 @@ internal sealed class AutomationStudioWindow : Window
             else await SaveActiveAsync().ConfigureAwait(true);
         }
         else if (e.Key == Key.P) { e.Handled = true; await QuickOpenAsync().ConfigureAwait(true); }
-        else if (e.Key == Key.B && e.KeyModifiers.HasFlag(KeyModifiers.Alt)) { e.Handled = true; TogglePane(_inspectorFrame, _rightSplit, 4, _preferences.InspectorWidth); }
-        else if (e.Key == Key.B) { e.Handled = true; TogglePane(_explorerFrame, _leftSplit, 0, _preferences.ExplorerWidth); }
+        else if (e.Key == Key.B) { e.Handled = true; TogglePane(_explorerFrame, _leftSplit, 1, _preferences.ExplorerWidth); }
         else if (e.Key == Key.J) { e.Handled = true; ToggleBottom(); }
         else if (e.Key == Key.W && _documents.Active is { } active)
         {
@@ -1099,13 +1182,11 @@ internal sealed class AutomationStudioWindow : Window
     {
         _workspace.WorkspaceChanged -= WorkspaceChanged;
         _cts.Cancel();
-        if (_body.ColumnDefinitions.Count >= 5)
-        {
-            _preferences.ExplorerWidth = _body.ColumnDefinitions[0].ActualWidth;
-            _preferences.InspectorWidth = _body.ColumnDefinitions[4].ActualWidth;
-        }
+        if (_body.ColumnDefinitions.Count >= 4)
+            _preferences.ExplorerWidth = _body.ColumnDefinitions[1].ActualWidth;
         if (!_bottomCollapsed) _preferences.BottomHeight = _root.RowDefinitions[3].ActualHeight;
         _preferences.BottomCollapsed = _bottomCollapsed;
+        _preferences.SetActivity(_activity);
         _preferences.Save();
         _ = _monaco.DisposeAsync();
         _session.Dispose();
