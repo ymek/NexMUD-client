@@ -881,7 +881,7 @@ internal sealed class AutomationStudioWindow : Window
 
     private async Task DeleteAutomationAsync(StudioDocument document)
     {
-        if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete "{document.Title}"? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
+        if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete '{document.Title}'? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
         try
         {
             if (document.AutomationId is null) return;
