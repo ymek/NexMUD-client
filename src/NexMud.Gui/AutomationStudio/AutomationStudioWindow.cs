@@ -20,13 +20,14 @@ namespace NexMud.Gui.AutomationStudio;
 /// </summary>
 internal sealed class AutomationStudioWindow : Window
 {
-    private enum NodeKind { Category, Entry, Scripts, Package, SourceFile }
+    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFile }
     private sealed record StudioNode(
         NodeKind Kind,
         string Label,
         StudioDocumentKind? DocKind = null,
         int Index = -1,
         string? AutomationId = null,
+        string? FolderId = null,
         string? PackageId = null,
         string? Path = null);
 
@@ -52,7 +53,10 @@ internal sealed class AutomationStudioWindow : Window
         FontSize = NexTypography.Metadata,
         VerticalAlignment = VerticalAlignment.Center
     };
+    private sealed record FolderChoice(string? FolderId, string Label);
+
     private Button _newButton = new();
+    private Button _organizeButton = new();
     private StudioActivity _activity;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
@@ -254,12 +258,19 @@ internal sealed class AutomationStudioWindow : Window
         _explorerTitle.Text = StudioActivityModel.ExplorerTitle(_activity);
         _filter.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
         _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+        UpdateOrganizeButton();
     }
 
     private Control BuildExplorerHeader()
     {
-        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(8, 6) };
+        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(8, 6) };
         header.Children.Add(_explorerTitle);
+        _organizeButton = UiTheme.QuietButton("Move");
+        _organizeButton.IsVisible = false;
+        _organizeButton.Click += async (_, _) => await OrganizeSelectedAsync().ConfigureAwait(true);
+        Grid.SetColumn(_organizeButton, 1);
+        header.Children.Add(_organizeButton);
+
         _newButton = UiTheme.QuietButton("+ New");
         _newButton.Click += async (_, _) =>
         {
@@ -270,17 +281,27 @@ internal sealed class AutomationStudioWindow : Window
             }
 
             ContextMenu menu = new();
-            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds
-                         .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind)))
+            StudioDocumentKind[] kinds = StudioDocumentKinds.AutomationKinds
+                .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind))
+                .ToArray();
+            foreach (StudioDocumentKind kind in kinds)
             {
                 MenuItem item = new() { Header = kind.Label() };
                 StudioDocumentKind captured = kind;
                 item.Click += async (_, _) => await CreateAutomationAsync(captured).ConfigureAwait(true);
                 menu.Items.Add(item);
             }
+            if (kinds.Length > 0) menu.Items.Add(new Separator());
+            foreach (StudioDocumentKind kind in kinds)
+            {
+                MenuItem folder = new() { Header = $"New {kind.CategoryLabel()} Folder…" };
+                StudioDocumentKind captured = kind;
+                folder.Click += async (_, _) => await CreateFolderAsync(captured).ConfigureAwait(true);
+                menu.Items.Add(folder);
+            }
             menu.Open(_newButton);
         };
-        Grid.SetColumn(_newButton, 1);
+        Grid.SetColumn(_newButton, 2);
         header.Children.Add(_newButton);
         UpdateActivityChrome();
         return header;
@@ -508,15 +529,7 @@ internal sealed class AutomationStudioWindow : Window
                     IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
                     TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
                     category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
-                    category.ItemsSource = entries
-                        .Where(entry => StudioFilter.Matches(entry.Name, filter))
-                        .Select(entry => Node(new StudioNode(
-                            NodeKind.Entry,
-                            $"{(entry.Enabled ? "●" : "○")} {entry.Name}",
-                            kind,
-                            entry.Index,
-                            _organization.IdFor(kind, entry.Index))))
-                        .ToArray();
+                    category.ItemsSource = BuildAutomationNodes(kind, entries, filter);
                     roots.Add(category);
                 }
             }
@@ -552,6 +565,70 @@ internal sealed class AutomationStudioWindow : Window
         RefreshReferencePanel();
     }
 
+    private IReadOnlyList<TreeViewItem> BuildAutomationNodes(
+        StudioDocumentKind kind,
+        IReadOnlyList<AutomationEntryInfo> entries,
+        string? filter)
+    {
+        Dictionary<int, AutomationEntryInfo> byIndex = entries.ToDictionary(entry => entry.Index);
+        List<TreeViewItem> nodes = [];
+        foreach (AutomationOrganizationFolder folder in _organization.FoldersFor(kind))
+        {
+            TreeViewItem? folderNode = BuildFolderNode(folder, byIndex, filter);
+            if (folderNode is not null) nodes.Add(folderNode);
+        }
+        foreach (AutomationOrganizationItem item in _organization.ItemsFor(kind))
+        {
+            if (!byIndex.TryGetValue(item.SourceIndex, out AutomationEntryInfo? entry) ||
+                !StudioFilter.Matches(entry.Name, filter)) continue;
+            nodes.Add(AutomationEntryNode(kind, entry, item));
+        }
+        return nodes;
+    }
+
+    private TreeViewItem? BuildFolderNode(
+        AutomationOrganizationFolder folder,
+        IReadOnlyDictionary<int, AutomationEntryInfo> entries,
+        string? filter)
+    {
+        bool folderMatches = StudioFilter.Matches(folder.Name, filter);
+        string? childFilter = folderMatches ? null : filter;
+        List<TreeViewItem> children = [];
+        foreach (AutomationOrganizationFolder child in _organization.FoldersFor(folder.Kind, folder.Id))
+        {
+            TreeViewItem? childNode = BuildFolderNode(child, entries, childFilter);
+            if (childNode is not null) children.Add(childNode);
+        }
+        foreach (AutomationOrganizationItem item in _organization.ItemsFor(folder.Kind, folder.Id))
+        {
+            if (!entries.TryGetValue(item.SourceIndex, out AutomationEntryInfo? entry) ||
+                !StudioFilter.Matches(entry.Name, childFilter)) continue;
+            children.Add(AutomationEntryNode(folder.Kind, entry, item));
+        }
+        if (!folderMatches && !string.IsNullOrWhiteSpace(filter) && children.Count == 0) return null;
+
+        TreeViewItem node = Node(new StudioNode(
+            NodeKind.Folder,
+            $"▸ {folder.Name}",
+            folder.Kind,
+            FolderId: folder.Id));
+        node.IsExpanded = !string.IsNullOrWhiteSpace(filter);
+        node.ItemsSource = children;
+        return node;
+    }
+
+    private TreeViewItem AutomationEntryNode(
+        StudioDocumentKind kind,
+        AutomationEntryInfo entry,
+        AutomationOrganizationItem item) =>
+        Node(new StudioNode(
+            NodeKind.Entry,
+            $"{(entry.Enabled ? "●" : "○")} {entry.Name}",
+            kind,
+            entry.Index,
+            item.Id,
+            item.FolderId));
+
     private TreeViewItem Node(StudioNode node)
     {
         TreeViewItem item = new() { Header = node.Label };
@@ -562,13 +639,21 @@ internal sealed class AutomationStudioWindow : Window
     private async void NavigatorSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_refreshingNavigator) return;
-        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node)) return;
+        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node))
+        {
+            UpdateOrganizeButton();
+            return;
+        }
+        UpdateOrganizeButton(node);
         try
         {
             switch (node.Kind)
             {
                 case NodeKind.Entry when node.DocKind is { } kind && node.AutomationId is { } automationId:
                     OpenAutomation(kind, automationId, node.Index);
+                    break;
+                case NodeKind.Folder:
+                    item.IsExpanded = !item.IsExpanded;
                     break;
                 case NodeKind.Package when node.PackageId is { } packageId:
                     await SelectPackageAsync(packageId).ConfigureAwait(true);
@@ -583,6 +668,114 @@ internal sealed class AutomationStudioWindow : Window
             }
         }
         catch (Exception exception) { AddProblem("Error", exception.Message); }
+    }
+
+    private void UpdateOrganizeButton(StudioNode? node = null)
+    {
+        node ??= _navigator.SelectedItem is TreeViewItem selected && _nodes.TryGetValue(selected, out StudioNode? found)
+            ? found
+            : null;
+        _organizeButton.IsVisible = node?.Kind is NodeKind.Entry or NodeKind.Folder;
+        _organizeButton.Content = node?.Kind == NodeKind.Folder ? "Folder…" : "Move";
+    }
+
+    private async Task OrganizeSelectedAsync()
+    {
+        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node)) return;
+        if (node.Kind == NodeKind.Entry)
+        {
+            await MoveAutomationAsync(node).ConfigureAwait(true);
+            return;
+        }
+        if (node.Kind != NodeKind.Folder || node.DocKind is not { } kind || node.FolderId is not { } folderId) return;
+
+        ContextMenu menu = new();
+        MenuItem child = new() { Header = "New Subfolder…" };
+        child.Click += async (_, _) => await CreateFolderAsync(kind, folderId).ConfigureAwait(true);
+        MenuItem rename = new() { Header = "Rename…" };
+        rename.Click += async (_, _) => await RenameFolderAsync(folderId).ConfigureAwait(true);
+        MenuItem delete = new() { Header = "Delete Empty Folder…" };
+        delete.Click += async (_, _) => await DeleteFolderAsync(folderId).ConfigureAwait(true);
+        menu.Items.Add(child);
+        menu.Items.Add(rename);
+        menu.Items.Add(delete);
+        menu.Open(_organizeButton);
+    }
+
+    private async Task CreateFolderAsync(StudioDocumentKind kind, string? parentFolderId = null)
+    {
+        string? name = await PromptAsync("New Folder", "Folder name", "New folder").ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            _organization = _organization.AddFolder(kind, name, parentFolderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task RenameFolderAsync(string folderId)
+    {
+        AutomationOrganizationFolder? folder = _organization.Folder(folderId);
+        if (folder is null) return;
+        string? name = await PromptAsync("Rename Folder", "Folder name", folder.Name).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            _organization = _organization.RenameFolder(folderId, name);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task DeleteFolderAsync(string folderId)
+    {
+        AutomationOrganizationFolder? folder = _organization.Folder(folderId);
+        if (folder is null) return;
+        if (await ConfirmAsync("Delete Folder", $"Delete empty folder \"{folder.Name}\"?", "Delete").ConfigureAwait(true) != true) return;
+        try
+        {
+            _organization = _organization.DeleteEmptyFolder(folderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task MoveAutomationAsync(StudioNode node)
+    {
+        if (node.DocKind is not { } kind || node.AutomationId is not { } automationId) return;
+        List<FolderChoice> choices = [new FolderChoice(null, $"{kind.CategoryLabel()} root")];
+        choices.AddRange(_organization.Folders
+            .Where(folder => folder.Kind == kind)
+            .OrderBy(folder => folder.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(folder => new FolderChoice(folder.Id, FolderPath(folder))));
+        FolderChoice? current = choices.FirstOrDefault(choice => choice.FolderId == node.FolderId) ?? choices[0];
+        FolderChoice? selected = await ChooseAsync("Move Automation", choices, choice => choice.Label, current).ConfigureAwait(true);
+        if (selected is null || selected.FolderId == node.FolderId) return;
+        try
+        {
+            _organization = _organization.MoveItem(kind, automationId, selected.FolderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private string FolderPath(AutomationOrganizationFolder folder)
+    {
+        List<string> names = [folder.Name];
+        string? parentId = folder.ParentFolderId;
+        HashSet<string> visited = [folder.Id];
+        while (parentId is not null && visited.Add(parentId) && _organization.Folder(parentId) is { } parent)
+        {
+            names.Add(parent.Name);
+            parentId = parent.ParentFolderId;
+        }
+        names.Reverse();
+        return string.Join(" / ", names);
     }
 
     // ───────────────────────────── Automation documents ─────────────────────────────

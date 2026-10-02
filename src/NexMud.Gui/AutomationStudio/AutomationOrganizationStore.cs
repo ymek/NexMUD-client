@@ -39,6 +39,109 @@ internal sealed record AutomationOrganizationCatalog(
     public string? FolderIdFor(StudioDocumentKind kind, string itemId) =>
         Items.FirstOrDefault(item => item.Kind == kind && item.Id.Equals(itemId, StringComparison.Ordinal))?.FolderId;
 
+    public IReadOnlyList<AutomationOrganizationFolder> FoldersFor(
+        StudioDocumentKind kind,
+        string? parentFolderId = null) =>
+        Folders
+            .Where(folder => folder.Kind == kind && folder.ParentFolderId == parentFolderId)
+            .OrderBy(folder => folder.Order)
+            .ThenBy(folder => folder.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    public IReadOnlyList<AutomationOrganizationItem> ItemsFor(
+        StudioDocumentKind kind,
+        string? folderId = null) =>
+        Items
+            .Where(item => item.Kind == kind && item.FolderId == folderId)
+            .OrderBy(item => item.Order)
+            .ThenBy(item => item.SourceIndex)
+            .ToArray();
+
+    public AutomationOrganizationFolder? Folder(string folderId) =>
+        Folders.FirstOrDefault(folder => folder.Id.Equals(folderId, StringComparison.Ordinal));
+
+    public AutomationOrganizationCatalog AddFolder(
+        StudioDocumentKind kind,
+        string name,
+        string? parentFolderId = null,
+        Func<string>? createId = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        string normalizedName = name.Trim();
+        if (parentFolderId is not null)
+        {
+            AutomationOrganizationFolder parent = Folder(parentFolderId)
+                ?? throw new InvalidOperationException("Automation folder parent no longer exists.");
+            if (parent.Kind != kind)
+                throw new InvalidOperationException("Folder parent must belong to the same Automation category.");
+        }
+        if (Folders.Any(folder => folder.Kind == kind && folder.ParentFolderId == parentFolderId &&
+                                  folder.Name.Equals(normalizedName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"A folder named '{normalizedName}' already exists here.");
+
+        createId ??= static () => $"folder_{Guid.NewGuid():N}";
+        string id = createId();
+        while (Folders.Any(folder => folder.Id.Equals(id, StringComparison.Ordinal))) id = createId();
+        int order = FoldersFor(kind, parentFolderId).Select(folder => folder.Order).DefaultIfEmpty(-1).Max() + 1;
+        return this with
+        {
+            Folders = [.. Folders, new AutomationOrganizationFolder(id, kind, normalizedName, parentFolderId, order)]
+        };
+    }
+
+    public AutomationOrganizationCatalog RenameFolder(string folderId, string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        AutomationOrganizationFolder folder = Folder(folderId)
+            ?? throw new InvalidOperationException("Automation folder no longer exists.");
+        string normalizedName = name.Trim();
+        if (Folders.Any(candidate => candidate.Id != folder.Id && candidate.Kind == folder.Kind &&
+                                     candidate.ParentFolderId == folder.ParentFolderId &&
+                                     candidate.Name.Equals(normalizedName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"A folder named '{normalizedName}' already exists here.");
+        return this with
+        {
+            Folders = Folders.Select(candidate => candidate.Id == folderId
+                ? candidate with { Name = normalizedName }
+                : candidate).ToArray()
+        };
+    }
+
+    public AutomationOrganizationCatalog DeleteEmptyFolder(string folderId)
+    {
+        AutomationOrganizationFolder folder = Folder(folderId)
+            ?? throw new InvalidOperationException("Automation folder no longer exists.");
+        if (Folders.Any(candidate => candidate.ParentFolderId == folderId) ||
+            Items.Any(item => item.FolderId == folderId))
+            throw new InvalidOperationException("Only empty Automation folders can be deleted.");
+        return this with { Folders = Folders.Where(candidate => candidate.Id != folderId).ToArray() };
+    }
+
+    public AutomationOrganizationCatalog MoveItem(
+        StudioDocumentKind kind,
+        string itemId,
+        string? folderId)
+    {
+        if (folderId is not null)
+        {
+            AutomationOrganizationFolder target = Folder(folderId)
+                ?? throw new InvalidOperationException("Automation folder no longer exists.");
+            if (target.Kind != kind)
+                throw new InvalidOperationException("Automation items can only move within their category.");
+        }
+        AutomationOrganizationItem item = Items.FirstOrDefault(candidate =>
+            candidate.Kind == kind && candidate.Id.Equals(itemId, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("Automation item no longer exists.");
+        int order = ItemsFor(kind, folderId).Where(candidate => candidate.Id != itemId)
+            .Select(candidate => candidate.Order).DefaultIfEmpty(-1).Max() + 1;
+        return this with
+        {
+            Items = Items.Select(candidate => candidate.Id == item.Id && candidate.Kind == kind
+                ? candidate with { FolderId = folderId, Order = order }
+                : candidate).ToArray()
+        };
+    }
+
     public AutomationOrganizationCatalog Reconcile(
         AutomationCollections collections,
         Func<string>? createId = null)

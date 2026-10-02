@@ -392,6 +392,33 @@ public static class Program
             Assert.False(first == catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
             return Task.CompletedTask;
         });
+        await RunAsync("studio folders organize without changing runtime groups", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Triggers = [new TriggerRule("danger", "flee", Group: "combat")]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"item_{++sequence}");
+            catalog = catalog.AddFolder(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                "Defensive",
+                createId: () => "folder_defensive");
+            string itemId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, 0);
+            catalog = catalog.MoveItem(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                itemId,
+                "folder_defensive");
+
+            Assert.Equal("folder_defensive", catalog.FolderIdFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, itemId));
+            Assert.Equal("combat", collections.Triggers[0].Group);
+            Assert.Throws<InvalidOperationException>(() => catalog.DeleteEmptyFolder("folder_defensive"));
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
