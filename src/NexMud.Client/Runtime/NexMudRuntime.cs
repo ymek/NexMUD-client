@@ -378,6 +378,24 @@ public sealed class NexMudRuntime : IAsyncDisposable
         }
     }
 
+    public async Task SaveHighlightRulesAsync(
+        IReadOnlyList<TranscriptHighlightRule> highlightRules,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(highlightRules);
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Settings = Settings with { HighlightRules = highlightRules.ToArray() };
+            Interaction.Configure(Settings);
+            await SettingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _settingsGate.Release();
+        }
+    }
+
     public async Task SaveAutomationCompositionAsync(
         IReadOnlyList<CommandAlias> aliases,
         IReadOnlyList<TriggerRule> triggers,

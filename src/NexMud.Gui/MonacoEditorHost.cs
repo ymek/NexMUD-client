@@ -44,6 +44,7 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
     };
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _requests = new(StringComparer.Ordinal);
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private MonacoAssetServer? _server;
     private int _initialized;
     private int _disposed;
 
@@ -75,7 +76,8 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
             Fail("Monaco assets are unavailable. Run scripts/prepare-monaco-assets.mjs before packaging NexMUD.");
             return Task.CompletedTask;
         }
-        _webView.Navigate(new Uri(index));
+        _server = MonacoAssetServer.Start(Path.GetDirectoryName(index)!);
+        _webView.Navigate(_server.IndexUri);
         return Task.CompletedTask;
     }
 
@@ -368,6 +370,7 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         foreach (TaskCompletionSource<JsonElement> completion in _requests.Values)
             completion.TrySetCanceled();
         _requests.Clear();
+        _server?.Dispose();
         return ValueTask.CompletedTask;
     }
 }

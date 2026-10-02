@@ -266,6 +266,8 @@ public static class Program
         await RunAsync("typesafe preserves injected http timeout", TypesafePreservesInjectedHttpTimeout);
         await RunAsync("typesafe choice response maps to trace", TypesafeChoiceMapsToTrace);
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
+        await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
+        await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
@@ -7759,4 +7761,30 @@ Level  4: dual wield         n/a      dodge              n/a
 Level 27: loot               n/a
 Level 30: circle stab        n/a
 """;
+
+    private static Task StudioCollectionsAreImmutableAndUnique()
+    {
+        NexMud.Gui.AutomationStudio.AutomationCollections empty = NexMud.Gui.AutomationStudio.AutomationCollections.From(NexMud.Client.Settings.ClientSettings.Default with { Aliases = [] });
+        (var one, int first) = empty.AddNew(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias);
+        (var two, int second) = one.AddNew(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias);
+        if (empty.Aliases.Count != 0 || two.Aliases.Count != 2 || first != 0 || second != 1) throw new InvalidOperationException("add is not append-only/immutable");
+        if (two.Aliases[0].Name == two.Aliases[1].Name) throw new InvalidOperationException("default names must be unique");
+        (var three, int copy) = two.Duplicate(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+        if (copy != 2 || three.Aliases[2].Name != two.Aliases[0].Name + "-copy") throw new InvalidOperationException("duplicate name");
+        var removed = three.Remove(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+        if (removed.Aliases.Count != 2 || three.Aliases.Count != 3) throw new InvalidOperationException("remove");
+        return Task.CompletedTask;
+    }
+
+    private static Task StudioDocumentSetFocusAndClose()
+    {
+        var set = new NexMud.Gui.AutomationStudio.StudioDocumentSet();
+        var kind = NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias;
+        set.OpenOrFocus(new NexMud.Gui.AutomationStudio.StudioDocument("a", kind, "a"));
+        set.OpenOrFocus(new NexMud.Gui.AutomationStudio.StudioDocument("b", kind, "b"));
+        set.OpenOrFocus(new NexMud.Gui.AutomationStudio.StudioDocument("a", kind, "dup"));
+        if (set.Documents.Count != 2 || set.Active?.Key != "a") throw new InvalidOperationException("reopen must focus, not duplicate");
+        if (set.Close("a")?.Key != "b") throw new InvalidOperationException("close must focus neighbor");
+        return Task.CompletedTask;
+    }
 }

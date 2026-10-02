@@ -1,13 +1,11 @@
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using NexMud.Client.Automation;
-using NexMud.Client.Interaction;
 using NexMud.Client.Runtime;
 using NexMud.Client.Scripting;
 using NexMud.Client.Settings;
@@ -16,48 +14,62 @@ using NexMud.Scripting.Runtime;
 
 namespace NexMud.Gui.AutomationStudio;
 
+/// <summary>
+/// Automation Studio workbench: Explorer | tabbed document area | contextual Inspector, with a
+/// collapsible bottom panel. Every Automation definition and script source opens as a document tab.
+/// </summary>
 internal sealed class AutomationStudioWindow : Window
 {
-    private enum NodeKind { Automation, Scripts, Package, SourceFile }
-    private sealed record StudioNode(NodeKind Kind, string Label, string? PackageId = null, string? Path = null);
-    private sealed record OpenDocument(string Uri, string ProfileId, string PackageId, string Path);
-    private sealed record AutomationTarget(AutomationInvocationSourceKind Kind, int Index, string Name)
-    {
-        public override string ToString() => $"{Kind}: {Name}";
-    }
+    private enum NodeKind { Category, Entry, Scripts, Package, SourceFile }
+    private sealed record StudioNode(NodeKind Kind, string Label, StudioDocumentKind? DocKind = null, int Index = -1, string? PackageId = null, string? Path = null);
 
     private const int MaximumEventRows = 500;
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
     private readonly AutomationReferenceIndex _referencesIndex = new();
-    private readonly AutomationWorkspace _automationEditor;
+    private readonly StudioDocumentSet _documents = new();
+    private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
+    private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
+    private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
     private readonly ComboBox _profile = new() { MinWidth = 210 };
+    private readonly TextBox _filter = UiTheme.FieldBox();
     private readonly TreeView _navigator = new();
+    private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
-    private readonly StackPanel _inspector = new() { Spacing = 8 };
+    private readonly StackPanel _inspector = new() { Spacing = 8, Margin = new Thickness(12) };
     private readonly StackPanel _problems = new() { Spacing = 3 };
     private readonly StackPanel _console = new() { Spacing = 2 };
     private readonly StackPanel _runtimePanel = new() { Spacing = 3 };
     private readonly StackPanel _eventsPanel = new() { Spacing = 2 };
     private readonly StackPanel _referencesPanel = new() { Spacing = 3 };
-    private readonly TextBlock _buildState = new() { Text = "Build —" };
-    private readonly TextBlock _runtimeState = new() { Text = "Runtime —" };
-    private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
-    private readonly Dictionary<string, OpenDocument> _documents = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _dirty = new(StringComparer.Ordinal);
+    private readonly TextBlock _buildState = new() { Text = "Build —", Foreground = UiTheme.Muted };
+    private readonly TextBlock _runtimeState = new() { Text = "Runtime —", Foreground = UiTheme.Muted };
     private readonly Queue<string> _events = new();
     private readonly CancellationTokenSource _cts = new();
-    private MonacoEditorHost? _monaco;
-    private OpenDocument? _activeDocument;
+    private Grid _root = new();
+    private Grid _body = new();
+    private TabControl _bottom = new();
+    private Button _bottomToggle = new();
+    private readonly MonacoEditorHost _monaco = new();
+    private readonly TextBlock _breadcrumb = new() { Foreground = UiTheme.Muted, FontSize = 12, Margin = new Thickness(14, 5), TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly TextBlock _statusLeft = new() { Foreground = UiTheme.Muted, FontSize = 12 };
+    private readonly TextBlock _statusCursor = new() { Foreground = UiTheme.Muted, FontSize = 12 };
+    private Border _breadcrumbBar = new();
+    private Border _explorerFrame = new();
+    private Border _inspectorFrame = new();
+    private GridSplitter _leftSplit = new();
+    private GridSplitter _rightSplit = new();
+    private IReadOnlyList<ScriptPackageSnapshot> _packages = [];
     private ScriptPackageSnapshot? _activePackage;
+    private bool _bottomCollapsed;
     private bool _refreshingProfiles;
+    private bool _refreshingNavigator;
     private bool _closeApproved;
 
     public AutomationStudioWindow(NexMudRuntime runtime)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _workspace = runtime.ScriptWorkspace;
-        _automationEditor = new AutomationWorkspace(runtime, SelectScriptsAsync);
 
         Title = "NexMUD Automation Studio";
         Width = 1440;
@@ -66,11 +78,17 @@ internal sealed class AutomationStudioWindow : Window
         MinHeight = 700;
         Background = UiTheme.Window;
         FontFamily = UiTheme.Sans;
+        WireMonaco();
+        _filter.PlaceholderText = "Filter";
+        _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
         Content = BuildLayout();
 
+        _profile.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<ConnectionProfile>(
+            (item, _) => new TextBlock { Text = item?.Name ?? "" }, true);
         _profile.SelectionChanged += ProfileSelectionChanged;
         _navigator.SelectionChanged += NavigatorSelectionChanged;
         _workspace.WorkspaceChanged += WorkspaceChanged;
+        _documents.Changed += DocumentsChanged;
         KeyDown += WindowKeyDown;
         Opened += WindowOpened;
         Closing += WindowClosing;
@@ -80,54 +98,110 @@ internal sealed class AutomationStudioWindow : Window
     private string SelectedProfileId =>
         (_profile.SelectedItem as ConnectionProfile)?.Id ?? _runtime.ActiveConnectionProfile.Id;
 
+    // ───────────────────────────── Layout ─────────────────────────────
+
     private Control BuildLayout()
     {
-        Grid root = new() { RowDefinitions = new RowDefinitions("Auto,*,5,0.24*") };
-        root.Children.Add(BuildToolbar());
+        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{_preferences.BottomHeight},Auto") };
+        _root.Children.Add(BuildToolbar());
 
-        Grid body = new() { ColumnDefinitions = new ColumnDefinitions("0.22*,5,0.56*,5,0.22*") };
-        Grid.SetRow(body, 1);
-        root.Children.Add(body);
+        _body = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions($"{_preferences.ExplorerWidth},5,*,5,{_preferences.InspectorWidth}")
+        };
+        Grid.SetRow(_body, 1);
+        _root.Children.Add(_body);
 
-        body.Children.Add(Panel("NAVIGATOR", new ScrollViewer { Content = _navigator }));
-        GridSplitter left = Splitter(GridResizeDirection.Columns); Grid.SetColumn(left, 1); body.Children.Add(left);
-        Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = _center };
-        Grid.SetColumn(centerFrame, 2); body.Children.Add(centerFrame);
-        GridSplitter right = Splitter(GridResizeDirection.Columns); Grid.SetColumn(right, 3); body.Children.Add(right);
-        Border inspector = Panel("INSPECTOR", new ScrollViewer { Content = _inspector }); Grid.SetColumn(inspector, 4); body.Children.Add(inspector);
+        Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        explorer.Children.Add(BuildExplorerHeader());
+        Grid.SetRow(_filter, 1);
+        _filter.Margin = new Thickness(8, 0, 8, 6);
+        explorer.Children.Add(_filter);
+        ScrollViewer tree = new() { Content = _navigator };
+        Grid.SetRow(tree, 2);
+        explorer.Children.Add(tree);
+        _explorerFrame = Frame("EXPLORER", explorer, withHeader: false);
+        _body.Children.Add(_explorerFrame);
 
-        GridSplitter horizontal = Splitter(GridResizeDirection.Rows); Grid.SetRow(horizontal, 2); root.Children.Add(horizontal);
-        TabControl bottom = new()
+        _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 1); _body.Children.Add(_leftSplit);
+        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        documentArea.Children.Add(new Border
+        {
+            MinHeight = 36, Background = UiTheme.Surface, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = new ScrollViewer { Content = _tabs, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
+        });
+        _breadcrumbBar = new Border { Child = _breadcrumb, Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1) };
+        Grid.SetRow(_breadcrumbBar, 1);
+        documentArea.Children.Add(_breadcrumbBar);
+        // The Monaco WebView must stay attached to the visual tree for the window's lifetime;
+        // detaching a native WebView destroys its page and every open model.
+        _monaco.MaxHeight = 0;
+        Grid surface = new() { Children = { _center, _monaco } };
+        Grid.SetRow(surface, 2);
+        documentArea.Children.Add(surface);
+        Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = documentArea };
+        Grid.SetColumn(centerFrame, 2); _body.Children.Add(centerFrame);
+        _rightSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_rightSplit, 3); _body.Children.Add(_rightSplit);
+        _inspectorFrame = Frame("DETAILS", new ScrollViewer { Content = _inspector }); Grid.SetColumn(_inspectorFrame, 4); _body.Children.Add(_inspectorFrame);
+
+        GridSplitter horizontal = Splitter(GridResizeDirection.Rows); Grid.SetRow(horizontal, 2); _root.Children.Add(horizontal);
+        _bottom = new TabControl
         {
             ItemsSource = new object[]
             {
-                BottomTab("Problems", _problems),
-                BottomTab("Console", _console),
-                BottomTab("Runtime", _runtimePanel),
-                BottomTab("Events", _eventsPanel),
-                BottomTab("References", _referencesPanel)
+                BottomTab("Problems", _problems), BottomTab("Console", _console), BottomTab("Runtime", _runtimePanel),
+                BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
             }
         };
-        Grid.SetRow(bottom, 3);
-        root.Children.Add(bottom);
-        return root;
+        Grid.SetRow(_bottom, 3);
+        _root.Children.Add(_bottom);
+        Border status = new()
+        {
+            Background = UiTheme.Raised, Padding = new Thickness(12, 3),
+            Child = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 18,
+                Children = { _statusLeft }
+            }
+        };
+        Grid statusGrid = (Grid)status.Child;
+        Grid.SetColumn(_statusCursor, 1); statusGrid.Children.Add(_statusCursor);
+        Grid.SetColumn(_buildState, 2); statusGrid.Children.Add(_buildState);
+        Grid.SetColumn(_runtimeState, 3); statusGrid.Children.Add(_runtimeState);
+        Grid.SetRow(status, 4);
+        _root.Children.Add(status);
+        return _root;
+    }
+
+    private Control BuildExplorerHeader()
+    {
+        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(8, 6) };
+        header.Children.Add(new TextBlock { Text = "EXPLORER", Foreground = UiTheme.Accent, FontWeight = FontWeight.SemiBold, FontSize = NexTypography.Metadata, VerticalAlignment = VerticalAlignment.Center });
+        Button add = UiTheme.QuietButton("+ New");
+        add.Click += (_, _) =>
+        {
+            ContextMenu menu = new();
+            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+            {
+                MenuItem item = new() { Header = kind.Label() };
+                StudioDocumentKind captured = kind;
+                item.Click += async (_, _) => await CreateAutomationAsync(captured).ConfigureAwait(true);
+                menu.Items.Add(item);
+            }
+            menu.Open(add);
+        };
+        Grid.SetColumn(add, 1);
+        header.Children.Add(add);
+        return header;
     }
 
     private Control BuildToolbar()
     {
-        Grid grid = new()
-        {
-            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"),
-            ColumnSpacing = 10,
-            Margin = new Thickness(10, 7)
-        };
+        Grid grid = new() { ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"), ColumnSpacing = 10, Margin = new Thickness(10, 7) };
         grid.Children.Add(new TextBlock
         {
-            Text = "Automation Studio",
-            Foreground = UiTheme.Text,
-            FontSize = NexTypography.Display,
-            FontWeight = FontWeight.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center
+            Text = "Automation Studio", Foreground = UiTheme.Text, FontSize = NexTypography.Display,
+            FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center
         });
 
         StackPanel profile = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
@@ -136,20 +210,80 @@ internal sealed class AutomationStudioWindow : Window
         Grid.SetColumn(profile, 1); grid.Children.Add(profile);
 
         StackPanel commands = new() { Orientation = Orientation.Horizontal, Spacing = 5, HorizontalAlignment = HorizontalAlignment.Center };
-        commands.Children.Add(Button("New Package", CreatePackageAsync));
-        commands.Children.Add(Button("New TS", CreateTypeScriptFileAsync));
         commands.Children.Add(Button("Save", SaveActiveAsync));
         commands.Children.Add(Button("Save All", SaveAllAsync));
+        commands.Children.Add(Button("New Package", CreatePackageAsync));
+        commands.Children.Add(Button("New TS", CreateTypeScriptFileAsync));
         commands.Children.Add(Button("Build", BuildActivePackageAsync));
         commands.Children.Add(Button("Run", RunFunctionAsync));
-        commands.Children.Add(Button("Enable/Disable", TogglePackageAsync));
         commands.Children.Add(Button("Search", SearchAsync));
+        _bottomToggle = Button("Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
+        commands.Children.Add(_bottomToggle);
         Grid.SetColumn(commands, 2); grid.Children.Add(commands);
 
-        StackPanel status = new() { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
-        status.Children.Add(_buildState); status.Children.Add(_runtimeState);
-        Grid.SetColumn(status, 3); grid.Children.Add(status);
+        Button palette = Button("Quick Open  ⌘P", QuickOpenAsync);
+        Grid.SetColumn(palette, 3); grid.Children.Add(palette);
         return grid;
+    }
+
+    private void TogglePane(Border frame, GridSplitter splitter, int column, double width)
+    {
+        bool show = !frame.IsVisible;
+        frame.IsVisible = show;
+        splitter.IsVisible = show;
+        _body.ColumnDefinitions[column].Width = show ? new GridLength(width) : new GridLength(0);
+        _body.ColumnDefinitions[column].MinWidth = show ? 0 : 0;
+    }
+
+    private async Task QuickOpenAsync()
+    {
+        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+        List<(string Label, Func<Task> Open)> items = [];
+        foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+            foreach (AutomationEntryInfo entry in collections.Entries(kind))
+            {
+                StudioDocumentKind k = kind; int i = entry.Index;
+                items.Add(($"{kind.Label()}  ·  {entry.Name}", () => { OpenAutomation(k, i); return Task.CompletedTask; }));
+            }
+        foreach (ScriptPackageSnapshot package in _packages)
+            foreach (ScriptWorkspaceSourceFile file in await _workspace.ListSourceFilesAsync(SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true))
+            {
+                string id = package.Definition.PackageId, path = file.RelativePath;
+                items.Add(($"Script  ·  {package.Definition.Name}/{path}", () => OpenSourceAsync(id, path)));
+            }
+        Window dialog = Dialog("Quick Open", 620, 420);
+        TextBox input = UiTheme.FieldBox();
+        input.PlaceholderText = "Type to search aliases, triggers, scripts…";
+        ListBox list = new() { Background = Brushes.Transparent };
+        void Refresh() => list.ItemsSource = items.Where(item => StudioFilter.Matches(item.Label, input.Text)).Take(60).Select(item => item.Label).ToArray();
+        input.TextChanged += (_, _) => { Refresh(); list.SelectedIndex = 0; };
+        void Accept() { if (list.SelectedItem is string label) dialog.Close(label); }
+        input.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter) { Accept(); e.Handled = true; }
+            else if (e.Key == Key.Down) { list.SelectedIndex = Math.Min(list.ItemCount - 1, list.SelectedIndex + 1); e.Handled = true; }
+            else if (e.Key == Key.Up) { list.SelectedIndex = Math.Max(0, list.SelectedIndex - 1); e.Handled = true; }
+            else if (e.Key == Key.Escape) { dialog.Close(null); e.Handled = true; }
+        };
+        list.DoubleTapped += (_, _) => Accept();
+        Refresh(); list.SelectedIndex = 0;
+        Grid layout = new() { RowDefinitions = new RowDefinitions("Auto,*"), Margin = new Thickness(12), RowSpacing = 8 };
+        layout.Children.Add(input);
+        Grid.SetRow(list, 1); layout.Children.Add(list);
+        dialog.Content = layout;
+        dialog.Opened += (_, _) => input.Focus();
+        string? chosen = await dialog.ShowDialog<string?>(this).ConfigureAwait(true);
+        if (chosen is null) return;
+        try { await items.First(item => item.Label == chosen).Open().ConfigureAwait(true); }
+        catch (Exception exception) { AddProblem("Quick Open", exception.Message); }
+    }
+
+    private void ToggleBottom()
+    {
+        _bottomCollapsed = !_bottomCollapsed;
+        _root.RowDefinitions[3].Height = new GridLength(_bottomCollapsed ? StudioUiPreferences.CollapsedBottomHeight : _preferences.BottomHeight);
+        _bottom.IsVisible = !_bottomCollapsed;
+        _bottomToggle.Content = _bottomCollapsed ? "Panel ▴" : "Panel ▾";
     }
 
     private static Button Button(string label, Func<Task> action)
@@ -166,19 +300,21 @@ internal sealed class AutomationStudioWindow : Window
         Background = UiTheme.Divider
     };
 
-    private static Border Panel(string title, Control content)
+    private static Border Frame(string title, Control content, bool withHeader = true)
     {
-        Grid grid = new() { RowDefinitions = new RowDefinitions("Auto,*") };
-        grid.Children.Add(new TextBlock
+        Control child = content;
+        if (withHeader)
         {
-            Text = title,
-            Foreground = UiTheme.Accent,
-            FontWeight = FontWeight.SemiBold,
-            FontSize = NexTypography.Metadata,
-            Margin = new Thickness(8, 5)
-        });
-        Grid.SetRow(content, 1); grid.Children.Add(content);
-        return new Border { BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Background = UiTheme.Surface, Child = grid };
+            Grid grid = new() { RowDefinitions = new RowDefinitions("Auto,*") };
+            grid.Children.Add(new TextBlock
+            {
+                Text = title, Foreground = UiTheme.Accent, FontWeight = FontWeight.SemiBold,
+                FontSize = NexTypography.Metadata, Margin = new Thickness(8, 6)
+            });
+            Grid.SetRow(content, 1); grid.Children.Add(content);
+            child = grid;
+        }
+        return new Border { BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Background = UiTheme.Surface, Child = child };
     }
 
     private static TabItem BottomTab(string header, Control content) => new()
@@ -187,11 +323,13 @@ internal sealed class AutomationStudioWindow : Window
         Content = new ScrollViewer { Content = content, Padding = new Thickness(8) }
     };
 
+    // ───────────────────────────── Lifecycle ─────────────────────────────
+
     private async void WindowOpened(object? sender, EventArgs e)
     {
         await RefreshProfilesAsync().ConfigureAwait(true);
         await RefreshNavigatorAsync().ConfigureAwait(true);
-        ShowAutomation();
+        RenderActive();
         _ = Task.Run(() => ConsumeEventsAsync(_cts.Token), CancellationToken.None);
     }
 
@@ -213,15 +351,15 @@ internal sealed class AutomationStudioWindow : Window
     private async void ProfileSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_refreshingProfiles) return;
-        if (_dirty.Count > 0)
+        if (_documents.Dirty.Any())
         {
-            AddProblem("Warning", "Save or discard dirty documents before changing profile scope.");
+            AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
             await RefreshProfilesAsync().ConfigureAwait(true);
             return;
         }
-        _activeDocument = null;
+        CloseAllEditors();
+        _documents.CloseAll();
         _activePackage = null;
-        ShowAutomation();
         await RefreshNavigatorAsync().ConfigureAwait(true);
     }
 
@@ -231,44 +369,52 @@ internal sealed class AutomationStudioWindow : Window
         Dispatcher.UIThread.Post(async () => await RefreshNavigatorAsync().ConfigureAwait(true));
     }
 
+    // ───────────────────────────── Explorer ─────────────────────────────
+
     private async Task RefreshNavigatorAsync()
     {
-        IReadOnlyList<ScriptPackageSnapshot> packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
-        _nodes.Clear();
-        TreeViewItem automation = Node(new StudioNode(NodeKind.Automation, "AUTOMATION"));
-        automation.IsExpanded = true;
-        automation.ItemsSource = new object[]
+        _packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
+        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+        string? filter = _filter.Text;
+        _refreshingNavigator = true;
+        try
         {
-            new TreeViewItem { Header = "Aliases" }, new TreeViewItem { Header = "Keybindings" },
-            new TreeViewItem { Header = "Text Triggers" }, new TreeViewItem { Header = "Semantic Triggers" },
-            new TreeViewItem { Header = "Timers" }, new TreeViewItem { Header = "State Rules" },
-            new TreeViewItem { Header = "Workflows" }
-        };
+            _nodes.Clear();
+            List<object> roots = [];
+            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+            {
+                IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
+                TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
+                category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
+                category.ItemsSource = entries
+                    .Where(entry => StudioFilter.Matches(entry.Name, filter))
+                    .Select(entry => Node(new StudioNode(NodeKind.Entry, $"{(entry.Enabled ? "●" : "○")} {entry.Name}", kind, entry.Index)))
+                    .ToArray();
+                roots.Add(category);
+            }
 
-        TreeViewItem scripts = Node(new StudioNode(NodeKind.Scripts, "SCRIPTS"));
-        scripts.IsExpanded = true;
-        List<TreeViewItem> packageItems = [];
-        foreach (ScriptPackageSnapshot package in packages)
-        {
-            TreeViewItem item = Node(new StudioNode(
-                NodeKind.Package,
-                $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}",
-                package.Definition.PackageId));
-            IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
-                SelectedProfileId,
-                package.Definition.PackageId,
-                _cts.Token).ConfigureAwait(true);
-            item.ItemsSource = files.Select(file => Node(new StudioNode(
-                NodeKind.SourceFile,
-                file.RelativePath,
-                package.Definition.PackageId,
-                file.RelativePath))).ToArray();
-            packageItems.Add(item);
+            TreeViewItem scripts = Node(new StudioNode(NodeKind.Scripts, "SCRIPTS"));
+            scripts.IsExpanded = true;
+            List<TreeViewItem> packageItems = [];
+            foreach (ScriptPackageSnapshot package in _packages)
+            {
+                TreeViewItem item = Node(new StudioNode(NodeKind.Package,
+                    $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
+                IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+                    SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+                item.ItemsSource = files
+                    .Where(file => StudioFilter.Matches(file.RelativePath, filter))
+                    .Select(file => Node(new StudioNode(NodeKind.SourceFile, file.RelativePath, PackageId: package.Definition.PackageId, Path: file.RelativePath)))
+                    .ToArray();
+                packageItems.Add(item);
+            }
+            scripts.ItemsSource = packageItems;
+            roots.Add(scripts);
+            _navigator.ItemsSource = roots;
         }
-        scripts.ItemsSource = packageItems;
-        _navigator.ItemsSource = new object[] { automation, scripts };
+        finally { _refreshingNavigator = false; }
         await RefreshRuntimePanelAsync().ConfigureAwait(true);
-        RefreshReferencePanel(packages);
+        RefreshReferencePanel();
     }
 
     private TreeViewItem Node(StudioNode node)
@@ -280,133 +426,270 @@ internal sealed class AutomationStudioWindow : Window
 
     private async void NavigatorSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
+        if (_refreshingNavigator) return;
         if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node)) return;
         try
         {
             switch (node.Kind)
             {
-                case NodeKind.Automation:
-                    ShowAutomation();
-                    break;
-                case NodeKind.Scripts:
-                    ShowScriptsInspector();
+                case NodeKind.Entry when node.DocKind is { } kind:
+                    OpenAutomation(kind, node.Index);
                     break;
                 case NodeKind.Package when node.PackageId is { } packageId:
                     await SelectPackageAsync(packageId).ConfigureAwait(true);
+                    RenderActive();
                     break;
                 case NodeKind.SourceFile when node.PackageId is { } package && node.Path is { } path:
                     await OpenSourceAsync(package, path).ConfigureAwait(true);
+                    break;
+                case NodeKind.Category or NodeKind.Scripts:
+                    item.IsExpanded = !item.IsExpanded;
                     break;
             }
         }
         catch (Exception exception) { AddProblem("Error", exception.Message); }
     }
 
-    private void ShowAutomation()
+    // ───────────────────────────── Automation documents ─────────────────────────────
+
+    private AutomationEditorServices EditorServices() => new(
+        _runtime,
+        OpenDefinitionAsync,
+        ChooseFunctionAsync,
+        reference => _packages.SelectMany(package => package.Exports).FirstOrDefault(export => export.FunctionRef == reference));
+
+    private void OpenAutomation(StudioDocumentKind kind, int index)
     {
-        _activeDocument = null;
-        _activePackage = null;
-        _center.Content = _automationEditor;
-        _automationEditor.Activate();
-        BuildAutomationInspector();
+        string key = StudioDocument.AutomationKey(kind, index);
+        if (!_editors.ContainsKey(key))
+        {
+            AutomationDocumentEditor? editor = AutomationDocumentEditor.Create(kind, index, EditorServices());
+            if (editor is null) { AddProblem("Automation", $"{kind.Label()} #{index} no longer exists."); return; }
+            editor.Changed += () => _documents.SetDirty(key, true);
+            editor.Saved += title =>
+            {
+                _documents.SetDirty(key, false);
+                _documents.Retitle(key, title);
+                Dispatcher.UIThread.Post(async () => await RefreshNavigatorAsync().ConfigureAwait(true));
+            };
+            _editors[key] = editor;
+        }
+        _documents.OpenOrFocus(new StudioDocument(key, kind, _editors[key].Title)
+        {
+            Index = index,
+            Breadcrumb = ["Automation", kind.CategoryLabel(), _editors[key].Title]
+        });
     }
 
-    private void ShowScriptsInspector()
+    private async Task CreateAutomationAsync(StudioDocumentKind kind)
     {
-        _activeDocument = null;
-        _activePackage = null;
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Text("Scripts are persisted by C#, built by the authoritative TypeScript compiler, and executed only by Jint."));
-        _inspector.Children.Add(Text($"Profile scope: {SelectedProfileId}"));
-        _inspector.Children.Add(Text(SelectedProfileId == _runtime.ActiveConnectionProfile.Id
-            ? "This is the active runtime profile."
-            : "Authoring only: another Connection Profile is currently active."));
+        try
+        {
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).AddNew(kind);
+            (string firstLabel, string secondLabel) = kind switch
+            {
+                StudioDocumentKind.Alias => ("Alias name (what you type)", "Expands to"),
+                StudioDocumentKind.Trigger => ("Text pattern to match", "Command to send"),
+                StudioDocumentKind.SemanticTrigger => ("Name", "Event (e.g. RoomChanged)"),
+                StudioDocumentKind.Keybinding => ("Gesture (e.g. Cmd+1)", "Command to send"),
+                StudioDocumentKind.Timer => ("Name", "Command to send"),
+                StudioDocumentKind.StateRule => ("Name", "State expression (e.g. hp.percent < 30)"),
+                _ => ("Name", "First step (e.g. send look)")
+            };
+            string? first = await PromptAsync($"New {kind.Label()}", firstLabel, (string?)collections.NameOf(kind, index) ?? "").ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(first)) return;
+            string? second = await PromptAsync($"New {kind.Label()}", secondLabel, "").ConfigureAwait(true);
+            if (second is null) return;
+            first = first.Trim();
+            second = second.Trim();
+            object? seeded = collections.Get(kind, index) switch
+            {
+                CommandAlias v => v with { Name = first, Expansion = second.Length > 0 ? second : v.Expansion },
+                TriggerRule v => v with { Pattern = first, Command = second.Length > 0 ? second : v.Command },
+                SemanticTriggerRule v => v with { Name = first, EventName = second.Length > 0 ? second : v.EventName },
+                CommandKeyBinding v => v with { Gesture = first, Name = first, Command = second.Length > 0 ? second : v.Command },
+                CommandTimer v => v with { Name = first, Command = second.Length > 0 ? second : v.Command },
+                GameRule v => v with { Name = first, Condition = second.Length > 0 ? second : v.Condition },
+                AutomationWorkflow v => v with { Name = first, Steps = second.Length > 0 ? second : v.Steps },
+                _ => null
+            };
+            if (seeded is not null) collections = collections.Replace(kind, index, seeded);
+            await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            OpenAutomation(kind, index);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
     }
+
+    private async Task DuplicateAutomationAsync(StudioDocument document)
+    {
+        try
+        {
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).Duplicate(document.Kind, document.Index);
+            if (index < 0) return;
+            await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            OpenAutomation(document.Kind, index);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task DeleteAutomationAsync(StudioDocument document)
+    {
+        if (_documents.Documents.Any(d => d.Kind == document.Kind && d.Key != document.Key && d.IsDirty))
+        {
+            AddProblem("Automation", $"Save or close other dirty {document.Kind.CategoryLabel()} before deleting: indexes will shift.");
+            return;
+        }
+        if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete \"{document.Title}\"? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
+        try
+        {
+            AutomationCollections collections = AutomationCollections.From(_runtime.Settings).Remove(document.Kind, document.Index);
+            await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            foreach (StudioDocument open in _documents.Documents.Where(d => d.Kind == document.Kind).ToArray())
+            {
+                _editors.Remove(open.Key);
+                _documents.Close(open.Key);
+            }
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task ToggleAutomationAsync(StudioDocument document)
+    {
+        if (_editors.TryGetValue(document.Key, out AutomationDocumentEditor? editor))
+        {
+            try { await editor.ToggleEnabledAsync(_cts.Token).ConfigureAwait(true); }
+            catch (Exception exception) { AddProblem("Automation", exception.Message); }
+        }
+    }
+
+    // ───────────────────────────── Script documents ─────────────────────────────
 
     private async Task SelectPackageAsync(string packageId)
     {
         _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true)
             ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
-        _activeDocument = null;
-        BuildPackageInspector(_activePackage);
     }
 
     private async Task OpenSourceAsync(string packageId, string relativePath)
     {
         await SelectPackageAsync(packageId).ConfigureAwait(true);
-        string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
-        MonacoEditorHost monaco = EnsureMonaco();
-        _center.Content = monaco;
         string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, relativePath);
-        _documents[uri] = new OpenDocument(uri, SelectedProfileId, packageId, relativePath);
-        _activeDocument = _documents[uri];
-        await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token).ConfigureAwait(true);
-        BuildPackageInspector(_activePackage!);
+        MonacoEditorHost monaco = _monaco;
+        ShowMonaco(true);
+        // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
+        monaco.IsVisible = true;
+        _center.Content = null;
+        if (_documents.Find(uri) is null)
+        {
+            string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
+            await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token).ConfigureAwait(true);
+        }
+        _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
+        {
+            ProfileId = SelectedProfileId,
+            PackageId = packageId,
+            Path = relativePath,
+            Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
+        });
+        await monaco.SetActiveDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
     }
 
-    private MonacoEditorHost EnsureMonaco()
+    private void WireMonaco()
     {
-        if (_monaco is not null) return _monaco;
-        _monaco = new MonacoEditorHost();
-        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() => _dirty.Add(change.Uri));
+        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() => _documents.SetDirty(change.Uri, true));
         _monaco.SaveRequested += request => Dispatcher.UIThread.Post(async () =>
         {
             if (request.All) await SaveAllAsync().ConfigureAwait(true);
-            else if (request.Uri is { Length: > 0 }) await SaveDocumentAsync(request.Uri).ConfigureAwait(true);
+            else if (request.Uri is { Length: > 0 }) await SaveScriptAsync(request.Uri).ConfigureAwait(true);
         });
+        _monaco.SelectionChanged += selection => Dispatcher.UIThread.Post(() =>
+            _statusCursor.Text = $"Ln {selection.EndLine}, Col {selection.EndColumn}");
+        _monaco.ActiveDocumentChanged += uri => Dispatcher.UIThread.Post(() =>
+        {
+            if (_documents.Find(uri) is not null && _documents.Active?.Key != uri) _documents.Activate(uri);
+        });
+        _monaco.EditorReady += () => Dispatcher.UIThread.Post(RenderActive);
         _monaco.EditorFailed += failure => AddProblem("Editor", failure.Message);
-        return _monaco;
+    }
+
+    private async Task SaveScriptAsync(string uri)
+    {
+        if (_documents.Find(uri) is not { IsScript: true } document) return;
+        string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
+        await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build: true, _cts.Token).ConfigureAwait(true);
+        _documents.SetDirty(uri, false);
+        ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(document.ProfileId!, document.PackageId!, _cts.Token).ConfigureAwait(true);
+        if (package is not null)
+        {
+            _activePackage = package;
+            RenderBuildProblems(package);
+            RenderActive();
+        }
     }
 
     private async Task SaveActiveAsync()
     {
-        if (_activeDocument is null) return;
-        await SaveDocumentAsync(_activeDocument.Uri).ConfigureAwait(true);
+        if (_documents.Active is not { } active) return;
+        try
+        {
+            if (active.IsScript) await SaveScriptAsync(active.Key).ConfigureAwait(true);
+            else if (_editors.TryGetValue(active.Key, out AutomationDocumentEditor? editor)) await editor.SaveAsync(_cts.Token).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Save", exception.Message); }
     }
 
     private async Task SaveAllAsync()
     {
-        foreach (string uri in _dirty.ToArray())
-            await SaveDocumentAsync(uri).ConfigureAwait(true);
+        foreach (StudioDocument document in _documents.Dirty.ToArray())
+        {
+            try
+            {
+                if (document.IsScript) await SaveScriptAsync(document.Key).ConfigureAwait(true);
+                else if (_editors.TryGetValue(document.Key, out AutomationDocumentEditor? editor)) await editor.SaveAsync(_cts.Token).ConfigureAwait(true);
+            }
+            catch (Exception exception) { AddProblem("Save", exception.Message); }
+        }
     }
 
-    private async Task SaveDocumentAsync(string uri)
+    private async Task OpenDefinitionAsync(ScriptFunctionRef function)
     {
-        if (_monaco is null || !_documents.TryGetValue(uri, out OpenDocument? document)) return;
-        string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
-        await _workspace.SaveSourceAsync(document.ProfileId, document.PackageId, document.Path, content, build: true, _cts.Token)
-            .ConfigureAwait(true);
-        _dirty.Remove(uri);
-        ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(document.ProfileId, document.PackageId, _cts.Token).ConfigureAwait(true);
-        if (package is not null)
-        {
-            _activePackage = package;
-            BuildPackageInspector(package);
-            RenderBuildProblems(package);
-        }
+        ExportedScriptFunction? export = _packages.SelectMany(package => package.Exports).FirstOrDefault(item => item.FunctionRef == function);
+        if (export is null) { AddProblem("Automation", "Function not found in the latest successful build. Build the package first."); return; }
+        await OpenSourceAsync(function.PackageId, export.ModulePath).ConfigureAwait(true);
+        await _monaco.RevealLocationAsync(
+                MonacoEditorHost.CreateDocumentUri(SelectedProfileId, function.PackageId, export.ModulePath),
+                export.SourceLocation.Line, export.SourceLocation.Column, _cts.Token).ConfigureAwait(true);
+    }
+
+    private async Task<ScriptFunctionRef?> ChooseFunctionAsync(ScriptFunctionRef? current)
+    {
+        ExportedScriptFunction[] exports = _packages.SelectMany(package => package.Exports).ToArray();
+        if (exports.Length == 0) { AddProblem("Automation", "No built script functions are available in this profile."); return null; }
+        ExportedScriptFunction? picked = await ChooseAsync("Script Function", exports,
+            item => $"{item.FunctionRef.PackageId}/{item.ModulePath}#{item.ExportName}",
+            current is null ? null : exports.FirstOrDefault(item => item.FunctionRef == current)).ConfigureAwait(true);
+        return picked?.FunctionRef;
     }
 
     private async Task BuildActivePackageAsync()
     {
-        if (_activePackage is null) return;
-        ScriptPackageBuildResult result = await _workspace.BuildPackageAsync(
-            SelectedProfileId,
-            _activePackage.Definition.PackageId,
-            _cts.Token).ConfigureAwait(true);
+        if (_activePackage is null) { AddProblem("Build", "Select a script package first."); return; }
+        ScriptPackageBuildResult result = await _workspace.BuildPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
         RenderBuildProblems(result);
         _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        if (_activePackage is not null) BuildPackageInspector(_activePackage);
+        RenderActive();
     }
 
-    private void RenderBuildProblems(ScriptPackageSnapshot package)
-    {
+    private void RenderBuildProblems(ScriptPackageSnapshot package) =>
         _buildState.Text = package.BuildStatus switch
         {
             ScriptPackageBuildStatus.Succeeded => "Build ✓",
             ScriptPackageBuildStatus.Failed => "Build ✕",
             _ => "Build —"
         };
-    }
 
     private void RenderBuildProblems(ScriptPackageBuildResult result)
     {
@@ -419,10 +702,9 @@ internal sealed class AutomationStudioWindow : Window
     private async Task TogglePackageAsync()
     {
         if (_activePackage is null) return;
-        bool enabled = !_activePackage.Definition.Enabled;
-        await _workspace.SetEnabledAsync(SelectedProfileId, _activePackage.Definition.PackageId, enabled, _cts.Token).ConfigureAwait(true);
+        await _workspace.SetEnabledAsync(SelectedProfileId, _activePackage.Definition.PackageId, !_activePackage.Definition.Enabled, _cts.Token).ConfigureAwait(true);
         _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        if (_activePackage is not null) BuildPackageInspector(_activePackage);
+        RenderActive();
     }
 
     private async Task RunFunctionAsync()
@@ -432,37 +714,18 @@ internal sealed class AutomationStudioWindow : Window
             AddProblem("Run", "Build the package and export a function before running it.");
             return;
         }
-        ExportedScriptFunction? function = await ChooseExportAsync(_activePackage.Exports).ConfigureAwait(true);
+        ExportedScriptFunction? function = _activePackage.Exports.Count == 1
+            ? _activePackage.Exports[0]
+            : await ChooseAsync("Run Function", _activePackage.Exports, item => $"{item.ModulePath}#{item.ExportName}").ConfigureAwait(true);
         if (function is null) return;
         string? json = await PromptAsync("Run Function", "JSON arguments", "{}").ConfigureAwait(true);
         if (json is null) return;
         JsonElement arguments;
         try { using JsonDocument document = JsonDocument.Parse(json); arguments = document.RootElement.Clone(); }
         catch (JsonException exception) { AddProblem("Run", exception.Message); return; }
-        ScriptFunctionInvocationResult result = await _workspace.RunFunctionAsync(
-            SelectedProfileId,
-            function.FunctionRef,
-            arguments,
-            _cts.Token).ConfigureAwait(true);
+        ScriptFunctionInvocationResult result = await _workspace.RunFunctionAsync(SelectedProfileId, function.FunctionRef, arguments, _cts.Token).ConfigureAwait(true);
         if (!result.Success) AddProblem("Run", $"{result.ErrorCode}: {result.ErrorMessage}");
         else AddConsole($"Manual run completed: {function.FunctionRef.PackageId}/{function.ExportName}");
-    }
-
-    private async Task<ExportedScriptFunction?> ChooseExportAsync(IReadOnlyList<ExportedScriptFunction> exports)
-    {
-        if (exports.Count == 1) return exports[0];
-        Window dialog = Dialog("Run Function", 520, 220);
-        ComboBox picker = new() { ItemsSource = exports, SelectedIndex = 0 };
-        picker.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<ExportedScriptFunction>((item, _) =>
-            new TextBlock { Text = $"{item.ModulePath}#{item.ExportName}" }, true);
-        Button run = new() { Content = "Run", MinWidth = 90 };
-        Button cancel = new() { Content = "Cancel", MinWidth = 90 };
-        run.Click += (_, _) => dialog.Close(picker.SelectedItem as ExportedScriptFunction);
-        cancel.Click += (_, _) => dialog.Close(null);
-        StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
-        buttons.Children.Add(run); buttons.Children.Add(cancel);
-        dialog.Content = new StackPanel { Margin = new Thickness(16), Spacing = 12, Children = { picker, buttons } };
-        return await dialog.ShowDialog<ExportedScriptFunction?>(this).ConfigureAwait(true);
     }
 
     private async Task CreatePackageAsync()
@@ -496,14 +759,177 @@ internal sealed class AutomationStudioWindow : Window
             row.Click += async (_, _) =>
             {
                 await OpenSourceAsync(result.PackageId, result.RelativePath).ConfigureAwait(true);
-                if (_monaco is not null)
-                    await _monaco.RevealLocationAsync(
+                await _monaco.RevealLocationAsync(
                         MonacoEditorHost.CreateDocumentUri(SelectedProfileId, result.PackageId, result.RelativePath),
-                        result.Line,
-                        result.Column,
-                        _cts.Token).ConfigureAwait(true);
+                        result.Line, result.Column, _cts.Token).ConfigureAwait(true);
             };
             _referencesPanel.Children.Add(row);
+        }
+        if (_bottomCollapsed) ToggleBottom();
+    }
+
+    // ───────────────────────────── Document area rendering ─────────────────────────────
+
+    private void DocumentsChanged()
+    {
+        RenderTabs();
+        RenderActive();
+    }
+
+    private void RenderTabs()
+    {
+        _tabs.Children.Clear();
+        foreach (StudioDocument document in _documents.Documents)
+        {
+            bool active = ReferenceEquals(document, _documents.Active);
+            StudioDocument captured = document;
+            TextBlock label = new()
+            {
+                Text = $"{(document.IsDirty ? "● " : "")}{document.Title}",
+                Foreground = active ? UiTheme.Text : UiTheme.Muted,
+                VerticalAlignment = VerticalAlignment.Center,
+                MaxWidth = 220,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            Button close = new()
+            {
+                Content = "×", Padding = new Thickness(4, 0), MinWidth = 22, Background = Brushes.Transparent,
+                Foreground = UiTheme.Muted, BorderThickness = new Thickness(0)
+            };
+            Avalonia.Automation.AutomationProperties.SetName(close, $"Close {document.Title}");
+            close.Click += async (_, _) => await CloseDocumentAsync(captured).ConfigureAwait(true);
+            StackPanel content = new() { Orientation = Orientation.Horizontal, Spacing = 6, Children = { label, close } };
+            Border tab = new()
+            {
+                Child = content,
+                Padding = new Thickness(12, 7, 6, 7),
+                Background = active ? UiTheme.Console : UiTheme.Surface,
+                BorderBrush = active ? UiTheme.Accent : UiTheme.Divider,
+                BorderThickness = new Thickness(0, 0, 1, active ? 2 : 1),
+                Cursor = new Cursor(StandardCursorType.Hand)
+            };
+            ToolTip.SetTip(tab, string.Join(" › ", document.Breadcrumb));
+            tab.PointerPressed += (_, e) =>
+            {
+                if (e.GetCurrentPoint(tab).Properties.IsMiddleButtonPressed) _ = CloseDocumentAsync(captured);
+                else _documents.Activate(captured.Key);
+            };
+            _tabs.Children.Add(tab);
+        }
+    }
+
+    private async Task CloseDocumentAsync(StudioDocument document)
+    {
+        if (document.IsDirty)
+        {
+            string choice = await ConfirmDirtyAsync(document.Title).ConfigureAwait(true);
+            if (choice == "cancel") return;
+            if (choice == "save")
+            {
+                _documents.Activate(document.Key);
+                await SaveActiveAsync().ConfigureAwait(true);
+                if (document.IsDirty) return;
+            }
+        }
+        if (document.IsScript) await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+        else _editors.Remove(document.Key);
+        _documents.Close(document.Key);
+    }
+
+    private void CloseAllEditors() => _editors.Clear();
+
+    /// <summary>
+    /// Shows or hides the native WebView by collapsing its height. Toggling IsVisible on a native
+    /// control left its bounds stale (it painted over the tab strip) and destroying it loses all models.
+    /// </summary>
+    private bool _monacoStarted;
+
+    private void ShowMonaco(bool show)
+    {
+        // WebKit will not boot a zero-size page: stay expanded until the editor reports ready.
+        if (show) _monacoStarted = true;
+        else if (_monacoStarted && !_monaco.IsReady) return;
+        _monaco.MaxHeight = show ? double.PositiveInfinity : 0;
+        _center.IsVisible = !show;
+    }
+
+    private void RenderActive()
+    {
+        StudioDocument? active = _documents.Active;
+        _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
+        _breadcrumbBar.IsVisible = active is not null;
+        _statusLeft.Text = active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
+        if (active is null)
+        {
+            ShowMonaco(false);
+            _center.Content = EmptyState();
+            _statusCursor.Text = "";
+            BuildEmptyInspector();
+            return;
+        }
+        if (active.IsScript)
+        {
+            _center.Content = null;
+            ShowMonaco(true);
+            _ = _monaco.SetActiveDocumentAsync(active.Key, _cts.Token);
+            if (_activePackage is not null) BuildPackageInspector(_activePackage);
+            else BuildEmptyInspector();
+            return;
+        }
+        ShowMonaco(false);
+        _statusCursor.Text = "";
+        if (_editors.TryGetValue(active.Key, out AutomationDocumentEditor? editor))
+        {
+            _center.Content = editor.View;
+            BuildAutomationInspector(active, editor);
+        }
+    }
+
+    private Control EmptyState()
+    {
+        StackPanel panel = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        panel.Children.Add(new TextBlock { Text = "No document open", Foreground = UiTheme.Text, FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center });
+        panel.Children.Add(new TextBlock { Text = "Select an item in the Explorer, or create a new one.", Foreground = UiTheme.Muted, HorizontalAlignment = HorizontalAlignment.Center });
+        StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+        buttons.Children.Add(Button("New Alias", () => CreateAutomationAsync(StudioDocumentKind.Alias)));
+        buttons.Children.Add(Button("New Trigger", () => CreateAutomationAsync(StudioDocumentKind.Trigger)));
+        buttons.Children.Add(Button("New Script Package", CreatePackageAsync));
+        panel.Children.Add(buttons);
+        return panel;
+    }
+
+    // ───────────────────────────── Inspector (context only) ─────────────────────────────
+
+    private void BuildEmptyInspector()
+    {
+        _inspector.Children.Clear();
+        _inspector.Children.Add(Heading("Automation Studio"));
+        _inspector.Children.Add(Text($"Profile scope: {SelectedProfileId}"));
+        _inspector.Children.Add(Text(SelectedProfileId == _runtime.ActiveConnectionProfile.Id
+            ? "This is the active runtime profile."
+            : "Authoring only: another Connection Profile is currently active."));
+    }
+
+    private void BuildAutomationInspector(StudioDocument document, AutomationDocumentEditor editor)
+    {
+        _inspector.Children.Clear();
+        _inspector.Children.Add(Heading(document.Title));
+        _inspector.Children.Add(Text($"{document.Kind.Label()} · {(editor.IsEnabled ? "Enabled" : "Disabled")}{(document.IsDirty ? " · Unsaved changes" : "")}"));
+        _inspector.Children.Add(Heading("Actions"));
+        _inspector.Children.Add(Button(editor.IsEnabled ? "Disable" : "Enable", () => ToggleAutomationAsync(document)));
+        _inspector.Children.Add(Button("Duplicate", () => DuplicateAutomationAsync(document)));
+        _inspector.Children.Add(Button("Delete…", () => DeleteAutomationAsync(document)));
+
+        AutomationFunctionReference[] uses = _referencesIndex.Build(_runtime.Settings)
+            .Where(reference => StudioDocumentKinds.FromSource(reference.SourceKind) == document.Kind
+                && StudioDocumentKinds.DefinitionIndex(reference.DefinitionId) == document.Index)
+            .ToArray();
+        _inspector.Children.Add(Heading("Script references"));
+        if (uses.Length == 0) _inspector.Children.Add(Text("None"));
+        foreach (AutomationFunctionReference use in uses)
+        {
+            ExportedScriptFunction? export = _packages.SelectMany(package => package.Exports).FirstOrDefault(item => item.FunctionRef == use.FunctionRef);
+            _inspector.Children.Add(Text($"{(export is null ? "✕" : "✓")} {use.FunctionRef.PackageId}/{use.FunctionRef.ModulePath}#{use.FunctionRef.ExportName}"));
         }
     }
 
@@ -516,6 +942,7 @@ internal sealed class AutomationStudioWindow : Window
         _inspector.Children.Add(Text($"Build: {package.BuildStatus}"));
         _inspector.Children.Add(Text($"Runtime: {package.RuntimeStatus}"));
         _inspector.Children.Add(Text($"Capabilities: {package.Definition.Capabilities}"));
+        _inspector.Children.Add(Button(package.Definition.Enabled ? "Disable Package" : "Enable Package", TogglePackageAsync));
         _buildState.Text = package.BuildStatus == ScriptPackageBuildStatus.Succeeded ? "Build ✓" : package.BuildStatus == ScriptPackageBuildStatus.Failed ? "Build ✕" : "Build —";
         _runtimeState.Text = $"Runtime {package.RuntimeStatus}";
         if (!string.IsNullOrWhiteSpace(package.LastRuntimeFault)) _inspector.Children.Add(Text($"Fault: {package.LastRuntimeFault}"));
@@ -525,129 +952,23 @@ internal sealed class AutomationStudioWindow : Window
         {
             Button open = UiTheme.QuietButton($"{export.ModulePath}#{export.ExportName}({string.Join(", ", export.Parameters.Select(parameter => parameter.Name))})");
             open.HorizontalContentAlignment = HorizontalAlignment.Left;
-            open.Click += async (_, _) =>
-            {
-                await OpenSourceAsync(package.Definition.PackageId, export.ModulePath).ConfigureAwait(true);
-                if (_monaco is not null)
-                    await _monaco.RevealLocationAsync(
-                        MonacoEditorHost.CreateDocumentUri(SelectedProfileId, package.Definition.PackageId, export.ModulePath),
-                        export.SourceLocation.Line,
-                        export.SourceLocation.Column,
-                        _cts.Token).ConfigureAwait(true);
-            };
+            ScriptFunctionRef reference = export.FunctionRef;
+            open.Click += async (_, _) => await OpenDefinitionAsync(reference).ConfigureAwait(true);
             _inspector.Children.Add(open);
             IReadOnlyList<AutomationFunctionReference> uses = _referencesIndex.FindUses(_runtime.Settings, export.FunctionRef);
             if (uses.Count > 0) _inspector.Children.Add(Text($"Used by: {string.Join(", ", uses.Select(use => use.DefinitionName))}"));
         }
     }
 
-    private void BuildAutomationInspector()
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading("Automation"));
-        _inspector.Children.Add(Text("Visual Automation and reusable TypeScript exports share the same Jint execution platform."));
-        _inspector.Children.Add(Button("Add Run Script Function…", AddScriptActionAsync));
-        _inspector.Children.Add(Button("Add Script Predicate…", AddScriptPredicateAsync));
-    }
+    // ───────────────────────────── Bottom panels ─────────────────────────────
 
-    private async Task AddScriptActionAsync()
-    {
-        AutomationTarget? target = await ChooseAutomationTargetAsync(predicate: false).ConfigureAwait(true);
-        if (target is null) return;
-        ExportedScriptFunction? function = await ChooseAnyExportAsync().ConfigureAwait(true);
-        if (function is null) return;
-        string? json = await PromptAsync("Run Script Function", "JSON arguments", "{}").ConfigureAwait(true);
-        if (json is null || !TryJson(json, out JsonElement arguments)) return;
-        RunScriptFunctionAutomationAction action = new(function.FunctionRef, arguments);
-        await SaveScriptActionAsync(target, action).ConfigureAwait(true);
-    }
-
-    private async Task AddScriptPredicateAsync()
-    {
-        AutomationTarget? target = await ChooseAutomationTargetAsync(predicate: true).ConfigureAwait(true);
-        if (target is null) return;
-        ExportedScriptFunction? function = await ChooseAnyExportAsync().ConfigureAwait(true);
-        if (function is null) return;
-        string? json = await PromptAsync("Script Predicate", "JSON arguments", "{}").ConfigureAwait(true);
-        if (json is null || !TryJson(json, out JsonElement arguments)) return;
-        await SaveScriptPredicateAsync(target, new ScriptPredicateAutomationCondition(function.FunctionRef, arguments)).ConfigureAwait(true);
-    }
-
-    private async Task<AutomationTarget?> ChooseAutomationTargetAsync(bool predicate)
-    {
-        List<AutomationTarget> targets = [];
-        targets.AddRange((_runtime.Settings.Aliases ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.Alias, index, item.Name)));
-        targets.AddRange((_runtime.Settings.KeyBindings ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.Keybinding, index, item.Name ?? item.Gesture)));
-        targets.AddRange((_runtime.Settings.Triggers ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.TextTrigger, index, item.Pattern)));
-        targets.AddRange((_runtime.Settings.SemanticTriggers ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.SemanticTrigger, index, item.Name)));
-        targets.AddRange((_runtime.Settings.Timers ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.Timer, index, item.Name)));
-        targets.AddRange((_runtime.Settings.GameRules ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.StateRule, index, item.Name)));
-        targets.AddRange((_runtime.Settings.Workflows ?? []).Select((item, index) => new AutomationTarget(AutomationInvocationSourceKind.Workflow, index, item.Name)));
-        if (predicate) targets = targets.Where(target => target.Kind is AutomationInvocationSourceKind.TextTrigger or AutomationInvocationSourceKind.SemanticTrigger or AutomationInvocationSourceKind.StateRule).ToList();
-        if (targets.Count == 0) { AddProblem("Automation", "Create an Automation definition first."); return null; }
-        return await ChooseAsync("Automation Definition", targets).ConfigureAwait(true);
-    }
-
-    private async Task<ExportedScriptFunction?> ChooseAnyExportAsync()
-    {
-        IReadOnlyList<ScriptPackageSnapshot> packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
-        ExportedScriptFunction[] exports = packages.SelectMany(package => package.Exports).ToArray();
-        if (exports.Length == 0) { AddProblem("Automation", "No built script functions are available in this profile."); return null; }
-        return await ChooseAsync("Script Function", exports, item => $"{item.FunctionRef.PackageId}/{item.ModulePath}#{item.ExportName}").ConfigureAwait(true);
-    }
-
-    private async Task SaveScriptActionAsync(AutomationTarget target, RunScriptFunctionAutomationAction action)
-    {
-        ClientSettings settings = _runtime.Settings;
-        CommandAlias[] aliases = [.. settings.Aliases ?? []];
-        TriggerRule[] triggers = [.. settings.Triggers ?? []];
-        SemanticTriggerRule[] semantic = [.. settings.SemanticTriggers ?? []];
-        GameRule[] rules = [.. settings.GameRules ?? []];
-        AutomationWorkflow[] workflows = [.. settings.Workflows ?? []];
-        CommandTimer[] timers = [.. settings.Timers ?? []];
-        CommandKeyBinding[] keys = [.. settings.KeyBindings ?? []];
-        switch (target.Kind)
-        {
-            case AutomationInvocationSourceKind.Alias: aliases[target.Index] = aliases[target.Index] with { Actions = Append(aliases[target.Index].Actions, action) }; break;
-            case AutomationInvocationSourceKind.Keybinding: keys[target.Index] = keys[target.Index] with { Action = KeybindingActionKind.RunScriptFunction, ScriptAction = action }; break;
-            case AutomationInvocationSourceKind.TextTrigger: triggers[target.Index] = triggers[target.Index] with { Actions = Append(triggers[target.Index].Actions, action) }; break;
-            case AutomationInvocationSourceKind.SemanticTrigger: semantic[target.Index] = semantic[target.Index] with { Actions = Append(semantic[target.Index].Actions, action) }; break;
-            case AutomationInvocationSourceKind.Timer: timers[target.Index] = timers[target.Index] with { Actions = Append(timers[target.Index].Actions, action) }; break;
-            case AutomationInvocationSourceKind.StateRule: rules[target.Index] = rules[target.Index] with { Actions = Append(rules[target.Index].Actions, action) }; break;
-            case AutomationInvocationSourceKind.Workflow: workflows[target.Index] = workflows[target.Index] with { Actions = Append(workflows[target.Index].Actions, action) }; break;
-        }
-        await _runtime.SaveAutomationCompositionAsync(aliases, triggers, semantic, rules, workflows, timers, keys, _cts.Token).ConfigureAwait(true);
-        _automationEditor.RefreshSnapshot();
-        RefreshReferencePanel(await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true));
-    }
-
-    private async Task SaveScriptPredicateAsync(AutomationTarget target, ScriptPredicateAutomationCondition predicate)
-    {
-        ClientSettings settings = _runtime.Settings;
-        TriggerRule[] triggers = [.. settings.Triggers ?? []];
-        SemanticTriggerRule[] semantic = [.. settings.SemanticTriggers ?? []];
-        GameRule[] rules = [.. settings.GameRules ?? []];
-        switch (target.Kind)
-        {
-            case AutomationInvocationSourceKind.TextTrigger: triggers[target.Index] = triggers[target.Index] with { Conditions = Append(triggers[target.Index].Conditions, predicate) }; break;
-            case AutomationInvocationSourceKind.SemanticTrigger: semantic[target.Index] = semantic[target.Index] with { Conditions = Append(semantic[target.Index].Conditions, predicate) }; break;
-            case AutomationInvocationSourceKind.StateRule: rules[target.Index] = rules[target.Index] with { Conditions = Append(rules[target.Index].Conditions, predicate) }; break;
-            default: return;
-        }
-        await _runtime.SaveAutomationCompositionAsync(
-            settings.Aliases ?? [], triggers, semantic, rules, settings.Workflows ?? [], settings.Timers ?? [], settings.KeyBindings ?? [], _cts.Token).ConfigureAwait(true);
-        _automationEditor.RefreshSnapshot();
-    }
-
-    private static IReadOnlyList<T> Append<T>(IReadOnlyList<T>? values, T value) => [.. values ?? [], value];
-
-    private void RefreshReferencePanel(IReadOnlyList<ScriptPackageSnapshot> packages)
+    private void RefreshReferencePanel()
     {
         _referencesPanel.Children.Clear();
-        Dictionary<ScriptFunctionRef, ExportedScriptFunction> exports = packages.SelectMany(package => package.Exports).ToDictionary(export => export.FunctionRef);
+        HashSet<ScriptFunctionRef> exports = _packages.SelectMany(package => package.Exports).Select(export => export.FunctionRef).ToHashSet();
         foreach (AutomationFunctionReference reference in _referencesIndex.Build(_runtime.Settings))
         {
-            bool valid = exports.ContainsKey(reference.FunctionRef);
+            bool valid = exports.Contains(reference.FunctionRef);
             _referencesPanel.Children.Add(Text($"{(valid ? "✓" : "✕")} {reference.DefinitionName} → {reference.FunctionRef.PackageId}/{reference.FunctionRef.ModulePath}#{reference.FunctionRef.ExportName}"));
         }
     }
@@ -655,8 +976,9 @@ internal sealed class AutomationStudioWindow : Window
     private async Task RefreshRuntimePanelAsync()
     {
         _runtimePanel.Children.Clear();
-        foreach (ScriptPackageSnapshot package in await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true))
+        foreach (ScriptPackageSnapshot package in _packages)
             _runtimePanel.Children.Add(Text($"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus} · enabled={package.Definition.Enabled}"));
+        await Task.CompletedTask;
     }
 
     private async Task ConsumeEventsAsync(CancellationToken cancellationToken)
@@ -695,33 +1017,49 @@ internal sealed class AutomationStudioWindow : Window
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(() => AddProblem(severity, message)); return; }
         _problems.Children.Add(Text($"{severity}: {message}"));
         while (_problems.Children.Count > 500) _problems.Children.RemoveAt(0);
+        if (_bottomCollapsed) ToggleBottom();
+        if (_bottom.Items.Count > 0) _bottom.SelectedIndex = 0;
     }
 
-    private async Task SelectScriptsAsync()
-    {
-        TreeViewItem? scripts = _nodes.FirstOrDefault(pair => pair.Value.Kind == NodeKind.Scripts).Key;
-        if (scripts is not null) _navigator.SelectedItem = scripts;
-        await Task.CompletedTask;
-    }
+    // ───────────────────────────── Window events ─────────────────────────────
 
     private async void WindowKeyDown(object? sender, KeyEventArgs e)
     {
         bool command = e.KeyModifiers.HasFlag(KeyModifiers.Meta) || e.KeyModifiers.HasFlag(KeyModifiers.Control);
-        if (command && e.Key == Key.S)
+        if (!command) return;
+        if (e.Key == Key.S)
         {
             e.Handled = true;
             if (e.KeyModifiers.HasFlag(KeyModifiers.Shift)) await SaveAllAsync().ConfigureAwait(true);
             else await SaveActiveAsync().ConfigureAwait(true);
         }
+        else if (e.Key == Key.P) { e.Handled = true; await QuickOpenAsync().ConfigureAwait(true); }
+        else if (e.Key == Key.B && e.KeyModifiers.HasFlag(KeyModifiers.Alt)) { e.Handled = true; TogglePane(_inspectorFrame, _rightSplit, 4, _preferences.InspectorWidth); }
+        else if (e.Key == Key.B) { e.Handled = true; TogglePane(_explorerFrame, _leftSplit, 0, _preferences.ExplorerWidth); }
+        else if (e.Key == Key.J) { e.Handled = true; ToggleBottom(); }
+        else if (e.Key == Key.W && _documents.Active is { } active)
+        {
+            e.Handled = true;
+            await CloseDocumentAsync(active).ConfigureAwait(true);
+        }
+        else if (e.Key == Key.Tab)
+        {
+            e.Handled = true;
+            _documents.Cycle(e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1);
+        }
     }
 
     private async void WindowClosing(object? sender, WindowClosingEventArgs e)
     {
-        if (_closeApproved || _dirty.Count == 0) return;
+        if (_closeApproved || !_documents.Dirty.Any()) return;
         e.Cancel = true;
-        string choice = await ConfirmDirtyCloseAsync().ConfigureAwait(true);
+        string choice = await ConfirmDirtyAsync("all open documents").ConfigureAwait(true);
         if (choice == "cancel") return;
-        if (choice == "save") await SaveAllAsync().ConfigureAwait(true);
+        if (choice == "save")
+        {
+            await SaveAllAsync().ConfigureAwait(true);
+            if (_documents.Dirty.Any()) return;
+        }
         _closeApproved = true;
         Close();
     }
@@ -730,22 +1068,42 @@ internal sealed class AutomationStudioWindow : Window
     {
         _workspace.WorkspaceChanged -= WorkspaceChanged;
         _cts.Cancel();
-        _automationEditor.Deactivate();
-        if (_monaco is not null) _ = _monaco.DisposeAsync();
+        if (_body.ColumnDefinitions.Count >= 5)
+        {
+            _preferences.ExplorerWidth = _body.ColumnDefinitions[0].ActualWidth;
+            _preferences.InspectorWidth = _body.ColumnDefinitions[4].ActualWidth;
+        }
+        if (!_bottomCollapsed) _preferences.BottomHeight = _root.RowDefinitions[3].ActualHeight;
+        _preferences.Save();
+        _ = _monaco.DisposeAsync();
         _cts.Dispose();
     }
 
-    private async Task<string> ConfirmDirtyCloseAsync()
+    // ───────────────────────────── Dialogs ─────────────────────────────
+
+    private async Task<string> ConfirmDirtyAsync(string what)
     {
-        Window dialog = Dialog("Unsaved script changes", 430, 180);
+        Window dialog = Dialog("Unsaved changes", 430, 180);
         Button save = new() { Content = "Save", MinWidth = 90 };
         Button discard = new() { Content = "Discard", MinWidth = 90 };
         Button cancel = new() { Content = "Cancel", MinWidth = 90 };
         save.Click += (_, _) => dialog.Close("save"); discard.Click += (_, _) => dialog.Close("discard"); cancel.Click += (_, _) => dialog.Close("cancel");
         StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
         buttons.Children.Add(save); buttons.Children.Add(discard); buttons.Children.Add(cancel);
-        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text("Save dirty script documents before closing?"), buttons } };
+        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text($"Save changes to {what} before closing?"), buttons } };
         return await dialog.ShowDialog<string>(this).ConfigureAwait(true) ?? "cancel";
+    }
+
+    private async Task<bool?> ConfirmAsync(string title, string message, string confirm)
+    {
+        Window dialog = Dialog(title, 430, 170);
+        Button ok = new() { Content = confirm, MinWidth = 90 };
+        Button cancel = new() { Content = "Cancel", MinWidth = 90 };
+        ok.Click += (_, _) => dialog.Close(true); cancel.Click += (_, _) => dialog.Close(false);
+        StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+        buttons.Children.Add(ok); buttons.Children.Add(cancel);
+        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text(message), buttons } };
+        return await dialog.ShowDialog<bool?>(this).ConfigureAwait(true);
     }
 
     private async Task<string?> PromptAsync(string title, string label, string initial)
@@ -760,10 +1118,10 @@ internal sealed class AutomationStudioWindow : Window
         return await dialog.ShowDialog<string?>(this).ConfigureAwait(true);
     }
 
-    private async Task<T?> ChooseAsync<T>(string title, IReadOnlyList<T> values, Func<T, string>? label = null) where T : class
+    private async Task<T?> ChooseAsync<T>(string title, IReadOnlyList<T> values, Func<T, string>? label = null, T? initial = null) where T : class
     {
         Window dialog = Dialog(title, 560, 240);
-        ComboBox picker = new() { ItemsSource = values, SelectedIndex = 0 };
+        ComboBox picker = new() { ItemsSource = values, SelectedItem = initial ?? values.FirstOrDefault(), HorizontalAlignment = HorizontalAlignment.Stretch };
         if (label is not null)
             picker.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<T>((item, _) => new TextBlock { Text = label(item) }, true);
         Button ok = new() { Content = "Select", MinWidth = 90 }; Button cancel = new() { Content = "Cancel", MinWidth = 90 };
@@ -782,12 +1140,6 @@ internal sealed class AutomationStudioWindow : Window
         CanResize = false,
         WindowStartupLocation = WindowStartupLocation.CenterOwner
     };
-
-    private bool TryJson(string value, out JsonElement element)
-    {
-        try { using JsonDocument document = JsonDocument.Parse(value); element = document.RootElement.Clone(); return true; }
-        catch (JsonException exception) { element = default; AddProblem("JSON", exception.Message); return false; }
-    }
 
     private static TextBlock Text(string value) => new() { Text = value, Foreground = UiTheme.Text, TextWrapping = TextWrapping.Wrap };
     private static TextBlock Heading(string value) => new() { Text = value, Foreground = UiTheme.Accent, FontWeight = FontWeight.SemiBold };
