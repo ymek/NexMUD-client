@@ -26,6 +26,7 @@ internal sealed class AutomationStudioWindow : Window
     private const int MaximumEventRows = 500;
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
+    private readonly StudioSessionController _session;
     private readonly AutomationReferenceIndex _referencesIndex = new();
     private readonly StudioDocumentSet _documents = new();
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
@@ -70,6 +71,8 @@ internal sealed class AutomationStudioWindow : Window
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _workspace = runtime.ScriptWorkspace;
+        _session = new StudioSessionController(runtime.ActiveConnectionProfile.Id);
+        _bottomCollapsed = _preferences.BottomCollapsed;
 
         Title = "NexMUD Automation Studio";
         Width = 1440;
@@ -96,13 +99,16 @@ internal sealed class AutomationStudioWindow : Window
     }
 
     private string SelectedProfileId =>
-        (_profile.SelectedItem as ConnectionProfile)?.Id ?? _runtime.ActiveConnectionProfile.Id;
+        _session.Current.ProfileId;
 
     // ───────────────────────────── Layout ─────────────────────────────
 
     private Control BuildLayout()
     {
-        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{_preferences.BottomHeight},Auto") };
+        double bottomHeight = _bottomCollapsed
+            ? StudioUiPreferences.CollapsedBottomHeight
+            : _preferences.BottomHeight;
+        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{bottomHeight},Auto") };
         _root.Children.Add(BuildToolbar());
 
         _body = new Grid
@@ -152,6 +158,10 @@ internal sealed class AutomationStudioWindow : Window
                 BottomTab("Problems", _problems), BottomTab("Console", _console), BottomTab("Runtime", _runtimePanel),
                 BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
             }
+        };
+        _bottom.SelectionChanged += (_, _) =>
+        {
+            if (_bottomCollapsed) ToggleBottom();
         };
         Grid.SetRow(_bottom, 3);
         _root.Children.Add(_bottom);
@@ -217,7 +227,7 @@ internal sealed class AutomationStudioWindow : Window
         commands.Children.Add(Button("Build", BuildActivePackageAsync));
         commands.Children.Add(Button("Run", RunFunctionAsync));
         commands.Children.Add(Button("Search", SearchAsync));
-        _bottomToggle = Button("Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
+        _bottomToggle = Button(_bottomCollapsed ? "Panel ▴" : "Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
         commands.Children.Add(_bottomToggle);
         Grid.SetColumn(commands, 2); grid.Children.Add(commands);
 
@@ -282,7 +292,6 @@ internal sealed class AutomationStudioWindow : Window
     {
         _bottomCollapsed = !_bottomCollapsed;
         _root.RowDefinitions[3].Height = new GridLength(_bottomCollapsed ? StudioUiPreferences.CollapsedBottomHeight : _preferences.BottomHeight);
-        _bottom.IsVisible = !_bottomCollapsed;
         _bottomToggle.Content = _bottomCollapsed ? "Panel ▴" : "Panel ▾";
     }
 
@@ -339,7 +348,7 @@ internal sealed class AutomationStudioWindow : Window
         try
         {
             IReadOnlyList<ConnectionProfile> profiles = _runtime.ConnectionProfiles;
-            string selected = (_profile.SelectedItem as ConnectionProfile)?.Id ?? _runtime.ActiveConnectionProfile.Id;
+            string selected = _session.Current.ProfileId;
             _profile.ItemsSource = profiles;
             _profile.SelectedItem = profiles.FirstOrDefault(item => item.Id.Equals(selected, StringComparison.Ordinal))
                 ?? profiles.FirstOrDefault();
@@ -351,16 +360,38 @@ internal sealed class AutomationStudioWindow : Window
     private async void ProfileSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_refreshingProfiles) return;
+        if (_profile.SelectedItem is not ConnectionProfile selectedProfile) return;
+        if (selectedProfile.Id.Equals(_session.Current.ProfileId, StringComparison.Ordinal)) return;
         if (_documents.Dirty.Any())
         {
             AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
             await RefreshProfilesAsync().ConfigureAwait(true);
             return;
         }
-        CloseAllEditors();
-        _documents.CloseAll();
+
+        StudioSessionSnapshot previous = _session.Current;
+        await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
+        _session.SwitchProfile(selectedProfile.Id);
         _activePackage = null;
         await RefreshNavigatorAsync().ConfigureAwait(true);
+    }
+
+    private async Task CloseSessionDocumentsAsync(CancellationToken cancellationToken)
+    {
+        foreach (StudioDocument document in _documents.Documents.Where(document => document.IsScript).ToArray())
+        {
+            try
+            {
+                await _monaco.CloseDocumentAsync(document.Key, cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        CloseAllEditors();
+        _documents.CloseAll();
     }
 
     private void WorkspaceChanged(object? sender, EventArgs e)
@@ -1074,8 +1105,10 @@ internal sealed class AutomationStudioWindow : Window
             _preferences.InspectorWidth = _body.ColumnDefinitions[4].ActualWidth;
         }
         if (!_bottomCollapsed) _preferences.BottomHeight = _root.RowDefinitions[3].ActualHeight;
+        _preferences.BottomCollapsed = _bottomCollapsed;
         _preferences.Save();
         _ = _monaco.DisposeAsync();
+        _session.Dispose();
         _cts.Dispose();
     }
 
