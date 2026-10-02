@@ -310,6 +310,49 @@ public static class Program
             Assert.False(session.IsCurrent(first));
             return Task.CompletedTask;
         });
+        await RunAsync("automation script references survive module-path rewrite", () =>
+        {
+            ScriptFunctionRef source = new("combat-tools", "src/combat.ts", "flee");
+            ScriptFunctionRef destination = new("combat-tools", "src/actions/combat.ts", "flee");
+            JsonElement arguments = JsonSerializer.SerializeToElement(new { });
+
+            ClientSettings settings = ClientSettings.Default with
+            {
+                Aliases =
+                [
+                    new CommandAlias(
+                        "panic",
+                        "flee",
+                        Actions:
+                        [
+                            new RunScriptFunctionAutomationAction(source, arguments)
+                        ])
+                ],
+                Triggers =
+                [
+                    new TriggerRule(
+                        "You are hurt",
+                        "flee",
+                        Conditions:
+                        [
+                            new ScriptPredicateAutomationCondition(source, arguments)
+                        ])
+                ]
+            };
+
+            AutomationReferenceIndex index = new();
+            Assert.Equal(2, index.FindUses(settings, source).Count);
+
+            ClientSettings rewritten = index.RewriteModulePath(
+                settings,
+                "combat-tools",
+                "src/combat.ts",
+                "src/actions/combat.ts");
+
+            Assert.Equal(0, index.FindUses(rewritten, source).Count);
+            Assert.Equal(2, index.FindUses(rewritten, destination).Count);
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
