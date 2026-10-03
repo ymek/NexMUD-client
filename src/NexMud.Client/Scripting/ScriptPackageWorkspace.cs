@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using NexMud.Scripting.Permissions;
 using NexMud.Scripting.Runtime;
+using NexMud.Scripting.TypeScript.Declarations;
 
 namespace NexMud.Client.Scripting;
 
@@ -522,6 +523,12 @@ update-notifier=false
                 JsonSerializer.Serialize(updated, JsonOptions) + Environment.NewLine,
                 cancellationToken).ConfigureAwait(false);
         }
+
+        await ScriptLanguageProjectProjection.EnsureAsync(
+            root,
+            packages,
+            NexMudTypeDeclarations.Source,
+            cancellationToken).ConfigureAwait(false);
 
         return new ScriptPackageWorkspaceMigrationResult(packages, issues, migrated);
     }
