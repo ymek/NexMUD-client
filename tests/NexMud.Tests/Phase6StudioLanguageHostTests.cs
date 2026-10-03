@@ -46,6 +46,23 @@ internal static class Phase6StudioLanguageHostTests
 
     private sealed record FakeDocument(string Uri, string LanguageId, int Version, string Text);
 
+    private static class Assert
+    {
+        public static void Equal<T>(T expected, T actual)
+        {
+            if (!EqualityComparer<T>.Default.Equals(expected, actual))
+                throw new InvalidOperationException($"Expected '{expected}', got '{actual}'.");
+        }
+
+        public static T Single<T>(IEnumerable<T> values)
+        {
+            T[] items = values.ToArray();
+            if (items.Length != 1)
+                throw new InvalidOperationException($"Expected one item, got {items.Length}.");
+            return items[0];
+        }
+    }
+
     private sealed class FakeTransport : IStudioTypeScriptTransport
     {
         public bool IsRunning { get; set; } = true;
