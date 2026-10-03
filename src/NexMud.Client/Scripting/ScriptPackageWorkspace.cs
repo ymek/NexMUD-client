@@ -181,7 +181,7 @@ public sealed partial class ScriptPackageDocument
     }
 
     public ScriptPackageDefinition ToRuntimeDefinition(bool enabled) =>
-        new(
+        new ScriptPackageDefinition(
             NexMud.Id,
             NexMud.DisplayName ?? Name,
             Version,
