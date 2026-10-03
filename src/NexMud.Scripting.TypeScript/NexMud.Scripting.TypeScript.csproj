@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../NexMud.Scripting/NexMud.Scripting.csproj" />
+    <ProjectReference Include="../NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj" />
   </ItemGroup>
 </Project>

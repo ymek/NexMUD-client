@@ -268,6 +268,299 @@ public static class Program
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
         await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
         await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
+        await RunAsync("studio document set tracks dirty state", () =>
+        {
+            var set = new NexMud.Gui.AutomationStudio.StudioDocumentSet();
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                "automation:Alias:0",
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "cake");
+            set.OpenOrFocus(document);
+            set.SetDirty(document.Key, true);
+            Assert.Equal(document.Key, Assert.Single(set.Dirty).Key);
+            set.SetDirty(document.Key, false);
+            Assert.False(set.Dirty.Any());
+            return Task.CompletedTask;
+        });
+        await RunAsync("script workspace paths reject traversal", () =>
+        {
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("src/../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeIdentifier("bad/package", "packageId"));
+
+            string root = Path.Combine(Path.GetTempPath(), "nexmud-workspace-containment");
+            string inside = ScriptWorkspacePath.CombineInside(root, "src/main.ts");
+            string canonicalRoot = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
+            Assert.True(inside.StartsWith(canonicalRoot, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio profile switch cancels previous generation", () =>
+        {
+            using var session = new NexMud.Gui.AutomationStudio.StudioSessionController("avendar");
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot first = session.Current;
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot second = session.SwitchProfile("test-profile");
+
+            Assert.True(first.CancellationToken.IsCancellationRequested);
+            Assert.Equal(1L, second.Generation);
+            Assert.Equal("test-profile", second.ProfileId);
+            Assert.True(session.IsCurrent(second));
+            Assert.False(session.IsCurrent(first));
+            return Task.CompletedTask;
+        });
+        await RunAsync("automation script references survive module-path rewrite", () =>
+        {
+            ScriptFunctionRef source = new("combat-tools", "src/combat.ts", "flee");
+            ScriptFunctionRef destination = new("combat-tools", "src/actions/combat.ts", "flee");
+            JsonElement arguments = JsonSerializer.SerializeToElement(new { });
+
+            ClientSettings settings = ClientSettings.Default with
+            {
+                Aliases =
+                [
+                    new CommandAlias(
+                        "panic",
+                        "flee",
+                        Actions:
+                        [
+                            new RunScriptFunctionAutomationAction(source, arguments)
+                        ])
+                ],
+                Triggers =
+                [
+                    new TriggerRule(
+                        "You are hurt",
+                        "flee",
+                        Conditions:
+                        [
+                            new ScriptPredicateAutomationCondition(source, arguments)
+                        ])
+                ]
+            };
+
+            AutomationReferenceIndex index = new();
+            Assert.Equal(2, index.FindUses(settings, source).Count);
+
+            ClientSettings rewritten = index.RewriteModulePath(
+                settings,
+                "combat-tools",
+                "src/combat.ts",
+                "src/actions/combat.ts");
+
+            Assert.Equal(0, index.FindUses(rewritten, source).Count);
+            Assert.Equal(2, index.FindUses(rewritten, destination).Count);
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio activities partition automation and workflow explorers", () =>
+        {
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias));
+            Assert.False(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Workflows,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.ShowsScriptPackages(
+                NexMud.Gui.AutomationStudio.StudioActivity.Scripts));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio automation organization keeps stable item identity", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("one", "look"),
+                        new CommandAlias("two", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"test_{++sequence}");
+            string first = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+            string second = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(second, catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            Assert.False(first == catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio folders organize without changing runtime groups", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Triggers = [new TriggerRule("danger", "flee", Group: "combat")]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"item_{++sequence}");
+            catalog = catalog.AddFolder(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                "Defensive",
+                createId: () => "folder_defensive");
+            string itemId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, 0);
+            catalog = catalog.MoveItem(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                itemId,
+                "folder_defensive");
+
+            Assert.Equal("folder_defensive", catalog.FolderIdFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, itemId));
+            Assert.Equal("combat", collections.Triggers[0].Group);
+            Assert.Throws<InvalidOperationException>(() => catalog.DeleteEmptyFolder("folder_defensive"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio open automation identity survives sibling deletion", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("first", "look"),
+                        new CommandAlias("second", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"open_{++sequence}");
+            string openId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                NexMud.Gui.AutomationStudio.StudioDocument.AutomationKey(
+                    "profile",
+                    NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                    openId),
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "second")
+            {
+                AutomationId = openId,
+                ProfileId = "profile"
+            };
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(openId, document.AutomationId);
+            Assert.Equal(0, catalog.SourceIndexFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                document.AutomationId!));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer builds nested package-relative tree", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceSourceFile[] files =
+            [
+                new("main.ts", 10),
+                new("src/combat.ts", 20),
+                new("src/util/math.ts", 30),
+                new("types/api.d.ts", 40)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files);
+
+            Assert.SequenceEqual(["src", "types", "main.ts"], roots.Select(node => node.Name));
+            NexMud.Gui.AutomationStudio.ScriptExplorerEntry src = roots[0];
+            Assert.True(src.IsFolder);
+            Assert.SequenceEqual(["util", "combat.ts"], src.Children.Select(node => node.Name));
+            Assert.Equal("src/util/math.ts", src.Children[0].Children[0].RelativePath);
+
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> filtered =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files, "combat");
+            Assert.Equal(1, filtered.Count);
+            Assert.Equal("src", filtered[0].Name);
+            Assert.Equal("combat.ts", Assert.Single(filtered[0].Children).Name);
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer derives safe file destinations", () =>
+        {
+            Assert.Equal("src/module.ts", NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "module.ts"));
+            Assert.Equal("src", NexMud.Gui.AutomationStudio.ScriptExplorerTree.ParentPath("src/module.ts"));
+            Assert.True(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("src/util/math.ts", "src"));
+            Assert.False(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("source.ts", "src"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "../escape.ts"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer preserves explicit empty folders", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceEntry[] entries =
+            [
+                new("empty", true, 0, DateTimeOffset.UnixEpoch),
+                new("src", true, 0, DateTimeOffset.UnixEpoch),
+                new("src/main.ts", false, 10, DateTimeOffset.UnixEpoch)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(entries);
+
+            Assert.SequenceEqual(["empty", "src"], roots.Select(node => node.Name));
+            Assert.True(roots[0].IsFolder);
+            Assert.Equal(0, roots[0].Children.Count);
+            Assert.Equal("main.ts", Assert.Single(roots[1].Children).Name);
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer rebases moved folder paths", () =>
+        {
+            Assert.Equal(
+                "lib/combat/actions.ts",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase(
+                    "src/combat/actions.ts",
+                    "src",
+                    "lib"));
+            Assert.Equal(
+                "lib",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("src", "src", "lib"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("other/file.ts", "src", "lib"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio text models detect external conflicts without losing editor authority", () =>
+        {
+            var registry = new NexMud.Gui.AutomationStudio.StudioTextModelRegistry();
+            const string uri = "nexmud://profile/default/package/tools/src/main.ts";
+            registry.Track(uri, "default", "tools", "src/main.ts", "export const value = 1;\n");
+
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 1;\n"));
+            Assert.False(registry.MatchesBaseline(uri, "export const value = 2;\n"));
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is not null);
+
+            registry.KeepEditorVersion(uri);
+            Assert.True(registry.CanOverwriteExternalChange(uri));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            Assert.False(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 3;\n"));
+            Assert.False(registry.CanOverwriteExternalChange(uri));
+
+            registry.MarkSaved(uri, "export const value = 3;\n");
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 3;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            return Task.CompletedTask;
+        });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;

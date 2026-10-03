@@ -88,13 +88,14 @@ internal sealed class StudioDocument
     public string Title { get; set; }
     public bool IsDirty { get; set; }
     public IReadOnlyList<string> Breadcrumb { get; set; } = [];
-    public int Index { get; init; } = -1;
+    public string? AutomationId { get; init; }
     public string? ProfileId { get; init; }
     public string? PackageId { get; init; }
     public string? Path { get; init; }
     public bool IsScript => Kind == StudioDocumentKind.Script;
 
-    public static string AutomationKey(StudioDocumentKind kind, int index) => $"automation:{kind}:{index}";
+    public static string AutomationKey(string profileId, StudioDocumentKind kind, string automationId) =>
+        $"automation:{profileId}:{kind}:{automationId}";
 }
 
 /// <summary>
@@ -200,6 +201,15 @@ internal sealed class StudioUiPreferences
     public double ExplorerWidth { get => _explorerWidth; set => _explorerWidth = Math.Clamp(value, MinExplorerWidth, MaxExplorerWidth); }
     public double InspectorWidth { get => _inspectorWidth; set => _inspectorWidth = Math.Clamp(value, MinInspectorWidth, MaxInspectorWidth); }
     public double BottomHeight { get => _bottomHeight; set => _bottomHeight = Math.Clamp(value, MinBottomHeight, MaxBottomHeight); }
+    public bool BottomCollapsed { get; set; } = true;
+    public string ActiveActivity { get; set; } = nameof(StudioActivity.Automations);
+
+    public StudioActivity ResolveActivity() =>
+        Enum.TryParse(ActiveActivity, ignoreCase: true, out StudioActivity activity)
+            ? activity
+            : StudioActivity.Automations;
+
+    public void SetActivity(StudioActivity activity) => ActiveActivity = activity.ToString();
 
     public static string DefaultPath => NexMudDataPaths.GetFilePath("automation-studio-ui.json");
 
