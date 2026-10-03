@@ -49,10 +49,10 @@ case "$platform" in
   *) echo "prepare-scripting-toolchain.sh currently supports darwin and linux targets." >&2; exit 2 ;;
 esac
 
-fingerprint="layout=2;node=$NODE_VERSION;pnpm=$PNPM_VERSION;typescript=$TYPESCRIPT_VERSION;typescript-language-server=$TYPESCRIPT_LANGUAGE_SERVER_VERSION;esbuild=$ESBUILD_VERSION;vitest=$VITEST_VERSION;platform=$platform;arch=$arch"
+fingerprint="layout=3;node=$NODE_VERSION;pnpm=$PNPM_VERSION;typescript=$TYPESCRIPT_VERSION;typescript-language-server=$TYPESCRIPT_LANGUAGE_SERVER_VERSION;esbuild=$ESBUILD_VERSION;vitest=$VITEST_VERSION;platform=$platform;arch=$arch"
 if [[ -f "$output/.fingerprint" ]] && [[ "$(cat "$output/.fingerprint")" == "$fingerprint" ]] && \
    [[ -x "$output/node/bin/node" ]] && [[ -f "$output/manifest.json" ]] && \
-   [[ -f "$output/packages/node_modules/typescript/lib/tsc.js" ]]; then
+   [[ -d "$output/pnpm" ]] && [[ -f "$output/packages/node_modules/typescript/lib/tsc.js" ]]; then
   printf 'Using cached NexMUD scripting toolchain: %s\n' "$output"
   exit 0
 fi
@@ -78,17 +78,51 @@ if [[ "$actual" != "$expected" ]]; then
   exit 1
 fi
 
+pnpm_archive="pnpm-${platform}-${arch}.tar.gz"
+case "$platform-$arch" in
+  darwin-arm64) pnpm_expected="8eeeae4cd714b2f1755750d303f5b1bcfe23d95ed7245536305d0c3877c5ce41" ;;
+  darwin-x64) pnpm_expected="8cbc5a840b4bcd8c0da878e6616a832d88e98a8acbedf1736310b395467f4a13" ;;
+  linux-arm64) pnpm_expected="75c5e34d3164fe3d3549580b1b1b59c9dd16543e558dec722b686193cdb7dfa1" ;;
+  linux-x64) pnpm_expected="db3906881f63e41b655e3b97d473603dc26326c2470d0b1b8083689e1bcbd1e8" ;;
+  *) echo "No pinned pnpm release digest for $platform/$arch." >&2; exit 2 ;;
+esac
+pnpm_url="https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${pnpm_archive}"
+printf 'Downloading pnpm %s standalone binary for %s/%s...\n' "$PNPM_VERSION" "$platform" "$arch"
+curl --fail --location --retry 3 --silent --show-error "$pnpm_url" -o "$work/$pnpm_archive"
+pnpm_actual="$(shasum -a 256 "$work/$pnpm_archive" | awk '{print $1}')"
+if [[ "$pnpm_actual" != "$pnpm_expected" ]]; then
+  echo "pnpm release archive SHA-256 mismatch." >&2
+  exit 1
+fi
+
 tar -xf "$work/$archive" -C "$work"
 mv "$work/node-v${NODE_VERSION}-${platform}-${arch}" "$output/node"
 node="$output/node/bin/node"
 npm_cli="$output/node/lib/node_modules/npm/bin/npm-cli.js"
+
+pnpm_release_root="$work/pnpm-release"
+mkdir -p "$pnpm_release_root" "$output/pnpm"
+tar -xzf "$work/$pnpm_archive" -C "$pnpm_release_root"
+pnpm_source="$(find "$pnpm_release_root" -type f -name pnpm -print -quit)"
+if [[ -z "$pnpm_source" ]]; then
+  echo "pnpm release archive did not contain a pnpm executable." >&2
+  exit 1
+fi
+cp -R "$pnpm_release_root"/. "$output/pnpm/"
+pnpm_inside="${pnpm_source#${pnpm_release_root}/}"
+pnpm_relative="pnpm/$pnpm_inside"
+pnpm="$output/$pnpm_relative"
+chmod +x "$pnpm"
+if [[ "$("$pnpm" --version)" != "$PNPM_VERSION" ]]; then
+  echo "Bundled pnpm version did not match $PNPM_VERSION." >&2
+  exit 1
+fi
 
 mkdir -p "$output/packages"
 cat > "$output/packages/package.json" <<JSON
 {
   "private": true,
   "dependencies": {
-    "pnpm": "$PNPM_VERSION",
     "typescript": "$TYPESCRIPT_VERSION",
     "typescript-language-server": "$TYPESCRIPT_LANGUAGE_SERVER_VERSION",
     "esbuild": "$ESBUILD_VERSION",
@@ -111,6 +145,7 @@ TOOLCHAIN_ARCH="$arch" \
 TOOLCHAIN_FINGERPRINT="$fingerprint" \
 NODE_VERSION="$NODE_VERSION" \
 PNPM_VERSION="$PNPM_VERSION" \
+PNPM_RELATIVE_PATH="$pnpm_relative" \
 TYPESCRIPT_VERSION="$TYPESCRIPT_VERSION" \
 TYPESCRIPT_LANGUAGE_SERVER_VERSION="$TYPESCRIPT_LANGUAGE_SERVER_VERSION" \
 ESBUILD_VERSION="$ESBUILD_VERSION" \
@@ -150,7 +185,7 @@ function packageBin(packageName, commandName) {
 
 const entries = [
   ['node', process.env.NODE_VERSION, 'node/bin/node', true],
-  ['pnpm', process.env.PNPM_VERSION, packageBin('pnpm', 'pnpm'), false],
+  ['pnpm', process.env.PNPM_VERSION, process.env.PNPM_RELATIVE_PATH, true],
   ['typescript', process.env.TYPESCRIPT_VERSION, packageBin('typescript', 'tsc'), false],
   ['typescript-language-server', process.env.TYPESCRIPT_LANGUAGE_SERVER_VERSION, packageBin('typescript-language-server', 'typescript-language-server'), false],
   ['esbuild', process.env.ESBUILD_VERSION, packageBin('esbuild', 'esbuild'), true],

@@ -345,7 +345,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
                 Eor: protocols.Eor != ProtocolPolicy.Disabled),
             ClientName: "NexMUD",
-            ClientVersion: "0.31.0");
+            ClientVersion: "0.32.0");
     }
 
     public MudConnectionOptions CreateConnectionOptions(string? host, int? port, bool? useTls)

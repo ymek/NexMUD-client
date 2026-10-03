@@ -4,7 +4,7 @@
     <AssemblyName>NexMUD</AssemblyName>
     <AssemblyTitle>NexMUD</AssemblyTitle>
     <Product>NexMUD</Product>
-    <Version>0.31.0</Version>
+    <Version>0.32.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.1.2" />

@@ -863,8 +863,12 @@ else:
     if ts_tree.findall(".//PackageReference"):
         fail("TypeScript boundary must not smuggle in Node/native compiler dependencies")
     ts_refs = [node.get("Include") or "" for node in ts_tree.findall(".//ProjectReference")]
-    if ts_refs != ["../NexMud.Scripting/NexMud.Scripting.csproj"]:
-        fail(f"TypeScript boundary must depend only on scripting contracts: {ts_refs}")
+    expected_ts_refs = [
+        "../NexMud.Scripting/NexMud.Scripting.csproj",
+        "../NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj",
+    ]
+    if ts_refs != expected_ts_refs:
+        fail(f"TypeScript boundary must depend only on scripting contracts and process tooling: {ts_refs}")
 ts_declarations = (ROOT / "src/NexMud.Scripting.TypeScript/Declarations/NexMudTypeDeclarations.cs").read_text(encoding="utf-8")
 for literal in ('ModuleSpecifier = "@nexmud/api"', "declare const nex: NexMudApi", "\"character.vitalsChanged\"", "Promise<NexMudCommandResult>", "NexMudTimersApi", "NexMudStorageApi", "ScriptApiVersion.Current"):
     if literal not in ts_declarations:
@@ -874,6 +878,7 @@ solution_text = (ROOT / "NexMud.slnx").read_text(encoding="utf-8")
 for project_path in (
     "src/NexMud.Scripting/NexMud.Scripting.csproj",
     "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj",
+    "src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj",
     "src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj",
 ):
     if project_path not in solution_text:
@@ -1114,15 +1119,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.31.0"):
-    fail("README current version must be NexMUD 0.31.0")
-if '<Version>0.31.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.31.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.32.0"):
+    fail("README current version must be NexMUD 0.32.0")
+if '<Version>0.32.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.32.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.31.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.31.0")
-if '<string>31000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 31000 for NexMUD 0.31.0")
+if '<string>0.32.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.32.0")
+if '<string>32000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 32000 for NexMUD 0.32.0")
 item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")

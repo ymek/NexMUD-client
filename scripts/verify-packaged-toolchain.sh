@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$repo_root/scripts/scripting-toolchain.versions.env"
 app="${1:-$repo_root/artifacts/macos/NexMUD.app}"
 tooling="$app/Contents/Resources/AutomationStudio/tooling"
 node="$tooling/node/bin/node"
@@ -28,7 +30,7 @@ NODE
 tsc="$(component_path typescript)"
 pnpm="$(component_path pnpm)"
 [[ -f "$tsc" ]] || { echo "Bundled TypeScript compiler is missing: $tsc" >&2; exit 1; }
-[[ -f "$pnpm" ]] || { echo "Bundled pnpm is missing: $pnpm" >&2; exit 1; }
+[[ -x "$pnpm" ]] || { echo "Bundled pnpm is missing or not executable: $pnpm" >&2; exit 1; }
 [[ -f "$monaco/index.html" ]] || { echo "Bundled Monaco index.html is missing." >&2; exit 1; }
 [[ -f "$monaco/vs/loader.js" ]] || { echo "Bundled Monaco loader.js is missing." >&2; exit 1; }
 
@@ -42,7 +44,8 @@ done
 
 clean_env=(env -i "HOME=${HOME:-/tmp}" "TMPDIR=${TMPDIR:-/tmp}" "PATH=$clean_path" "LANG=${LANG:-C}")
 "${clean_env[@]}" "$node" "$tsc" --version >/dev/null
-"${clean_env[@]}" "$node" "$pnpm" --version >/dev/null
+pnpm_version="$("${clean_env[@]}" "$pnpm" --version)"
+[[ "$pnpm_version" == "$PNPM_VERSION" ]] || { echo "Bundled pnpm version mismatch: expected $PNPM_VERSION, got $pnpm_version" >&2; exit 1; }
 
 "${clean_env[@]}" "$node" - "$tooling" <<'NODE'
 const crypto = require('node:crypto');
