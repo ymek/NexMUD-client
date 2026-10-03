@@ -672,6 +672,10 @@ public static class Program
         await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
         await RunAsync("script package runtime state remains separate from package json", ScriptPackageRuntimeStateIsSeparate);
         await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
+        await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
+        await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
+        await RunAsync("Studio language host rehydrates unsaved documents after restart", Phase6StudioLanguageHostTests.RehydratesUnsavedDocumentsAfterTransportRestart);
+        await RunAsync("Studio language host maps script source language ids", Phase6StudioLanguageHostTests.LanguageIdsFollowScriptSourceKinds);
 
         await RunAsync("script package install uses bundled pnpm with lifecycle scripts disabled", ScriptPackageInstallUsesControlledPnpm);
         await RunAsync("script package restore requires and freezes the workspace lockfile", ScriptPackageRestoreUsesFrozenLockfile);
