@@ -1908,8 +1908,8 @@ internal sealed class AutomationStudioWindow : Window
         TextBox editor = ComparisonTextBox(editorContent);
         TextBox disk = ComparisonTextBox(conflict.DiskContent ?? "(file deleted on disk)");
         Grid columns = new() { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 8 };
-        columns.Children.Add(Labeled("Editor version", editor));
-        Control diskColumn = Labeled(
+        columns.Children.Add(ComparisonColumn("Editor version", editor));
+        Control diskColumn = ComparisonColumn(
             conflict.Kind == StudioExternalFileChangeKind.Renamed && conflict.NewPath is not null
                 ? $"Disk version · {conflict.NewPath}"
                 : "Disk version",
@@ -1928,16 +1928,28 @@ internal sealed class AutomationStudioWindow : Window
         await dialog.ShowDialog(this).ConfigureAwait(true);
     }
 
-    private static TextBox ComparisonTextBox(string content) => new()
+    private static Control ComparisonColumn(string label, Control content)
     {
-        Text = content,
-        IsReadOnly = true,
-        AcceptsReturn = true,
-        TextWrapping = TextWrapping.NoWrap,
-        FontFamily = UiTheme.Mono,
-        HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-        VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
-    };
+        StackPanel column = new() { Spacing = 4 };
+        column.Children.Add(new TextBlock { Text = label, Foreground = UiTheme.Muted, FontSize = 12 });
+        column.Children.Add(content);
+        return column;
+    }
+
+    private static TextBox ComparisonTextBox(string content)
+    {
+        TextBox box = new()
+        {
+            Text = content,
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = UiTheme.Mono
+        };
+        ScrollViewer.SetHorizontalScrollBarVisibility(box, Avalonia.Controls.Primitives.ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(box, Avalonia.Controls.Primitives.ScrollBarVisibility.Auto);
+        return box;
+    }
 
     private async Task ReloadExternalConflictAsync()
     {
@@ -1950,17 +1962,17 @@ internal sealed class AutomationStudioWindow : Window
             string oldPath = active.Path!;
             string newPath = conflict.NewPath;
             string newUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, active.PackageId!, newPath);
-            _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection);
+            _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? movedSelection);
             await _monaco.CloseDocumentAsync(active.Key, _cts.Token).ConfigureAwait(true);
             _textModels.Remove(active.Key);
             _ignoredMonacoChanges.Remove(active.Key);
             _documents.Close(active.Key);
             await RewriteExternalRenameReferencesAsync(active.PackageId!, oldPath, newPath).ConfigureAwait(true);
             await OpenSourceAsync(active.PackageId!, newPath).ConfigureAwait(true);
-            if (selection is not null)
+            if (movedSelection is not null)
             {
-                _scriptSelections[newUri] = selection with { Uri = newUri };
-                await _monaco.RevealLocationAsync(newUri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+                _scriptSelections[newUri] = movedSelection with { Uri = newUri };
+                await _monaco.RevealLocationAsync(newUri, movedSelection.EndLine, movedSelection.EndColumn, _cts.Token).ConfigureAwait(true);
             }
             AddConsole($"Reloaded external move: {active.PackageId}/{oldPath} → {newPath}");
             return;
