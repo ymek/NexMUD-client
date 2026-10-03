@@ -273,6 +273,7 @@ public static class Program
         await RunAsync("typesafe choice response maps to trace", TypesafeChoiceMapsToTrace);
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
         await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
+        await RunAsync("studio automation CRUD covers every structured kind", StudioAutomationCrudCoversEveryKind);
         await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
         await RunAsync("studio document set tracks dirty state", () =>
         {
@@ -8568,6 +8569,34 @@ Level  4: dual wield         n/a      dodge              n/a
 Level 27: loot               n/a
 Level 30: circle stab        n/a
 """;
+
+    private static Task StudioAutomationCrudCoversEveryKind()
+    {
+        NexMud.Gui.AutomationStudio.AutomationCollections source =
+            NexMud.Gui.AutomationStudio.AutomationCollections.From(ClientSettings.Default);
+
+        foreach (NexMud.Gui.AutomationStudio.StudioDocumentKind kind in
+                 NexMud.Gui.AutomationStudio.StudioDocumentKinds.AutomationKinds)
+        {
+            (var created, int createdIndex) = source.AddNew(kind);
+            Assert.Equal(0, createdIndex);
+            Assert.Equal(1, created.Count(kind));
+            Assert.Equal(1, created.Entries(kind).Count);
+
+            (var duplicated, int duplicateIndex) = created.Duplicate(kind, createdIndex);
+            Assert.Equal(1, duplicateIndex);
+            Assert.Equal(2, duplicated.Count(kind));
+            Assert.False(created.Entries(kind)[0].Name == duplicated.Entries(kind)[1].Name);
+
+            var deleted = duplicated.Remove(kind, createdIndex);
+            Assert.Equal(1, deleted.Count(kind));
+            Assert.Equal(2, duplicated.Count(kind));
+        }
+
+        Assert.True(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "TRIGGER"));
+        Assert.False(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "timer"));
+        return Task.CompletedTask;
+    }
 
     private static Task StudioCollectionsAreImmutableAndUnique()
     {
