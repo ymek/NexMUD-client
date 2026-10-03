@@ -5,14 +5,30 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="${1:-$repo_root/artifacts/macos/NexMUD.app}"
 tooling="$app/Contents/Resources/AutomationStudio/tooling"
 node="$tooling/node/bin/node"
-tsc="$tooling/packages/node_modules/typescript/lib/tsc.js"
-pnpm="$tooling/packages/node_modules/pnpm/bin/pnpm.cjs"
 monaco="$app/Contents/MacOS/Assets/Monaco"
 
 [[ -x "$node" ]] || { echo "Bundled Node.js is missing or not executable: $node" >&2; exit 1; }
 [[ -f "$tooling/manifest.json" ]] || { echo "Toolchain manifest is missing." >&2; exit 1; }
-[[ -f "$tsc" ]] || { echo "Bundled TypeScript compiler is missing." >&2; exit 1; }
-[[ -f "$pnpm" ]] || { echo "Bundled pnpm is missing." >&2; exit 1; }
+
+component_path() {
+  "$node" - "$tooling" "$1" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(process.argv[2]);
+const name = process.argv[3];
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+const component = (manifest.components ?? []).find(entry => entry.name === name);
+if (!component) throw new Error(`Missing toolchain component in manifest: ${name}`);
+const fullPath = path.resolve(root, ...String(component.relativePath).split('/'));
+if (!fullPath.startsWith(`${root}${path.sep}`)) throw new Error(`Escaped component path: ${component.relativePath}`);
+process.stdout.write(fullPath);
+NODE
+}
+
+tsc="$(component_path typescript)"
+pnpm="$(component_path pnpm)"
+[[ -f "$tsc" ]] || { echo "Bundled TypeScript compiler is missing: $tsc" >&2; exit 1; }
+[[ -f "$pnpm" ]] || { echo "Bundled pnpm is missing: $pnpm" >&2; exit 1; }
 [[ -f "$monaco/index.html" ]] || { echo "Bundled Monaco index.html is missing." >&2; exit 1; }
 [[ -f "$monaco/vs/loader.js" ]] || { echo "Bundled Monaco loader.js is missing." >&2; exit 1; }
 

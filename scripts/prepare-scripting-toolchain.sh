@@ -49,7 +49,7 @@ case "$platform" in
   *) echo "prepare-scripting-toolchain.sh currently supports darwin and linux targets." >&2; exit 2 ;;
 esac
 
-fingerprint="node=$NODE_VERSION;pnpm=$PNPM_VERSION;typescript=$TYPESCRIPT_VERSION;typescript-language-server=$TYPESCRIPT_LANGUAGE_SERVER_VERSION;esbuild=$ESBUILD_VERSION;vitest=$VITEST_VERSION;platform=$platform;arch=$arch"
+fingerprint="layout=2;node=$NODE_VERSION;pnpm=$PNPM_VERSION;typescript=$TYPESCRIPT_VERSION;typescript-language-server=$TYPESCRIPT_LANGUAGE_SERVER_VERSION;esbuild=$ESBUILD_VERSION;vitest=$VITEST_VERSION;platform=$platform;arch=$arch"
 if [[ -f "$output/.fingerprint" ]] && [[ "$(cat "$output/.fingerprint")" == "$fingerprint" ]] && \
    [[ -x "$output/node/bin/node" ]] && [[ -f "$output/manifest.json" ]] && \
    [[ -f "$output/packages/node_modules/typescript/lib/tsc.js" ]]; then
@@ -120,14 +120,41 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const root = process.env.TOOLCHAIN_ROOT;
+const root = path.resolve(process.env.TOOLCHAIN_ROOT);
+
+function packageBin(packageName, commandName) {
+  const packageRoot = path.join(root, 'packages', 'node_modules', ...packageName.split('/'));
+  const packageJsonPath = path.join(packageRoot, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) {
+    throw new Error(`Missing prepared package metadata: ${packageName}/package.json`);
+  }
+
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  const bin = packageJson.bin;
+  const target = typeof bin === 'string'
+    ? bin
+    : bin?.[commandName] ?? bin?.[packageName.split('/').at(-1)];
+  if (typeof target !== 'string' || target.length === 0) {
+    throw new Error(`Package ${packageName} does not expose the expected '${commandName}' binary.`);
+  }
+
+  const fullPath = path.resolve(packageRoot, target);
+  if (fullPath !== packageRoot && !fullPath.startsWith(`${packageRoot}${path.sep}`)) {
+    throw new Error(`Package binary escaped its package root: ${packageName} -> ${target}`);
+  }
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`Missing prepared package binary: ${packageName} -> ${target}`);
+  }
+  return path.relative(root, fullPath).split(path.sep).join('/');
+}
+
 const entries = [
   ['node', process.env.NODE_VERSION, 'node/bin/node', true],
-  ['pnpm', process.env.PNPM_VERSION, 'packages/node_modules/pnpm/bin/pnpm.cjs', false],
-  ['typescript', process.env.TYPESCRIPT_VERSION, 'packages/node_modules/typescript/lib/tsc.js', false],
-  ['typescript-language-server', process.env.TYPESCRIPT_LANGUAGE_SERVER_VERSION, 'packages/node_modules/typescript-language-server/lib/cli.mjs', false],
-  ['esbuild', process.env.ESBUILD_VERSION, `packages/node_modules/@esbuild/${process.env.TOOLCHAIN_PLATFORM}-${process.env.TOOLCHAIN_ARCH}/bin/esbuild`, true],
-  ['vitest', process.env.VITEST_VERSION, 'packages/node_modules/vitest/vitest.mjs', false]
+  ['pnpm', process.env.PNPM_VERSION, packageBin('pnpm', 'pnpm'), false],
+  ['typescript', process.env.TYPESCRIPT_VERSION, packageBin('typescript', 'tsc'), false],
+  ['typescript-language-server', process.env.TYPESCRIPT_LANGUAGE_SERVER_VERSION, packageBin('typescript-language-server', 'typescript-language-server'), false],
+  ['esbuild', process.env.ESBUILD_VERSION, packageBin('esbuild', 'esbuild'), true],
+  ['vitest', process.env.VITEST_VERSION, packageBin('vitest', 'vitest'), false]
 ];
 const components = entries.map(([name, version, relativePath, executable]) => {
   const fullPath = path.join(root, ...relativePath.split('/'));
