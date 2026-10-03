@@ -39,6 +39,9 @@ internal sealed class AutomationStudioWindow : Window
     private AutomationOrganizationCatalog _organization = AutomationOrganizationCatalog.Empty;
     private readonly AutomationReferenceIndex _referencesIndex = new();
     private readonly StudioDocumentSet _documents = new();
+    private readonly StudioTextModelRegistry _textModels = new();
+    private readonly HashSet<string> _ignoredMonacoChanges = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MonacoSelectionChanged> _scriptSelections = new(StringComparer.Ordinal);
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
     private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
     private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
@@ -76,7 +79,11 @@ internal sealed class AutomationStudioWindow : Window
     private TabControl _bottom = new();
     private Button _bottomToggle = new();
     private readonly MonacoEditorHost _monaco = new();
+    private ScriptWorkspaceWatcher? _workspaceWatcher;
     private readonly TextBlock _breadcrumb = new() { Foreground = UiTheme.Muted, FontSize = 12, Margin = new Thickness(14, 5), TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Border _externalConflictBar = new() { IsVisible = false };
+    private readonly TextBlock _externalConflictText = new() { Foreground = UiTheme.Text, TextWrapping = TextWrapping.Wrap };
+    private Button _externalConflictReload = new();
     private readonly TextBlock _statusLeft = new() { Foreground = UiTheme.Muted, FontSize = 12 };
     private readonly TextBlock _statusCursor = new() { Foreground = UiTheme.Muted, FontSize = 12 };
     private Border _breadcrumbBar = new();
@@ -158,7 +165,7 @@ internal sealed class AutomationStudioWindow : Window
         _body.Children.Add(_explorerFrame);
 
         _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
-        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*") };
         documentArea.Children.Add(new Border
         {
             MinHeight = 36, Background = UiTheme.Surface, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1),
@@ -167,11 +174,14 @@ internal sealed class AutomationStudioWindow : Window
         _breadcrumbBar = new Border { Child = _breadcrumb, Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1) };
         Grid.SetRow(_breadcrumbBar, 1);
         documentArea.Children.Add(_breadcrumbBar);
+        Control conflictBar = BuildExternalConflictBar();
+        Grid.SetRow(conflictBar, 2);
+        documentArea.Children.Add(conflictBar);
         // The Monaco WebView must stay attached to the visual tree for the window's lifetime;
         // detaching a native WebView destroys its page and every open model.
         _monaco.MaxHeight = 0;
         Grid surface = new() { Children = { _center, _monaco } };
-        Grid.SetRow(surface, 2);
+        Grid.SetRow(surface, 3);
         documentArea.Children.Add(surface);
         Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = documentArea };
         Grid.SetColumn(centerFrame, 3); _body.Children.Add(centerFrame);
@@ -384,6 +394,30 @@ internal sealed class AutomationStudioWindow : Window
         return grid;
     }
 
+    private Control BuildExternalConflictBar()
+    {
+        Button compare = Button("Compare", CompareExternalConflictAsync);
+        _externalConflictReload = Button("Reload from Disk", ReloadExternalConflictAsync);
+        Button keep = Button("Keep Editor Version", KeepExternalEditorVersionAsync);
+        StackPanel actions = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { compare, _externalConflictReload, keep }
+        };
+        Grid content = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        content.Children.Add(_externalConflictText);
+        Grid.SetColumn(actions, 1);
+        content.Children.Add(actions);
+        _externalConflictBar.Background = UiTheme.Raised;
+        _externalConflictBar.BorderBrush = UiTheme.Divider;
+        _externalConflictBar.BorderThickness = new Thickness(0, 0, 0, 1);
+        _externalConflictBar.Padding = new Thickness(12, 7);
+        _externalConflictBar.Child = content;
+        return _externalConflictBar;
+    }
+
     private void TogglePane(Border frame, GridSplitter splitter, int column, double width)
     {
         bool show = !frame.IsVisible;
@@ -486,6 +520,7 @@ internal sealed class AutomationStudioWindow : Window
     private async void WindowOpened(object? sender, EventArgs e)
     {
         await RefreshProfilesAsync().ConfigureAwait(true);
+        RestartWorkspaceWatcher();
         await RefreshNavigatorAsync().ConfigureAwait(true);
         RenderActive();
         _ = Task.Run(() => ConsumeEventsAsync(_cts.Token), CancellationToken.None);
@@ -522,6 +557,7 @@ internal sealed class AutomationStudioWindow : Window
         await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
         _session.SwitchProfile(selectedProfile.Id);
         _activePackage = null;
+        RestartWorkspaceWatcher();
         await RefreshNavigatorAsync().ConfigureAwait(true);
     }
 
@@ -541,12 +577,236 @@ internal sealed class AutomationStudioWindow : Window
 
         CloseAllEditors();
         _documents.CloseAll();
+        _textModels.Clear();
+        _ignoredMonacoChanges.Clear();
+        _scriptSelections.Clear();
+    }
+
+    private void RestartWorkspaceWatcher()
+    {
+        if (_workspaceWatcher is not null)
+        {
+            _workspaceWatcher.Changed -= WorkspaceExternalChanged;
+            _workspaceWatcher.Dispose();
+            _workspaceWatcher = null;
+        }
+        try
+        {
+            _workspaceWatcher = _workspace.WatchProfile(SelectedProfileId);
+            _workspaceWatcher.Changed += WorkspaceExternalChanged;
+        }
+        catch (Exception exception)
+        {
+            AddProblem("Scripts", $"Unable to watch the script workspace: {exception.Message}");
+        }
     }
 
     private void WorkspaceChanged(object? sender, EventArgs e)
     {
         if (_cts.IsCancellationRequested) return;
         Dispatcher.UIThread.Post(async () => await RefreshNavigatorAsync().ConfigureAwait(true));
+    }
+
+    private void WorkspaceExternalChanged(object? sender, ScriptWorkspaceExternalChangesEventArgs e)
+    {
+        if (_cts.IsCancellationRequested) return;
+        Dispatcher.UIThread.Post(async () =>
+        {
+            if (_cts.IsCancellationRequested ||
+                !e.ProfileId.Equals(SelectedProfileId, StringComparison.Ordinal)) return;
+            StudioSessionSnapshot snapshot = _session.Current;
+            if (!_session.IsCurrent(snapshot)) return;
+            try
+            {
+                await HandleExternalWorkspaceChangesAsync(e.Changes).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                AddProblem("Scripts", $"External file change handling failed: {exception.Message}");
+            }
+        });
+    }
+
+    private async Task HandleExternalWorkspaceChangesAsync(IReadOnlyList<ScriptWorkspaceExternalChange> changes)
+    {
+        foreach (ScriptWorkspaceExternalChange change in changes)
+        {
+            if (!change.ProfileId.Equals(SelectedProfileId, StringComparison.Ordinal)) continue;
+            switch (change.Kind)
+            {
+                case ScriptWorkspaceExternalChangeKind.Created:
+                case ScriptWorkspaceExternalChangeKind.Changed:
+                    await HandleExternalFileChangedAsync(change).ConfigureAwait(true);
+                    break;
+                case ScriptWorkspaceExternalChangeKind.Deleted:
+                    await HandleExternalPathDeletedAsync(change).ConfigureAwait(true);
+                    break;
+                case ScriptWorkspaceExternalChangeKind.Renamed:
+                    await HandleExternalPathRenamedAsync(change).ConfigureAwait(true);
+                    break;
+            }
+        }
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        RenderExternalConflict();
+    }
+
+    private async Task HandleExternalFileChangedAsync(ScriptWorkspaceExternalChange change)
+    {
+        if (!ScriptWorkspaceService.IsSupportedSourcePath(change.RelativePath)) return;
+        string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, change.PackageId, change.RelativePath);
+        if (_documents.Find(uri) is not { IsScript: true } document) return;
+        (bool exists, string? diskContent) = await TryReadSourceAsync(change.PackageId, change.RelativePath).ConfigureAwait(true);
+        if (!exists || diskContent is null)
+        {
+            await HandleExternalPathDeletedAsync(change with { Kind = ScriptWorkspaceExternalChangeKind.Deleted }).ConfigureAwait(true);
+            return;
+        }
+        if (_textModels.MatchesBaseline(uri, diskContent)) return;
+
+        if (document.IsDirty)
+        {
+            if (_textModels.RecordConflict(uri, StudioExternalFileChangeKind.Modified, diskContent))
+                AddProblem("Scripts", $"{change.PackageId}/{change.RelativePath} changed on disk; unsaved editor changes were preserved.");
+            return;
+        }
+
+        _scriptSelections.TryGetValue(uri, out MonacoSelectionChanged? selection);
+        _ignoredMonacoChanges.Add(uri);
+        try
+        {
+            await _monaco.SetDocumentContentAsync(uri, diskContent, _cts.Token).ConfigureAwait(true);
+            if (selection is not null)
+                await _monaco.RevealLocationAsync(uri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+        }
+        catch
+        {
+            _ignoredMonacoChanges.Remove(uri);
+            throw;
+        }
+        _textModels.MarkSaved(uri, diskContent);
+        _documents.SetDirty(uri, false);
+        AddConsole($"Reloaded external change: {change.PackageId}/{change.RelativePath}");
+    }
+
+    private async Task HandleExternalPathDeletedAsync(ScriptWorkspaceExternalChange change)
+    {
+        StudioDocument[] affected = OpenScriptDocuments(change.PackageId, change.RelativePath).ToArray();
+        foreach (StudioDocument document in affected)
+        {
+            if (document.IsDirty)
+            {
+                if (_textModels.RecordConflict(document.Key, StudioExternalFileChangeKind.Deleted, null))
+                    AddProblem("Scripts", $"{document.PackageId}/{document.Path} was deleted on disk; the unsaved editor buffer was preserved.");
+                continue;
+            }
+
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+            _documents.Close(document.Key);
+            AddConsole($"Closed externally deleted file: {document.PackageId}/{document.Path}");
+        }
+    }
+
+    private async Task HandleExternalPathRenamedAsync(ScriptWorkspaceExternalChange change)
+    {
+        if (string.IsNullOrWhiteSpace(change.PreviousRelativePath)) return;
+        string sourcePath = change.PreviousRelativePath;
+        string destinationPath = change.RelativePath;
+        StudioDocument[] affected = OpenScriptDocuments(change.PackageId, sourcePath).ToArray();
+        bool hasDirty = affected.Any(document => document.IsDirty);
+        string? previousActiveKey = _documents.Active?.Key;
+        Dictionary<string, string> movedUris = new(StringComparer.Ordinal);
+
+        foreach (StudioDocument document in affected)
+        {
+            string newPath = ScriptExplorerTree.Rebase(document.Path!, sourcePath, destinationPath);
+            (bool exists, string? diskContent) = await TryReadSourceAsync(change.PackageId, newPath).ConfigureAwait(true);
+            if (document.IsDirty)
+            {
+                if (_textModels.RecordConflict(
+                        document.Key,
+                        StudioExternalFileChangeKind.Renamed,
+                        exists ? diskContent : null,
+                        newPath))
+                    AddProblem("Scripts", $"{document.PackageId}/{document.Path} moved on disk to {newPath}; the unsaved editor buffer was preserved.");
+                continue;
+            }
+
+            if (!exists) continue;
+            string newUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, change.PackageId, newPath);
+            movedUris[document.Key] = newUri;
+            _scriptSelections.TryGetValue(document.Key, out MonacoSelectionChanged? selection);
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+            _documents.Close(document.Key);
+            await OpenSourceAsync(change.PackageId, newPath).ConfigureAwait(true);
+            if (selection is not null)
+            {
+                _scriptSelections[newUri] = selection with { Uri = newUri };
+                await _monaco.RevealLocationAsync(newUri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+            }
+            AddConsole($"Followed external move: {change.PackageId}/{document.Path} → {newPath}");
+        }
+
+        if (!hasDirty)
+            await RewriteExternalRenameReferencesAsync(change.PackageId, sourcePath, destinationPath).ConfigureAwait(true);
+
+        if (previousActiveKey is not null)
+        {
+            if (movedUris.TryGetValue(previousActiveKey, out string? movedActive)) _documents.Activate(movedActive);
+            else if (_documents.Find(previousActiveKey) is not null) _documents.Activate(previousActiveKey);
+        }
+    }
+
+    private IEnumerable<StudioDocument> OpenScriptDocuments(string packageId, string path)
+    {
+        foreach (StudioDocument document in _documents.Documents)
+        {
+            if (!document.IsScript || document.PackageId is null || document.Path is null) continue;
+            if (!document.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrWhiteSpace(path) || ScriptExplorerTree.IsSameOrDescendant(document.Path, path))
+                yield return document;
+        }
+    }
+
+    private async Task RewriteExternalRenameReferencesAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        string[] referencedPaths = _referencesIndex.Build(_runtime.Settings)
+            .Where(reference => reference.FunctionRef.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+                                ScriptExplorerTree.IsSameOrDescendant(reference.FunctionRef.ModulePath, sourcePath))
+            .Select(reference => reference.FunctionRef.ModulePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (referencedPaths.Length == 0) return;
+
+        ClientSettings rewritten = _runtime.Settings;
+        foreach (string oldPath in referencedPaths)
+        {
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            rewritten = _referencesIndex.RewriteModulePath(rewritten, packageId, oldPath, newPath);
+        }
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+    }
+
+    private async Task<(bool Exists, string? Content)> TryReadSourceAsync(string packageId, string relativePath)
+    {
+        try
+        {
+            return (true, await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true));
+        }
+        catch (FileNotFoundException)
+        {
+            return (false, null);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return (false, null);
+        }
     }
 
     // ───────────────────────────── Explorer ─────────────────────────────
@@ -898,6 +1158,8 @@ internal sealed class AutomationStudioWindow : Window
         if (open is not null)
         {
             await _monaco.CloseDocumentAsync(sourceUri, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(sourceUri);
+            _ignoredMonacoChanges.Remove(sourceUri);
             _documents.Close(sourceUri);
         }
         await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
@@ -968,6 +1230,8 @@ internal sealed class AutomationStudioWindow : Window
             if (open is not null)
             {
                 await _monaco.CloseDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
+                _textModels.Remove(uri);
+                _ignoredMonacoChanges.Remove(uri);
                 _documents.Close(uri);
             }
             await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
@@ -1054,6 +1318,8 @@ internal sealed class AutomationStudioWindow : Window
             string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
             movedUris[document.Key] = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, newPath);
             await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
             _documents.Close(document.Key);
         }
 
@@ -1114,6 +1380,8 @@ internal sealed class AutomationStudioWindow : Window
             foreach (StudioDocument document in open)
             {
                 await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+                _textModels.Remove(document.Key);
+                _ignoredMonacoChanges.Remove(document.Key);
                 _documents.Close(document.Key);
             }
             await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
@@ -1381,6 +1649,12 @@ internal sealed class AutomationStudioWindow : Window
         {
             string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
             await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token).ConfigureAwait(true);
+            _textModels.Track(uri, SelectedProfileId, packageId, relativePath, content);
+        }
+        else if (_textModels.Find(uri) is null)
+        {
+            string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
+            _textModels.Track(uri, SelectedProfileId, packageId, relativePath, content);
         }
         _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
         {
@@ -1394,14 +1668,21 @@ internal sealed class AutomationStudioWindow : Window
 
     private void WireMonaco()
     {
-        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() => _documents.SetDirty(change.Uri, true));
+        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() =>
+        {
+            if (_ignoredMonacoChanges.Remove(change.Uri)) return;
+            _documents.SetDirty(change.Uri, true);
+        });
         _monaco.SaveRequested += request => Dispatcher.UIThread.Post(async () =>
         {
             if (request.All) await SaveAllAsync().ConfigureAwait(true);
             else if (request.Uri is { Length: > 0 }) await SaveScriptAsync(request.Uri).ConfigureAwait(true);
         });
         _monaco.SelectionChanged += selection => Dispatcher.UIThread.Post(() =>
-            _statusCursor.Text = $"Ln {selection.EndLine}, Col {selection.EndColumn}");
+        {
+            _scriptSelections[selection.Uri] = selection;
+            _statusCursor.Text = $"Ln {selection.EndLine}, Col {selection.EndColumn}";
+        });
         _monaco.ActiveDocumentChanged += uri => Dispatcher.UIThread.Post(() =>
         {
             if (_documents.Find(uri) is not null && _documents.Active?.Key != uri) _documents.Activate(uri);
@@ -1413,9 +1694,33 @@ internal sealed class AutomationStudioWindow : Window
     private async Task SaveScriptAsync(string uri)
     {
         if (_documents.Find(uri) is not { IsScript: true } document) return;
+        StudioTextModelState? state = _textModels.Find(uri);
+        if (state?.Conflict is not null && !state.OverwriteApproved)
+        {
+            RenderExternalConflict();
+            AddProblem("Save", "Resolve the external file conflict before saving.");
+            return;
+        }
+        if (state is not null && !state.OverwriteApproved)
+        {
+            (bool exists, string? diskContent) = await TryReadSourceAsync(document.PackageId!, document.Path!).ConfigureAwait(true);
+            if (!_textModels.MatchesBaseline(uri, diskContent, exists))
+            {
+                _textModels.RecordConflict(
+                    uri,
+                    exists ? StudioExternalFileChangeKind.Modified : StudioExternalFileChangeKind.Deleted,
+                    diskContent);
+                RenderExternalConflict();
+                AddProblem("Save", "The file changed on disk after it was opened. Review the conflict before saving.");
+                return;
+            }
+        }
+
         string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
         await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build: true, _cts.Token).ConfigureAwait(true);
+        _textModels.MarkSaved(uri, content);
         _documents.SetDirty(uri, false);
+        RenderExternalConflict();
         ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(document.ProfileId!, document.PackageId!, _cts.Token).ConfigureAwait(true);
         if (package is not null)
         {
@@ -1574,6 +1879,124 @@ internal sealed class AutomationStudioWindow : Window
 
     // ───────────────────────────── Document area rendering ─────────────────────────────
 
+    private void RenderExternalConflict()
+    {
+        StudioDocument? active = _documents.Active;
+        StudioExternalFileConflict? conflict = active is { IsScript: true }
+            ? _textModels.Find(active.Key)?.Conflict
+            : null;
+        _externalConflictBar.IsVisible = conflict is not null;
+        if (conflict is null) return;
+
+        _externalConflictText.Text = conflict.Kind switch
+        {
+            StudioExternalFileChangeKind.Modified => "File changed on disk. Unsaved editor changes were preserved.",
+            StudioExternalFileChangeKind.Deleted => "File was deleted on disk. Unsaved editor changes were preserved. Keep Editor Version will recreate this path on the next save.",
+            StudioExternalFileChangeKind.Renamed => $"File moved on disk to {conflict.NewPath}. Reload follows the disk move; Keep Editor Version preserves the old path for the next save.",
+            _ => "File changed on disk."
+        };
+        _externalConflictReload.IsVisible = conflict.Kind != StudioExternalFileChangeKind.Deleted;
+    }
+
+    private async Task CompareExternalConflictAsync()
+    {
+        if (_documents.Active is not { IsScript: true } active) return;
+        StudioExternalFileConflict? conflict = _textModels.Find(active.Key)?.Conflict;
+        if (conflict is null) return;
+
+        string editorContent = await _monaco.RequestDocumentContentAsync(active.Key, _cts.Token).ConfigureAwait(true);
+        TextBox editor = ComparisonTextBox(editorContent);
+        TextBox disk = ComparisonTextBox(conflict.DiskContent ?? "(file deleted on disk)");
+        Grid columns = new() { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 8 };
+        columns.Children.Add(Labeled("Editor version", editor));
+        Control diskColumn = Labeled(
+            conflict.Kind == StudioExternalFileChangeKind.Renamed && conflict.NewPath is not null
+                ? $"Disk version · {conflict.NewPath}"
+                : "Disk version",
+            disk);
+        Grid.SetColumn(diskColumn, 1);
+        columns.Children.Add(diskColumn);
+
+        Window dialog = Dialog("External File Change", 1080, 680);
+        Button close = new() { Content = "Close", MinWidth = 90, HorizontalAlignment = HorizontalAlignment.Right };
+        close.Click += (_, _) => dialog.Close();
+        Grid layout = new() { RowDefinitions = new RowDefinitions("*,Auto"), Margin = new Thickness(12), RowSpacing = 8 };
+        layout.Children.Add(columns);
+        Grid.SetRow(close, 1);
+        layout.Children.Add(close);
+        dialog.Content = layout;
+        await dialog.ShowDialog(this).ConfigureAwait(true);
+    }
+
+    private static TextBox ComparisonTextBox(string content) => new()
+    {
+        Text = content,
+        IsReadOnly = true,
+        AcceptsReturn = true,
+        TextWrapping = TextWrapping.NoWrap,
+        FontFamily = UiTheme.Mono,
+        HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+        VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
+    };
+
+    private async Task ReloadExternalConflictAsync()
+    {
+        if (_documents.Active is not { IsScript: true } active) return;
+        StudioExternalFileConflict? conflict = _textModels.Find(active.Key)?.Conflict;
+        if (conflict is null || conflict.Kind == StudioExternalFileChangeKind.Deleted) return;
+
+        if (conflict.Kind == StudioExternalFileChangeKind.Renamed && conflict.NewPath is not null)
+        {
+            string oldPath = active.Path!;
+            string newPath = conflict.NewPath;
+            string newUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, active.PackageId!, newPath);
+            _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection);
+            await _monaco.CloseDocumentAsync(active.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(active.Key);
+            _ignoredMonacoChanges.Remove(active.Key);
+            _documents.Close(active.Key);
+            await RewriteExternalRenameReferencesAsync(active.PackageId!, oldPath, newPath).ConfigureAwait(true);
+            await OpenSourceAsync(active.PackageId!, newPath).ConfigureAwait(true);
+            if (selection is not null)
+            {
+                _scriptSelections[newUri] = selection with { Uri = newUri };
+                await _monaco.RevealLocationAsync(newUri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+            }
+            AddConsole($"Reloaded external move: {active.PackageId}/{oldPath} → {newPath}");
+            return;
+        }
+
+        string content = conflict.DiskContent ?? string.Empty;
+        _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection);
+        _ignoredMonacoChanges.Add(active.Key);
+        try
+        {
+            await _monaco.SetDocumentContentAsync(active.Key, content, _cts.Token).ConfigureAwait(true);
+            if (selection is not null)
+                await _monaco.RevealLocationAsync(active.Key, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+        }
+        catch
+        {
+            _ignoredMonacoChanges.Remove(active.Key);
+            throw;
+        }
+        _textModels.MarkSaved(active.Key, content);
+        _documents.SetDirty(active.Key, false);
+        RenderExternalConflict();
+        AddConsole($"Reloaded disk version: {active.PackageId}/{active.Path}");
+    }
+
+    private Task KeepExternalEditorVersionAsync()
+    {
+        if (_documents.Active is { IsScript: true } active)
+        {
+            _textModels.KeepEditorVersion(active.Key);
+            RenderExternalConflict();
+            AddConsole($"Keeping editor version for next save: {active.PackageId}/{active.Path}");
+        }
+        return Task.CompletedTask;
+    }
+
     private void DocumentsChanged()
     {
         RenderTabs();
@@ -1635,7 +2058,12 @@ internal sealed class AutomationStudioWindow : Window
                 if (document.IsDirty) return;
             }
         }
-        if (document.IsScript) await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+        if (document.IsScript)
+        {
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+        }
         else _editors.Remove(document.Key);
         _documents.Close(document.Key);
     }
@@ -1660,6 +2088,7 @@ internal sealed class AutomationStudioWindow : Window
     private void RenderActive()
     {
         StudioDocument? active = _documents.Active;
+        RenderExternalConflict();
         _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
         _breadcrumbBar.IsVisible = active is not null;
         _statusLeft.Text = active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
@@ -1875,6 +2304,12 @@ internal sealed class AutomationStudioWindow : Window
     private void WindowClosed(object? sender, EventArgs e)
     {
         _workspace.WorkspaceChanged -= WorkspaceChanged;
+        if (_workspaceWatcher is not null)
+        {
+            _workspaceWatcher.Changed -= WorkspaceExternalChanged;
+            _workspaceWatcher.Dispose();
+            _workspaceWatcher = null;
+        }
         _cts.Cancel();
         if (_body.ColumnDefinitions.Count >= 4)
             _preferences.ExplorerWidth = _body.ColumnDefinitions[1].ActualWidth;
