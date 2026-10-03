@@ -34,6 +34,7 @@ using NexMud.Scripting.Time;
 using NexMud.Scripting.Jint.Runtime;
 using NexMud.Scripting.TypeScript.Declarations;
 using NexMud.Scripting.TypeScript.Compiler;
+using NexMud.Scripting.Tooling;
 using NexMud.Core.Actions;
 using NexMud.Core.Events;
 using NexMud.Core.Jev;
@@ -50,8 +51,11 @@ public static class Program
     private static int _passed;
     private static int _failed;
 
-    public static async Task<int> Main()
+    public static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0].StartsWith("--tool-process-", StringComparison.Ordinal))
+            return await RunToolProcessProbeAsync(args).ConfigureAwait(false);
+
         await RunAsync("connection options reject bad port", ConnectionOptionsRejectBadPort);
         await RunAsync("default telnet identity is neutral", DefaultTelnetIdentityIsNeutral);
         await RunAsync("copilot preset configures matrix", CopilotPresetConfiguresMatrix);
@@ -560,6 +564,104 @@ public static class Program
             Assert.True(registry.MatchesBaseline(uri, "export const value = 3;\n"));
             Assert.True(registry.Find(uri)?.Conflict is null);
             return Task.CompletedTask;
+        });
+
+        await RunAsync("bundled toolchain locator rejects path escape and missing components", () =>
+        {
+            string root = CreateToolchainFixture(
+                new ToolchainComponentManifest("fixture", "1.0.0", "components/fixture.js"),
+                "fixture");
+            try
+            {
+                ToolchainLocator locator = new(root);
+                ToolchainComponentLocation component = locator.ResolveRequired("fixture");
+                Assert.Equal(Path.Combine(root, "components", "fixture.js"), component.FullPath);
+                Assert.Throws<ToolchainUnavailableException>(() => locator.ResolveRequired("missing"));
+
+                WriteToolchainManifest(root,
+                    new ToolchainComponentManifest("escape", "1.0.0", "../escape.js"));
+                ToolchainLocator escaping = new(root);
+                Assert.Throws<ToolchainUnavailableException>(() => escaping.ResolveRequired("escape"));
+                return Task.CompletedTask;
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        });
+
+        await RunAsync("bundled toolchain health detects integrity mismatch", async () =>
+        {
+            string root = CreateToolchainFixture(
+                new ToolchainComponentManifest(
+                    "fixture",
+                    "1.0.0",
+                    "components/fixture.js",
+                    new string('0', 64)),
+                "fixture");
+            try
+            {
+                ToolchainHealthReport report = await new ToolchainHealthService(new ToolchainLocator(root)).CheckAsync();
+                Assert.False(report.Healthy);
+                ToolchainComponentHealth component = Assert.Single(report.Components);
+                Assert.False(component.Healthy);
+                Assert.True(component.Message?.Contains("SHA-256 mismatch", StringComparison.Ordinal) == true);
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        });
+
+        await RunAsync("tool process runner sanitizes environment", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            string pathEntry = Path.Combine(Path.GetTempPath(), "nexmud-tool-process-path");
+            const string parentOnly = "NEXMUD_TOOL_PROCESS_PARENT_ONLY";
+            const string explicitName = "NEXMUD_TOOL_PROCESS_EXPLICIT";
+            Environment.SetEnvironmentVariable(parentOnly, "secret");
+            try
+            {
+                ToolProcessRunner runner = new();
+                ToolProcessResult result = await runner.RunAsync(new ToolProcessRequest(
+                    executable,
+                    [.. prefix, "--tool-process-probe"],
+                    AppContext.BaseDirectory,
+                    [pathEntry],
+                    new Dictionary<string, string?> { [explicitName] = "visible" }));
+                Assert.Equal(0, result.ExitCode);
+                using JsonDocument payload = JsonDocument.Parse(result.StandardOutput);
+                Assert.Equal(Path.GetFullPath(pathEntry), payload.RootElement.GetProperty("path").GetString());
+                Assert.True(payload.RootElement.GetProperty("parentOnly").ValueKind == JsonValueKind.Null);
+                Assert.Equal("visible", payload.RootElement.GetProperty("explicitValue").GetString());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(parentOnly, null);
+            }
+        });
+
+        await RunAsync("tool process runner cancellation terminates child process", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            ToolProcessRunner runner = new();
+            using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(200));
+            Stopwatch elapsed = Stopwatch.StartNew();
+            bool cancelled = false;
+            try
+            {
+                _ = await runner.RunAsync(new ToolProcessRequest(
+                    executable,
+                    [.. prefix, "--tool-process-wait"],
+                    AppContext.BaseDirectory), cancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                cancelled = true;
+            }
+
+            Assert.True(cancelled);
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5), "Cancelled tooling process did not terminate promptly.");
         });
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
@@ -7956,6 +8058,64 @@ public static class Program
             };
             return Task.FromResult(response);
         }
+    }
+
+    private static Task<int> RunToolProcessProbeAsync(string[] args)
+    {
+        if (args[0] == "--tool-process-probe")
+        {
+            Console.Write(JsonSerializer.Serialize(new
+            {
+                path = Environment.GetEnvironmentVariable("PATH"),
+                parentOnly = Environment.GetEnvironmentVariable("NEXMUD_TOOL_PROCESS_PARENT_ONLY"),
+                explicitValue = Environment.GetEnvironmentVariable("NEXMUD_TOOL_PROCESS_EXPLICIT")
+            }));
+            return Task.FromResult(0);
+        }
+
+        if (args[0] == "--tool-process-wait")
+            return WaitForToolProcessCancellationProbeAsync();
+
+        return Task.FromResult(2);
+    }
+
+    private static async Task<int> WaitForToolProcessCancellationProbeAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        return 0;
+    }
+
+    private static (string Executable, IReadOnlyList<string> PrefixArguments) ToolProcessTestCommand()
+    {
+        string executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Unable to resolve the current test process executable.");
+        string processName = Path.GetFileNameWithoutExtension(executable);
+        return processName.Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+            ? (executable, [typeof(Program).Assembly.Location])
+            : (executable, []);
+    }
+
+    private static string CreateToolchainFixture(ToolchainComponentManifest component, string content)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-toolchain-{Guid.NewGuid():N}");
+        string path = Path.Combine(root, component.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        WriteToolchainManifest(root, component);
+        return root;
+    }
+
+    private static void WriteToolchainManifest(string root, params ToolchainComponentManifest[] components)
+    {
+        ToolchainManifest manifest = new(
+            1,
+            ToolchainPlatform.CurrentPlatform,
+            ToolchainPlatform.CurrentArchitecture,
+            "test",
+            components);
+        File.WriteAllText(
+            Path.Combine(root, "manifest.json"),
+            JsonSerializer.Serialize(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
     }
 
     private static class Assert
