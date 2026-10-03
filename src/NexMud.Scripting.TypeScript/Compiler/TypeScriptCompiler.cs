@@ -1,31 +1,45 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Runtime;
+using NexMud.Scripting.Tooling;
 using NexMud.Scripting.TypeScript.Cache;
 using NexMud.Scripting.TypeScript.Declarations;
 
 namespace NexMud.Scripting.TypeScript.Compiler;
 
 /// <summary>
-/// Concrete TypeScript compiler boundary. The client does not embed Node or a JavaScript runtime;
-/// authoring builds invoke an installed TypeScript compiler and return engine-neutral JavaScript.
+/// Concrete TypeScript compiler boundary. Production authoring resolves only the NexMUD-owned
+/// Node/TypeScript toolchain; an explicit executable remains available for tests and development.
 /// </summary>
 public sealed partial class TypeScriptCompiler : IScriptCompiler
 {
-    private readonly string _executable;
+    private readonly string? _explicitExecutable;
+    private readonly IToolchainLocator? _toolchainLocator;
+    private readonly IToolProcessRunner _processRunner;
     private readonly IScriptCompileCache _cache;
     private readonly ConcurrentDictionary<string, IReadOnlyList<ExportedScriptFunction>> _exportCache = new(StringComparer.Ordinal);
-    private string _compilerIdentity = "typescript-external";
+    private string _compilerIdentity = "typescript-unresolved";
     private readonly SemaphoreSlim _identityGate = new(1, 1);
 
-    public TypeScriptCompiler(string executable = "tsc", IScriptCompileCache? cache = null)
+    public TypeScriptCompiler(string? executable = null, IScriptCompileCache? cache = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(executable);
-        _executable = executable;
+        if (executable is not null) ArgumentException.ThrowIfNullOrWhiteSpace(executable);
+        _explicitExecutable = executable;
+        _toolchainLocator = executable is null ? new ToolchainLocator() : null;
+        _processRunner = new ToolProcessRunner();
+        _cache = cache ?? new InMemoryScriptCompileCache();
+    }
+
+    public TypeScriptCompiler(
+        IToolchainLocator toolchainLocator,
+        IToolProcessRunner processRunner,
+        IScriptCompileCache? cache = null)
+    {
+        _toolchainLocator = toolchainLocator ?? throw new ArgumentNullException(nameof(toolchainLocator));
+        _processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
         _cache = cache ?? new InMemoryScriptCompileCache();
     }
 
@@ -57,12 +71,9 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         {
             compilerIdentity = await ResolveCompilerIdentityAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
         {
-            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
-                ScriptDiagnosticSeverity.Error,
-                "NEXTS0005",
-                $"TypeScript compiler executable '{_executable}' was not found."));
+            return ToolchainUnavailableResult(exception);
         }
 
         string cacheKey = ScriptCompileCacheKey.Compute(request, compilerIdentity, ScriptApiVersion.Current);
@@ -100,7 +111,10 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 Encoding.UTF8,
                 cancellationToken).ConfigureAwait(false);
 
-            ProcessResult process = await RunAsync(_executable, $"--pretty false --project \"{configPath}\"", root, cancellationToken)
+            ToolProcessResult process = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", configPath],
+                    root,
+                    cancellationToken)
                 .ConfigureAwait(false);
             IReadOnlyList<ScriptCompilerDiagnostic> diagnostics = ParseDiagnostics(process.Output, root, sourceRoot);
             if (process.ExitCode != 0)
@@ -158,12 +172,9 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
             _exportCache[cacheKey] = exports;
             return new ScriptCompileResult(true, package, diagnostics, exports);
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
         {
-            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
-                ScriptDiagnosticSeverity.Error,
-                "NEXTS0005",
-                $"TypeScript compiler executable '{_executable}' was not found."));
+            return ToolchainUnavailableResult(exception);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -217,15 +228,22 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
 
     private async Task<string> ResolveCompilerIdentityAsync(CancellationToken cancellationToken)
     {
-        if (!string.Equals(_compilerIdentity, "typescript-external", StringComparison.Ordinal)) return _compilerIdentity;
+        if (!string.Equals(_compilerIdentity, "typescript-unresolved", StringComparison.Ordinal)) return _compilerIdentity;
         await _identityGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!string.Equals(_compilerIdentity, "typescript-external", StringComparison.Ordinal)) return _compilerIdentity;
-            ProcessResult result = await RunAsync(_executable, "--version", Environment.CurrentDirectory, cancellationToken)
+            if (!string.Equals(_compilerIdentity, "typescript-unresolved", StringComparison.Ordinal)) return _compilerIdentity;
+            ToolProcessResult result = await RunCompilerAsync(
+                    ["--version"],
+                    Environment.CurrentDirectory,
+                    cancellationToken)
                 .ConfigureAwait(false);
             string version = result.Output.Trim();
-            if (result.ExitCode == 0 && version.Length > 0) _compilerIdentity = $"typescript-{version}";
+            if (result.ExitCode == 0 && version.Length > 0)
+            {
+                string source = _explicitExecutable is null ? "bundled" : "external";
+                _compilerIdentity = $"typescript-{source}-{version}";
+            }
             return _compilerIdentity;
         }
         finally
@@ -234,25 +252,60 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         }
     }
 
-    private static async Task<ProcessResult> RunAsync(
-        string executable,
-        string arguments,
+    private Task<ToolProcessResult> RunCompilerAsync(
+        IReadOnlyList<string> arguments,
         string workingDirectory,
         CancellationToken cancellationToken)
     {
-        ProcessStartInfo startInfo = new(executable, arguments)
+        if (_explicitExecutable is not null)
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Unable to start TypeScript compiler.");
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        return new ProcessResult(process.ExitCode, (await stdout.ConfigureAwait(false)) + (await stderr.ConfigureAwait(false)));
+            return _processRunner.RunAsync(
+                new ToolProcessRequest(
+                    _explicitExecutable,
+                    arguments,
+                    workingDirectory,
+                    ResolveExternalPathEntries(_explicitExecutable)),
+                cancellationToken);
+        }
+
+        IToolchainLocator locator = _toolchainLocator
+            ?? throw new ToolchainUnavailableException("Bundled TypeScript toolchain locator is unavailable.");
+        ToolchainComponentLocation node = locator.ResolveRequired(ToolchainComponentNames.Node);
+        ToolchainComponentLocation typeScript = locator.ResolveRequired(ToolchainComponentNames.TypeScript);
+        List<string> invocationArguments = [typeScript.FullPath, .. arguments];
+        return _processRunner.RunAsync(
+            new ToolProcessRequest(
+                node.FullPath,
+                invocationArguments,
+                workingDirectory,
+                [Path.GetDirectoryName(node.FullPath)!]),
+            cancellationToken);
+    }
+
+    private ScriptCompileResult ToolchainUnavailableResult(Exception exception) =>
+        ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+            ScriptDiagnosticSeverity.Error,
+            "NEXTS0005",
+            _explicitExecutable is null
+                ? $"Bundled TypeScript toolchain is unavailable: {exception.Message}"
+                : $"TypeScript compiler executable '{_explicitExecutable}' was not found."));
+
+    private static bool IsToolchainUnavailable(Exception exception) =>
+        exception is ToolchainUnavailableException
+            or FileNotFoundException
+            or DirectoryNotFoundException
+            or System.ComponentModel.Win32Exception;
+
+    private static IReadOnlyList<string> ResolveExternalPathEntries(string executable)
+    {
+        if (Path.IsPathRooted(executable))
+        {
+            string? directory = Path.GetDirectoryName(executable);
+            return string.IsNullOrWhiteSpace(directory) ? [] : [directory];
+        }
+
+        return (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static IReadOnlyList<ScriptCompilerDiagnostic> ParseDiagnostics(string output, string root, string sourceRoot)
@@ -284,5 +337,4 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
     [GeneratedRegex(@"^(?<file>.+)\((?<line>\d+),(?<column>\d+)\): (?<severity>error|warning) (?<code>TS\d+): (?<message>.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticPattern();
 
-    private sealed record ProcessResult(int ExitCode, string Output);
 }
