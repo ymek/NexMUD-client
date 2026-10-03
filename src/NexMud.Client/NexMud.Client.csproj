@@ -10,6 +10,7 @@
     <ProjectReference Include="../NexMud.Jev/NexMud.Jev.csproj" />
     <ProjectReference Include="../NexMud.Scripting/NexMud.Scripting.csproj" />
     <ProjectReference Include="../NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj" />
+    <ProjectReference Include="../NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj" />
     <ProjectReference Include="../NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj" />
   </ItemGroup>
 </Project>

@@ -671,6 +671,11 @@ public static class Program
         await RunAsync("script package migration rejects unapproved legacy capabilities", ScriptPackageMigrationRejectsUnapprovedCapabilities);
         await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
 
+        await RunAsync("script package install uses bundled pnpm with lifecycle scripts disabled", ScriptPackageInstallUsesControlledPnpm);
+        await RunAsync("script package restore requires and freezes the workspace lockfile", ScriptPackageRestoreUsesFrozenLockfile);
+        await RunAsync("script package manager blocks unsupported dependency sources before pnpm", ScriptPackageManagerBlocksUnsupportedDependencySource);
+        await RunAsync("script package clean preserves source while removing generated artifacts", ScriptPackageCleanPreservesSource);
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }
@@ -8195,6 +8200,162 @@ public static class Program
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("link:../outside"));
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("latest"));
         return Task.CompletedTask;
+    }
+
+    private static async Task ScriptPackageInstallUsesControlledPnpm()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult result = await manager.InstallAsync("default");
+            Assert.True(result.Success);
+            ToolProcessRequest request = Assert.Single(runner.Requests);
+            Assert.Equal("/nexmud-toolchain/pnpm", request.Executable);
+            Assert.True(request.Arguments.Contains("install"));
+            Assert.True(request.Arguments.Contains("--recursive"));
+            Assert.True(request.Arguments.Contains("--ignore-scripts"));
+            Assert.True(request.Arguments.Contains("--no-frozen-lockfile"));
+            Assert.True(request.Arguments.Contains("--store-dir"));
+            Assert.Equal(Path.GetFullPath(root), request.WorkingDirectory);
+            Assert.Equal("true", request.Environment?["NPM_CONFIG_IGNORE_SCRIPTS"]);
+            string npmrc = await File.ReadAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.NpmRcFileName));
+            Assert.True(npmrc.Contains("ignore-scripts=true", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageRestoreUsesFrozenLockfile()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult missing = await manager.RestoreAsync("default");
+            Assert.False(missing.Success);
+            Assert.Equal("LockfileMissing", missing.Code);
+            Assert.Equal(0, runner.Requests.Count);
+
+            await File.WriteAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.LockfileName), "lockfileVersion: '9.0'\n");
+            ScriptPackageOperationResult restored = await manager.RestoreAsync("default");
+            Assert.True(restored.Success);
+            ToolProcessRequest request = Assert.Single(runner.Requests);
+            Assert.True(request.Arguments.Contains("--frozen-lockfile"));
+            Assert.True(request.Arguments.Contains("--ignore-scripts"));
+            Assert.False(request.Arguments.Contains("--no-frozen-lockfile"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageManagerBlocksUnsupportedDependencySource()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync("file:../../outside");
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult result = await manager.InstallAsync("default");
+            Assert.False(result.Success);
+            Assert.Equal("UnsupportedDependencySource", result.Code);
+            Assert.Equal(0, runner.Requests.Count);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageCleanPreservesSource()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        string packageRoot = Path.Combine(root, "tools");
+        string sourcePath = Path.Combine(packageRoot, "src", "main.ts");
+        string packageNodeModules = Path.Combine(packageRoot, "node_modules", "fixture");
+        string workspaceNodeModules = Path.Combine(root, "node_modules", "fixture");
+        string buildOutput = Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "build", "pkg_tools");
+        Directory.CreateDirectory(packageNodeModules);
+        Directory.CreateDirectory(workspaceNodeModules);
+        Directory.CreateDirectory(buildOutput);
+        await File.WriteAllTextAsync(Path.Combine(packageNodeModules, "x"), "x");
+        await File.WriteAllTextAsync(Path.Combine(workspaceNodeModules, "x"), "x");
+        await File.WriteAllTextAsync(Path.Combine(buildOutput, "x"), "x");
+
+        ScriptPackageManager manager = CreatePackageManager(root, new RecordingToolProcessRunner());
+        try
+        {
+            ScriptPackageOperationResult result = await manager.CleanAsync("default");
+            Assert.True(result.Success);
+            Assert.True(File.Exists(sourcePath));
+            Assert.False(Directory.Exists(Path.Combine(packageRoot, "node_modules")));
+            Assert.False(Directory.Exists(Path.Combine(root, "node_modules")));
+            Assert.False(Directory.Exists(Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "build")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<string> CreatePackageManagerWorkspaceAsync(string dependencySpecifier = "^1.0.0")
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-manager-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "tools");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "src"));
+        ScriptPackageDocument document = ScriptPackageDocument.CreateNew("tools", "pkg_tools", "12.8.1");
+        JsonObject json = document.Root;
+        json["dependencies"] = new JsonObject { ["fixture"] = dependencySpecifier };
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName),
+            json.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + Environment.NewLine);
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "src", "main.ts"), "export const value = 1;\n");
+        return root;
+    }
+
+    private static ScriptPackageManager CreatePackageManager(string root, RecordingToolProcessRunner runner) =>
+        new(
+            new FixtureToolchainLocator(),
+            runner,
+            _ => root,
+            _ => Path.Combine(root, ".pnpm-store"));
+
+    private sealed class FixtureToolchainLocator : IToolchainLocator
+    {
+        public string Root => "/nexmud-toolchain";
+        public ToolchainManifest Manifest { get; } = new(
+            1,
+            ToolchainPlatform.CurrentPlatform,
+            ToolchainPlatform.CurrentArchitecture,
+            "fixture",
+            []);
+
+        public ToolchainComponentLocation ResolveRequired(string componentName) => componentName switch
+        {
+            ToolchainComponentNames.Pnpm => new(componentName, "12.8.1", "/nexmud-toolchain/pnpm", null, true),
+            ToolchainComponentNames.Node => new(componentName, "24.21.0", "/nexmud-toolchain/node", null, true),
+            _ => throw new ToolchainUnavailableException($"Missing fixture component '{componentName}'.")
+        };
+    }
+
+    private sealed class RecordingToolProcessRunner : IToolProcessRunner
+    {
+        public List<ToolProcessRequest> Requests { get; } = [];
+
+        public Task<ToolProcessResult> RunAsync(
+            ToolProcessRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(request);
+            return Task.FromResult(new ToolProcessResult(0, "ok\n", string.Empty));
+        }
     }
 
     private static Task<int> RunToolProcessProbeAsync(string[] args)
