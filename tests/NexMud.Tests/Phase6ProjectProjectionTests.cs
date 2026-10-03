@@ -38,8 +38,9 @@ internal static class Phase6ProjectProjectionTests
                 throw new InvalidOperationException("The generated SDK projection does not expose @nexmud/api.");
 
             string config = await File.ReadAllTextAsync(baseConfig);
-            if (!config.Contains(".nexmud/sdk/@nexmud/api/index.d.ts", StringComparison.Ordinal))
-                throw new InvalidOperationException("The TypeScript base config does not resolve the NexMUD SDK projection.");
+            if (config.Contains("\"baseUrl\"", StringComparison.Ordinal) ||
+                !config.Contains("./sdk/@nexmud/api/index.d.ts", StringComparison.Ordinal))
+                throw new InvalidOperationException("The TypeScript base config must resolve the SDK without the removed baseUrl option.");
 
             string canonical = ScriptLanguageProjectProjection.ToCanonicalFileUri(Path.Combine(packageRoot, "src", "main.ts"));
             if (!canonical.StartsWith("file:", StringComparison.OrdinalIgnoreCase))

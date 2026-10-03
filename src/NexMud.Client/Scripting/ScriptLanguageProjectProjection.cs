@@ -122,10 +122,9 @@ public static class ScriptLanguageProjectProjection
                 ["checkJs"] = true,
                 ["resolveJsonModule"] = true,
                 ["skipLibCheck"] = true,
-                ["baseUrl"] = "..",
                 ["paths"] = new JsonObject
                 {
-                    [SdkPackageName] = new JsonArray(".nexmud/sdk/@nexmud/api/index.d.ts")
+                    [SdkPackageName] = new JsonArray("./sdk/@nexmud/api/index.d.ts")
                 }
             }
         };

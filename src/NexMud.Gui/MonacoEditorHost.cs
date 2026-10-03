@@ -6,7 +6,7 @@ using NexMud.Scripting.TypeScript.Declarations;
 
 namespace NexMud.Gui;
 
-internal sealed record MonacoDocumentChanged(string Uri, int VersionId, int AlternativeVersionId);
+internal sealed record MonacoDocumentChanged(string Uri, int VersionId, int AlternativeVersionId, string? Text = null);
 internal sealed record MonacoSaveRequested(string? Uri, bool All);
 internal sealed record MonacoSelectionChanged(string Uri, int StartLine, int StartColumn, int EndLine, int EndColumn);
 internal sealed record MonacoEditorFailure(string Message);
@@ -28,7 +28,20 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         "selectionChanged",
         "activeDocumentChanged",
         "editorCommandInvoked",
+        "lspRequest",
         "editorFailure"
+    };
+    private static readonly HashSet<string> AllowedLanguageServerRequests = new(StringComparer.Ordinal)
+    {
+        "textDocument/completion",
+        "completionItem/resolve",
+        "textDocument/hover",
+        "textDocument/signatureHelp",
+        "textDocument/definition",
+        "textDocument/typeDefinition",
+        "textDocument/references",
+        "textDocument/rename",
+        "textDocument/documentSymbol"
     };
 
     private readonly Grid _root = new();
@@ -46,7 +59,9 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private MonacoAssetServer? _server;
     private int _initialized;
+    private int _sdkDeclarationsSent;
     private int _disposed;
+    private int _languageServerAvailable;
 
     public MonacoEditorHost()
     {
@@ -60,11 +75,13 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
     public bool IsReady { get; private set; }
     public event Action? EditorReady;
     public event Action<MonacoDocumentChanged>? DocumentChanged;
+    public event Func<string, Task>? DocumentClosed;
     public event Action<MonacoSaveRequested>? SaveRequested;
     public event Action<MonacoSelectionChanged>? SelectionChanged;
     public event Action<string>? ActiveDocumentChanged;
     public event Action<MonacoEditorFailure>? EditorFailed;
     public event Action<string, JsonElement>? EditorCommandInvoked;
+    public event Func<string, JsonElement, CancellationToken, Task<JsonElement>>? LanguageServerRequest;
 
     public Task InitializeAsync()
     {
@@ -86,13 +103,16 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         string packageId,
         string relativePath,
         string content,
+        string documentUri,
         bool readOnly = false,
         CancellationToken cancellationToken = default)
     {
         await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        if (Interlocked.Exchange(ref _sdkDeclarationsSent, 1) == 0)
+            await SendAsync("registerSdkDeclarations", new { content = NexMudTypeDeclarations.Source }).ConfigureAwait(false);
         await SendAsync("openDocument", new
         {
-            uri = CreateDocumentUri(profileId, packageId, relativePath),
+            uri = documentUri,
             path = relativePath,
             content,
             readOnly
@@ -103,6 +123,8 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
     {
         await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
         await SendAsync("closeDocument", new { uri }).ConfigureAwait(false);
+        if (DocumentClosed is { } documentClosed)
+            await documentClosed(uri).ConfigureAwait(false);
     }
 
     public async Task SetActiveDocumentAsync(string uri, CancellationToken cancellationToken = default)
@@ -141,11 +163,20 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         await SendAsync("setFont", new { family, size }).ConfigureAwait(false);
     }
 
-    public Task RegisterSdkDeclarationsAsync() => SendAsync("registerSdkDeclarations", new
+    public async Task SetDiagnosticsAsync(string uri, JsonElement diagnostics, CancellationToken cancellationToken = default)
     {
-        uri = "file:///nexmud-api.d.ts",
-        content = NexMudTypeDeclarations.Source
-    });
+        await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        await SendAsync("setDiagnostics", new { uri, diagnostics }).ConfigureAwait(false);
+    }
+
+    public Task SetLanguageServerAvailableAsync(bool available)
+    {
+        Interlocked.Exchange(ref _languageServerAvailable, available ? 1 : 0);
+        return SendAsync("setLanguageServerAvailable", new { available });
+    }
+
+    internal static bool IsAllowedLanguageServerRequest(string method) =>
+        AllowedLanguageServerRequests.Contains(method);
 
     public async Task RevealLocationAsync(string uri, int? line, int? column, CancellationToken cancellationToken = default)
     {
@@ -173,14 +204,6 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         await _ready.Task.WaitAsync(TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
     }
 
-    public static string CreateDocumentUri(string profileId, string packageId, string relativePath)
-    {
-        string profile = Uri.EscapeDataString(profileId.Trim());
-        string package = Uri.EscapeDataString(packageId.Trim());
-        string path = string.Join('/', relativePath.Replace('\\', '/').TrimStart('/').Split('/').Select(Uri.EscapeDataString));
-        return $"nexmud://profile/{profile}/package/{package}/{path}";
-    }
-
     private async Task<JsonElement> RequestAsync(string type, object payload, CancellationToken cancellationToken)
     {
         string requestId = Guid.NewGuid().ToString("N");
@@ -206,7 +229,7 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
 
     private async Task SendAsync(string type, object payload)
     {
-        if (!IsReady && type != "initialize" && type != "registerSdkDeclarations") return;
+        if (!IsReady && type != "initialize") return;
         string envelope = JsonSerializer.Serialize(new
         {
             version = EditorBridgeProtocolVersion,
@@ -301,14 +324,18 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
                 IsReady = true;
                 _failure.IsVisible = false;
                 _ready.TrySetResult(true);
-                _ = RegisterSdkDeclarationsAsync();
                 EditorReady?.Invoke();
+                _ = SendAsync("setLanguageServerAvailable", new
+                {
+                    available = Volatile.Read(ref _languageServerAvailable) != 0
+                });
                 break;
             case "documentChanged":
                 DocumentChanged?.Invoke(new MonacoDocumentChanged(
                     payload.GetProperty("uri").GetString() ?? string.Empty,
                     payload.GetProperty("versionId").GetInt32(),
-                    payload.GetProperty("alternativeVersionId").GetInt32()));
+                    payload.GetProperty("alternativeVersionId").GetInt32(),
+                    payload.TryGetProperty("text", out JsonElement text) ? text.GetString() : null));
                 break;
             case "saveRequested":
                 SaveRequested?.Invoke(new MonacoSaveRequested(
@@ -332,6 +359,40 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
             case "editorCommandInvoked":
                 HandleEditorCommand(payload);
                 break;
+            case "lspRequest":
+                _ = HandleLanguageServerRequestAsync(payload);
+                break;
+        }
+    }
+
+    private async Task HandleLanguageServerRequestAsync(JsonElement payload)
+    {
+        string requestId = payload.TryGetProperty("requestId", out JsonElement id) ? id.GetString() ?? string.Empty : string.Empty;
+        string method = payload.TryGetProperty("method", out JsonElement methodValue) ? methodValue.GetString() ?? string.Empty : string.Empty;
+        if (requestId.Length == 0) return;
+        if (!IsAllowedLanguageServerRequest(method))
+        {
+            await SendAsync("lspResponse", new { requestId, error = "Unsupported TypeScript language service request." }).ConfigureAwait(false);
+            return;
+        }
+        JsonElement parameters = payload.TryGetProperty("parameters", out JsonElement value)
+            ? value.Clone()
+            : JsonSerializer.SerializeToElement(new { }, JsonOptions);
+        try
+        {
+            Func<string, JsonElement, CancellationToken, Task<JsonElement>>? handler = LanguageServerRequest;
+            if (handler is null) throw new InvalidOperationException("TypeScript language service is unavailable.");
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(20));
+            JsonElement result = await handler(method, parameters, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+            await SendAsync("lspResponse", new { requestId, result }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await SendAsync("lspResponse", new { requestId, error = "TypeScript language service request timed out." }).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            await SendAsync("lspResponse", new { requestId, error = exception.Message }).ConfigureAwait(false);
         }
     }
 

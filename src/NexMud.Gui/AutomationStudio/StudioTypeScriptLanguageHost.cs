@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
+using NexMud.Client.Scripting;
 using NexMud.Scripting.Tooling;
 
 namespace NexMud.Gui.AutomationStudio;
@@ -120,7 +122,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
     private readonly Func<string, string> _workspaceRoot;
     private readonly Func<string, IStudioTypeScriptTransport> _transportFactory;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly Dictionary<string, OpenDocumentState> _documents = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, OpenDocumentState> _documents = new(StringComparer.Ordinal);
     private IStudioTypeScriptTransport? _transport;
     private string? _profileId;
     private int _disposed;
@@ -151,9 +153,11 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         if (languageId is null) return;
         ArgumentException.ThrowIfNullOrWhiteSpace(uri);
         ArgumentNullException.ThrowIfNull(text);
+        EnsureDocumentUri(profileId, uri);
 
         IStudioTypeScriptTransport transport;
         bool started;
+        OpenDocumentState[] documentsToRefresh;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -161,6 +165,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
             _documents[uri] = new OpenDocumentState(uri, languageId, version, text);
             (transport, started) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            documentsToRefresh = started ? _documents.Values.ToArray() : [_documents[uri]];
         }
         finally
         {
@@ -169,6 +174,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
 
         if (!started)
             await transport.DidOpenAsync(uri, languageId, version, text, cancellationToken).ConfigureAwait(false);
+        ScheduleDiagnosticsRefresh(transport, profileId, documentsToRefresh, cancellationToken);
     }
 
     public async Task ChangeDocumentAsync(
@@ -178,16 +184,20 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         string text,
         CancellationToken cancellationToken = default)
     {
+        EnsureDocumentUri(profileId, uri);
         IStudioTypeScriptTransport transport;
         bool started;
+        OpenDocumentState[] documentsToRefresh;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
-            if (!_documents.TryGetValue(uri, out OpenDocumentState? state)) return;
-            _documents[uri] = state with { Version = version, Text = text };
+            if (!_documents.TryGetValue(uri, out OpenDocumentState? state) || version <= state.Version) return;
+            OpenDocumentState changed = state with { Version = version, Text = text };
+            _documents[uri] = changed;
             (transport, started) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            documentsToRefresh = started ? _documents.Values.ToArray() : [changed];
         }
         finally
         {
@@ -197,6 +207,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         // A newly-started transport was hydrated from the latest in-memory document states.
         if (!started)
             await transport.DidChangeAsync(uri, version, text, cancellationToken).ConfigureAwait(false);
+        ScheduleDiagnosticsRefresh(transport, profileId, documentsToRefresh, cancellationToken);
     }
 
     public async Task SaveDocumentAsync(
@@ -205,7 +216,10 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         string text,
         CancellationToken cancellationToken = default)
     {
+        EnsureDocumentUri(profileId, uri);
         IStudioTypeScriptTransport transport;
+        bool started;
+        OpenDocumentState[] documentsToRefresh;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -213,7 +227,9 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
             if (_documents.TryGetValue(uri, out OpenDocumentState? state))
                 _documents[uri] = state with { Text = text };
-            (transport, _) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            (transport, started) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            documentsToRefresh = started ? _documents.Values.ToArray() :
+                _documents.TryGetValue(uri, out OpenDocumentState? document) ? [document] : [];
         }
         finally
         {
@@ -221,6 +237,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         }
 
         await transport.DidSaveAsync(uri, text, cancellationToken).ConfigureAwait(false);
+        ScheduleDiagnosticsRefresh(transport, profileId, documentsToRefresh, cancellationToken);
     }
 
     public async Task CloseDocumentAsync(
@@ -228,13 +245,14 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         string uri,
         CancellationToken cancellationToken = default)
     {
+        EnsureDocumentUri(profileId, uri);
         IStudioTypeScriptTransport? transport;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
             if (!string.Equals(_profileId, profileId, StringComparison.Ordinal)) return;
-            if (!_documents.Remove(uri)) return;
+            if (!_documents.TryRemove(uri, out _)) return;
             transport = _transport is { IsRunning: true } current ? current : null;
         }
         finally
@@ -258,6 +276,12 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         {
             ThrowIfDisposed();
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
+            if (parameters.ValueKind == JsonValueKind.Object &&
+                parameters.TryGetProperty("textDocument", out JsonElement textDocument) &&
+                textDocument.ValueKind == JsonValueKind.Object &&
+                textDocument.TryGetProperty("uri", out JsonElement documentUri) &&
+                documentUri.ValueKind == JsonValueKind.String)
+                EnsureDocumentUri(profileId, documentUri.GetString() ?? string.Empty);
             (transport, _) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -270,18 +294,23 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
 
     public async Task RestartAsync(string profileId, CancellationToken cancellationToken = default)
     {
+        IStudioTypeScriptTransport transport;
+        OpenDocumentState[] documentsToRefresh;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
             await DisposeTransportLockedAsync().ConfigureAwait(false);
-            _ = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            (transport, _) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
+            documentsToRefresh = _documents.Values.ToArray();
         }
         finally
         {
             _gate.Release();
         }
+
+        ScheduleDiagnosticsRefresh(transport, profileId, documentsToRefresh, cancellationToken);
     }
 
     public async Task SwitchProfileAsync(string profileId, CancellationToken cancellationToken = default)
@@ -301,6 +330,28 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         }
     }
 
+    internal bool IsOpenDocument(string profileId, string uri) =>
+        string.Equals(Volatile.Read(ref _profileId), profileId, StringComparison.Ordinal) &&
+        _documents.ContainsKey(uri) &&
+        IsCanonicalDocumentUri(profileId, uri);
+
+    internal bool IsCanonicalDocumentUri(string profileId, string uri)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed) || !parsed.IsFile) return false;
+        string root = Path.GetFullPath(_workspaceRoot(profileId));
+        string path = Path.GetFullPath(parsed.LocalPath);
+        string rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return path.StartsWith(rootPrefix, comparison) &&
+               string.Equals(ScriptLanguageProjectProjection.ToCanonicalFileUri(path), uri, StringComparison.Ordinal);
+    }
+
+    private void EnsureDocumentUri(string profileId, string uri)
+    {
+        if (!IsCanonicalDocumentUri(profileId, uri))
+            throw new ArgumentException("TypeScript document URI must be a canonical file URI inside the active profile workspace.", nameof(uri));
+    }
+
     internal static string? LanguageIdForPath(string relativePath)
     {
         if (relativePath.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
@@ -318,14 +369,14 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
         if (_profileId is null)
         {
-            _profileId = profileId;
+            Volatile.Write(ref _profileId, profileId);
             return;
         }
         if (string.Equals(_profileId, profileId, StringComparison.Ordinal)) return;
 
         await DisposeTransportLockedAsync().ConfigureAwait(false);
         _documents.Clear();
-        _profileId = profileId;
+        Volatile.Write(ref _profileId, profileId);
     }
 
     private async Task<(IStudioTypeScriptTransport Transport, bool Started)> EnsureStartedLockedAsync(
@@ -376,12 +427,66 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         transport.Failed -= TransportFailed;
     }
 
+    private void ScheduleDiagnosticsRefresh(
+        IStudioTypeScriptTransport transport,
+        string profileId,
+        IEnumerable<OpenDocumentState> documents,
+        CancellationToken cancellationToken)
+    {
+        foreach (OpenDocumentState document in documents)
+            _ = RefreshDiagnosticsAsync(transport, profileId, document, cancellationToken);
+    }
+
+    private async Task RefreshDiagnosticsAsync(
+        IStudioTypeScriptTransport transport,
+        string profileId,
+        OpenDocumentState document,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            JsonElement report = await transport.RequestAsync(
+                "textDocument/diagnostic",
+                new { textDocument = new { uri = document.Uri } },
+                cancellationToken,
+                TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            if (!report.TryGetProperty("items", out JsonElement diagnostics) ||
+                diagnostics.ValueKind != JsonValueKind.Array)
+                return;
+
+            JsonElement parameters = JsonSerializer.SerializeToElement(new
+            {
+                uri = document.Uri,
+                version = document.Version,
+                diagnostics
+            });
+            if (!string.Equals(Volatile.Read(ref _profileId), profileId, StringComparison.Ordinal) ||
+                !ReferenceEquals(Volatile.Read(ref _transport), transport))
+                return;
+            TransportNotificationReceived(new LanguageServerNotification("textDocument/publishDiagnostics", parameters));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            OutputReceived?.Invoke($"TypeScript diagnostics request failed: {exception.Message}");
+        }
+    }
+
     private void TransportNotificationReceived(LanguageServerNotification notification)
     {
         if (!notification.Method.Equals("textDocument/publishDiagnostics", StringComparison.Ordinal)) return;
-        if (!notification.Parameters.TryGetProperty("uri", out JsonElement uriElement)) return;
+        if (!notification.Parameters.TryGetProperty("uri", out JsonElement uriElement) ||
+            uriElement.ValueKind != JsonValueKind.String) return;
         string uri = uriElement.GetString() ?? string.Empty;
-        if (uri.Length == 0) return;
+        if (!notification.Parameters.TryGetProperty("diagnostics", out JsonElement diagnostics) ||
+            diagnostics.ValueKind != JsonValueKind.Array) return;
+        string? activeProfileId = Volatile.Read(ref _profileId);
+        if (uri.Length == 0 || activeProfileId is null || !IsCanonicalDocumentUri(activeProfileId, uri) ||
+            !_documents.TryGetValue(uri, out OpenDocumentState? openDocument)) return;
+        if (notification.Parameters.TryGetProperty("version", out JsonElement versionElement) &&
+            versionElement.TryGetInt32(out int version) && version != openDocument.Version) return;
         DiagnosticsPublished?.Invoke(new StudioLanguageDiagnostics(uri, notification.Parameters));
     }
 

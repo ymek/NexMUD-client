@@ -35,6 +35,7 @@ internal sealed class AutomationStudioWindow : Window
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
     private readonly StudioSessionController _session;
+    private readonly StudioTypeScriptLanguageHost _typescript;
     private readonly AutomationOrganizationStore _organizationStore = new();
     private AutomationOrganizationCatalog _organization = AutomationOrganizationCatalog.Empty;
     private readonly AutomationReferenceIndex _referencesIndex = new();
@@ -42,6 +43,10 @@ internal sealed class AutomationStudioWindow : Window
     private readonly StudioTextModelRegistry _textModels = new();
     private readonly HashSet<string> _ignoredMonacoChanges = new(StringComparer.Ordinal);
     private readonly Dictionary<string, MonacoSelectionChanged> _scriptSelections = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string[]> _languageDiagnostics = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, StudioLanguageDiagnostics> _pendingLanguageDiagnostics = new(StringComparer.Ordinal);
+    private readonly List<Control> _languageProblemRows = [];
+    private Button? _languageServerRestartButton;
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
     private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
     private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
@@ -104,6 +109,7 @@ internal sealed class AutomationStudioWindow : Window
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _workspace = runtime.ScriptWorkspace;
         _session = new StudioSessionController(runtime.ActiveConnectionProfile.Id);
+        _typescript = new StudioTypeScriptLanguageHost(_workspace.GetLanguageWorkspaceRoot);
         _bottomCollapsed = _preferences.BottomCollapsed;
         _activity = _preferences.ResolveActivity();
 
@@ -130,6 +136,9 @@ internal sealed class AutomationStudioWindow : Window
         Closing += WindowClosing;
         Closed += WindowClosed;
     }
+
+    private string SourceDocumentUri(string packageId, string relativePath) =>
+        _workspace.GetSourceDocumentUri(SelectedProfileId, packageId, relativePath);
 
     private string SelectedProfileId =>
         _session.Current.ProfileId;
@@ -578,7 +587,11 @@ internal sealed class AutomationStudioWindow : Window
 
         StudioSessionSnapshot previous = _session.Current;
         await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
+        _languageDiagnostics.Clear();
+        _pendingLanguageDiagnostics.Clear();
+        RefreshLanguageProblems();
         _session.SwitchProfile(selectedProfile.Id);
+        await _typescript.SwitchProfileAsync(selectedProfile.Id, _cts.Token).ConfigureAwait(true);
         _activePackage = null;
         RestartWorkspaceWatcher();
         await RefreshNavigatorAsync().ConfigureAwait(true);
@@ -679,7 +692,7 @@ internal sealed class AutomationStudioWindow : Window
     private async Task HandleExternalFileChangedAsync(ScriptWorkspaceExternalChange change)
     {
         if (!ScriptWorkspaceService.IsSupportedSourcePath(change.RelativePath)) return;
-        string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, change.PackageId, change.RelativePath);
+        string uri = SourceDocumentUri(change.PackageId, change.RelativePath);
         if (_documents.Find(uri) is not { IsScript: true } document) return;
         (bool exists, string? diskContent) = await TryReadSourceAsync(change.PackageId, change.RelativePath).ConfigureAwait(true);
         if (!exists || diskContent is null)
@@ -760,7 +773,7 @@ internal sealed class AutomationStudioWindow : Window
             }
 
             if (!exists) continue;
-            string newUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, change.PackageId, newPath);
+            string newUri = SourceDocumentUri(change.PackageId, newPath);
             movedUris[document.Key] = newUri;
             _scriptSelections.TryGetValue(document.Key, out MonacoSelectionChanged? selection);
             await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
@@ -1181,7 +1194,7 @@ internal sealed class AutomationStudioWindow : Window
             sourcePath.Equals(_activePackage.Definition.Entrypoint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The package entrypoint cannot be moved until package metadata editing is available.");
 
-        string sourceUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, sourcePath);
+        string sourceUri = SourceDocumentUri(packageId, sourcePath);
         StudioDocument? open = _documents.Find(sourceUri);
         if (open?.IsDirty == true)
             throw new InvalidOperationException("Save or close the dirty file before moving it.");
@@ -1243,7 +1256,7 @@ internal sealed class AutomationStudioWindow : Window
             return;
         }
 
-        string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, path);
+        string uri = SourceDocumentUri(packageId, path);
         StudioDocument? open = _documents.Find(uri);
         if (open?.IsDirty == true)
         {
@@ -1336,7 +1349,7 @@ internal sealed class AutomationStudioWindow : Window
             .Where(path => ScriptExplorerTree.IsSameOrDescendant(path, sourcePath))
             .ToArray();
         StudioDocument[] open = affected
-            .Select(path => _documents.Find(MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, path)))
+            .Select(path => _documents.Find(SourceDocumentUri(packageId, path)))
             .Where(document => document is not null)
             .Cast<StudioDocument>()
             .ToArray();
@@ -1349,7 +1362,7 @@ internal sealed class AutomationStudioWindow : Window
         {
             string oldPath = document.Path!;
             string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
-            movedUris[document.Key] = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, newPath);
+            movedUris[document.Key] = SourceDocumentUri(packageId, newPath);
             await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
             _textModels.Remove(document.Key);
             _ignoredMonacoChanges.Remove(document.Key);
@@ -1393,7 +1406,7 @@ internal sealed class AutomationStudioWindow : Window
             .Where(file => ScriptExplorerTree.IsSameOrDescendant(file, path))
             .ToArray();
         StudioDocument[] open = affected
-            .Select(file => _documents.Find(MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, file)))
+            .Select(file => _documents.Find(SourceDocumentUri(packageId, file)))
             .Where(document => document is not null)
             .Cast<StudioDocument>()
             .ToArray();
@@ -1672,7 +1685,7 @@ internal sealed class AutomationStudioWindow : Window
     private async Task OpenSourceAsync(string packageId, string relativePath)
     {
         await SelectPackageAsync(packageId).ConfigureAwait(true);
-        string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, relativePath);
+        string uri = SourceDocumentUri(packageId, relativePath);
         MonacoEditorHost monaco = _monaco;
         ShowMonaco(true);
         // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
@@ -1681,7 +1694,17 @@ internal sealed class AutomationStudioWindow : Window
         if (_documents.Find(uri) is null)
         {
             string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
-            await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token).ConfigureAwait(true);
+            try
+            {
+                await _typescript.OpenDocumentAsync(SelectedProfileId, uri, relativePath, 1, content, _cts.Token).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                _ = _monaco.SetLanguageServerAvailableAsync(false);
+                ShowLanguageServerFailure(exception.Message);
+            }
+            await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token, documentUri: uri).ConfigureAwait(true);
             _textModels.Track(uri, SelectedProfileId, packageId, relativePath, content);
         }
         else if (_textModels.Find(uri) is null)
@@ -1697,14 +1720,25 @@ internal sealed class AutomationStudioWindow : Window
             Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
         });
         await monaco.SetActiveDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
+        if (_pendingLanguageDiagnostics.Remove(uri, out StudioLanguageDiagnostics? pending))
+            await ApplyLanguageDiagnosticsAsync(pending).ConfigureAwait(true);
     }
 
     private void WireMonaco()
     {
+        _monaco.DocumentClosed += async uri =>
+        {
+            string profileId = _documents.Find(uri)?.ProfileId ?? SelectedProfileId;
+            _languageDiagnostics.Remove(uri);
+            _pendingLanguageDiagnostics.Remove(uri);
+            RefreshLanguageProblems();
+            await CloseLanguageDocumentAsync(profileId, uri).ConfigureAwait(false);
+        };
         _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() =>
         {
             if (_ignoredMonacoChanges.Remove(change.Uri)) return;
             _documents.SetDirty(change.Uri, true);
+            _ = ForwardLanguageChangeAsync(change);
         });
         _monaco.SaveRequested += request => Dispatcher.UIThread.Post(async () =>
         {
@@ -1722,6 +1756,137 @@ internal sealed class AutomationStudioWindow : Window
         });
         _monaco.EditorReady += () => Dispatcher.UIThread.Post(RenderActive);
         _monaco.EditorFailed += failure => AddProblem("Editor", failure.Message);
+        _monaco.LanguageServerRequest += (method, parameters, cancellationToken) =>
+        {
+            string profileId = parameters.ValueKind == JsonValueKind.Object &&
+                               parameters.TryGetProperty("textDocument", out JsonElement textDocument) &&
+                               textDocument.ValueKind == JsonValueKind.Object &&
+                               textDocument.TryGetProperty("uri", out JsonElement uriElement) &&
+                               uriElement.ValueKind == JsonValueKind.String &&
+                               _documents.Find(uriElement.GetString() ?? string.Empty) is { ProfileId: { } documentProfile }
+                ? documentProfile
+                : SelectedProfileId;
+            return _typescript.RequestAsync(profileId, method, parameters, cancellationToken);
+        };
+        _typescript.DiagnosticsPublished += diagnostics => Dispatcher.UIThread.Post(async () =>
+        {
+            if (!_typescript.IsOpenDocument(SelectedProfileId, diagnostics.Uri)) return;
+            if (_documents.Find(diagnostics.Uri) is not { IsScript: true } openDocument)
+            {
+                _pendingLanguageDiagnostics[diagnostics.Uri] = diagnostics;
+                return;
+            }
+            if (!string.Equals(openDocument.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            await ApplyLanguageDiagnosticsAsync(diagnostics).ConfigureAwait(true);
+        });
+        _typescript.OutputReceived += line => Dispatcher.UIThread.Post(() =>
+        {
+            AddConsole(line);
+            if (line == "TypeScript language service started.")
+            {
+                RemoveLanguageServerRestartButton();
+                _ = _monaco.SetLanguageServerAvailableAsync(true);
+            }
+        });
+        _typescript.FailureReceived += message => Dispatcher.UIThread.Post(() =>
+        {
+            _languageDiagnostics.Clear();
+            _pendingLanguageDiagnostics.Clear();
+            RefreshLanguageProblems();
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(message);
+        });
+    }
+
+    private void ShowLanguageServerFailure(string message)
+    {
+        AddProblem("TypeScript", message);
+        if (_languageServerRestartButton is not null) return;
+        Button restart = new() { Content = "Restart TypeScript" };
+        restart.Click += async (_, _) => await RestartTypeScriptLanguageServiceAsync().ConfigureAwait(true);
+        _languageServerRestartButton = restart;
+        _problems.Children.Add(restart);
+    }
+
+    private void RemoveLanguageServerRestartButton()
+    {
+        if (_languageServerRestartButton is null) return;
+        _problems.Children.Remove(_languageServerRestartButton);
+        _languageServerRestartButton = null;
+    }
+
+    private async Task RestartTypeScriptLanguageServiceAsync()
+    {
+        Button? restart = _languageServerRestartButton;
+        if (restart is null) return;
+        restart.IsEnabled = false;
+        try
+        {
+            await _typescript.RestartAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            AddProblem("TypeScript", exception.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_languageServerRestartButton, restart)) restart.IsEnabled = true;
+        }
+    }
+
+    private async Task ApplyLanguageDiagnosticsAsync(StudioLanguageDiagnostics diagnostics)
+    {
+        try
+        {
+            JsonElement values = diagnostics.Parameters.TryGetProperty("diagnostics", out JsonElement items)
+                ? items.Clone()
+                : JsonSerializer.SerializeToElement(Array.Empty<object>());
+            await _monaco.SetDiagnosticsAsync(diagnostics.Uri, values, _cts.Token).ConfigureAwait(true);
+            _languageDiagnostics[diagnostics.Uri] = values.EnumerateArray()
+                .Select(item => item.TryGetProperty("message", out JsonElement text) ? text.GetString() ?? "TypeScript diagnostic" : "TypeScript diagnostic")
+                .ToArray();
+            RefreshLanguageProblems();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) { AddProblem("TypeScript", exception.Message); }
+    }
+
+    private async Task CloseLanguageDocumentAsync(string profileId, string uri)
+    {
+        try { await _typescript.CloseDocumentAsync(profileId, uri, _cts.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) { Dispatcher.UIThread.Post(() => AddProblem("TypeScript", exception.Message)); }
+    }
+
+    private async Task ForwardLanguageChangeAsync(MonacoDocumentChanged change)
+    {
+        try
+        {
+            StudioDocument? document = _documents.Find(change.Uri);
+            if (document is not { IsScript: true } ||
+                !string.Equals(document.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            string text = change.Text ?? await _monaco.RequestDocumentContentAsync(change.Uri, _cts.Token).ConfigureAwait(false);
+            await _typescript.ChangeDocumentAsync(document.ProfileId!, change.Uri, change.VersionId, text, _cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) { Dispatcher.UIThread.Post(() => AddProblem("TypeScript", exception.Message)); }
+    }
+
+    private void RefreshLanguageProblems()
+    {
+        foreach (Control row in _languageProblemRows) _problems.Children.Remove(row);
+        _languageProblemRows.Clear();
+        foreach ((string uri, string[] messages) in _languageDiagnostics)
+        {
+            foreach (string message in messages)
+            {
+                TextBlock row = Text($"TypeScript: {Path.GetFileName(new Uri(uri).LocalPath)}: {message}");
+                _languageProblemRows.Add(row);
+                _problems.Children.Add(row);
+            }
+        }
+        if (_languageProblemRows.Count > 0 && _bottomCollapsed) ToggleBottom();
     }
 
     private async Task SaveScriptAsync(string uri)
@@ -1751,6 +1916,16 @@ internal sealed class AutomationStudioWindow : Window
 
         string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
         await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build: true, _cts.Token).ConfigureAwait(true);
+        try
+        {
+            await _typescript.SaveDocumentAsync(document.ProfileId!, uri, content, _cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(exception.Message);
+        }
         _textModels.MarkSaved(uri, content);
         _documents.SetDirty(uri, false);
         RenderExternalConflict();
@@ -1793,7 +1968,7 @@ internal sealed class AutomationStudioWindow : Window
         if (export is null) { AddProblem("Automation", "Function not found in the latest successful build. Build the package first."); return; }
         await OpenSourceAsync(function.PackageId, export.ModulePath).ConfigureAwait(true);
         await _monaco.RevealLocationAsync(
-                MonacoEditorHost.CreateDocumentUri(SelectedProfileId, function.PackageId, export.ModulePath),
+                SourceDocumentUri(function.PackageId, export.ModulePath),
                 export.SourceLocation.Line, export.SourceLocation.Column, _cts.Token).ConfigureAwait(true);
     }
 
@@ -1967,7 +2142,7 @@ internal sealed class AutomationStudioWindow : Window
             {
                 await OpenSourceAsync(result.PackageId, result.RelativePath).ConfigureAwait(true);
                 await _monaco.RevealLocationAsync(
-                        MonacoEditorHost.CreateDocumentUri(SelectedProfileId, result.PackageId, result.RelativePath),
+                        SourceDocumentUri(result.PackageId, result.RelativePath),
                         result.Line, result.Column, _cts.Token).ConfigureAwait(true);
             };
             _referencesPanel.Children.Add(row);
@@ -2059,7 +2234,7 @@ internal sealed class AutomationStudioWindow : Window
         {
             string oldPath = active.Path!;
             string newPath = conflict.NewPath;
-            string newUri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, active.PackageId!, newPath);
+            string newUri = SourceDocumentUri(active.PackageId!, newPath);
             _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? movedSelection);
             await _monaco.CloseDocumentAsync(active.Key, _cts.Token).ConfigureAwait(true);
             _textModels.Remove(active.Key);
@@ -2428,6 +2603,7 @@ internal sealed class AutomationStudioWindow : Window
         _preferences.SetActivity(_activity);
         _preferences.Save();
         _ = _monaco.DisposeAsync();
+        _ = _typescript.DisposeAsync();
         _session.Dispose();
         _cts.Dispose();
     }

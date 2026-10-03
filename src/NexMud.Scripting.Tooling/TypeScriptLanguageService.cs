@@ -65,20 +65,13 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
             Directory.CreateDirectory(_workspaceRoot);
 
             ToolchainComponentLocation node = _toolchain.ResolveRequired(ToolchainComponentNames.Node);
-            ToolchainComponentLocation languageServer = _toolchain.ResolveRequired(ToolchainComponentNames.TypeScriptLanguageServer);
             ToolchainComponentLocation typescript = _toolchain.ResolveRequired(ToolchainComponentNames.TypeScript);
-            string tsserverPath = Path.Combine(
-                Path.GetDirectoryName(typescript.FullPath)
-                    ?? throw new ToolchainUnavailableException("Unable to resolve the bundled TypeScript lib directory."),
-                "tsserver.js");
-            if (!File.Exists(tsserverPath))
-                throw new ToolchainUnavailableException($"Bundled tsserver was not found at '{tsserverPath}'.");
 
             CancellationTokenSource lifetime = new();
             _lifetime = lifetime;
             ToolProcessSession session = ToolProcessSession.Start(new ToolProcessRequest(
                 node.FullPath,
-                [languageServer.FullPath, "--stdio", "--log-level", "2"],
+                [typescript.FullPath, "--lsp", "--stdio"],
                 _workspaceRoot,
                 [Path.GetDirectoryName(node.FullPath)!],
                 new Dictionary<string, string?>
@@ -91,7 +84,7 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
 
             JsonElement initializeResult = await RequestAsync(
                 "initialize",
-                CreateInitializeParams(tsserverPath),
+                CreateInitializeParams(),
                 cancellationToken,
                 TimeSpan.FromSeconds(8)).ConfigureAwait(false);
             ServerCapabilities = initializeResult.TryGetProperty("capabilities", out JsonElement capabilities)
@@ -365,7 +358,7 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
         return Enumerable.Repeat<object?>(null, items.GetArrayLength()).ToArray();
     }
 
-    private object CreateInitializeParams(string tsserverPath) => new
+    private object CreateInitializeParams() => new
     {
         processId = Environment.ProcessId,
         clientInfo = new { name = "NexMUD Automation Studio", version = "0.32.0" },
@@ -376,13 +369,15 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
             workspace = new
             {
                 workspaceFolders = true,
-                symbol = new { }
+                symbol = new { dynamicRegistration = false },
+                workspaceEdit = new { documentChanges = true }
             },
             textDocument = new
             {
                 synchronization = new { dynamicRegistration = false, didSave = true },
                 completion = new
                 {
+                    dynamicRegistration = false,
                     completionItem = new
                     {
                         snippetSupport = true,
@@ -390,27 +385,14 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
                         resolveSupport = new { properties = new[] { "documentation", "detail", "additionalTextEdits" } }
                     }
                 },
-                hover = new { contentFormat = new[] { "markdown", "plaintext" } },
-                signatureHelp = new { },
-                definition = new { linkSupport = true },
-                typeDefinition = new { linkSupport = true },
-                references = new { },
-                rename = new { prepareSupport = true },
-                documentSymbol = new { hierarchicalDocumentSymbolSupport = true },
-                publishDiagnostics = new { relatedInformation = true }
-            }
-        },
-        initializationOptions = new
-        {
-            hostInfo = "NexMUD Automation Studio",
-            disableAutomaticTypingAcquisition = true,
-            tsserver = new
-            {
-                path = tsserverPath,
-                fallbackPath = tsserverPath,
-                logVerbosity = "off",
-                trace = "off",
-                useSyntaxServer = "auto"
+                hover = new { dynamicRegistration = false, contentFormat = new[] { "markdown", "plaintext" } },
+                signatureHelp = new { dynamicRegistration = false },
+                definition = new { dynamicRegistration = false, linkSupport = true },
+                typeDefinition = new { dynamicRegistration = false, linkSupport = true },
+                references = new { dynamicRegistration = false },
+                rename = new { dynamicRegistration = false, prepareSupport = true },
+                documentSymbol = new { dynamicRegistration = false, hierarchicalDocumentSymbolSupport = true },
+                diagnostic = new { dynamicRegistration = false, relatedDocumentSupport = false }
             }
         }
     };

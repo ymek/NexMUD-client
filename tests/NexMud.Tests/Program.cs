@@ -676,6 +676,10 @@ public static class Program
         await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
         await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
         await RunAsync("Studio language host rehydrates unsaved documents after restart", Phase6StudioLanguageHostTests.RehydratesUnsavedDocumentsAfterTransportRestart);
+        await RunAsync("Studio language host routes requests and profile diagnostics", Phase6StudioLanguageHostTests.RoutesRequestsDiagnosticsAndProfileLifecycle);
+        await RunAsync("bundled TypeScript language service resolves project dependencies and live diagnostics", Phase6StudioLanguageHostTests.BundledLanguageServerUsesProjectTypesAndReportsLiveDiagnostics);
+        await RunAsync("Monaco language-server requests are allow-listed", Phase6StudioLanguageHostTests.LanguageServerRequestsAreAllowListed);
+        await RunAsync("Studio language host rejects document URI traversal", Phase6StudioLanguageHostTests.UriValidationRejectsTraversal);
         await RunAsync("Studio language host maps script source language ids", Phase6StudioLanguageHostTests.LanguageIdsFollowScriptSourceKinds);
 
         await RunAsync("script package install uses bundled pnpm with lifecycle scripts disabled", ScriptPackageInstallUsesControlledPnpm);
