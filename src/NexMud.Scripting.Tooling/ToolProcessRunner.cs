@@ -24,30 +24,12 @@ public interface IToolProcessRunner
 
 public sealed class ToolProcessRunner : IToolProcessRunner
 {
-    private static readonly string[] PreservedEnvironmentVariables = OperatingSystem.IsWindows()
-        ? ["HOME", "USERPROFILE", "TEMP", "TMP", "SystemRoot", "WINDIR", "LANG", "LC_ALL"]
-        : ["HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"];
-
     public async Task<ToolProcessResult> RunAsync(
         ToolProcessRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.Executable);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkingDirectory);
         cancellationToken.ThrowIfCancellationRequested();
-
-        ProcessStartInfo startInfo = new()
-        {
-            FileName = request.Executable,
-            WorkingDirectory = request.WorkingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        foreach (string argument in request.Arguments) startInfo.ArgumentList.Add(argument);
-        SanitizeEnvironment(startInfo, request);
+        ProcessStartInfo startInfo = ToolProcessStartInfoFactory.Create(request);
 
         using Process process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Unable to start tooling process '{request.Executable}'.");
@@ -69,6 +51,46 @@ public sealed class ToolProcessRunner : IToolProcessRunner
             process.ExitCode,
             await stdout.ConfigureAwait(false),
             await stderr.ConfigureAwait(false));
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // Cancellation remains authoritative even if the process exited concurrently.
+        }
+    }
+}
+
+public static class ToolProcessStartInfoFactory
+{
+    private static readonly string[] PreservedEnvironmentVariables = OperatingSystem.IsWindows()
+        ? ["HOME", "USERPROFILE", "TEMP", "TMP", "SystemRoot", "WINDIR", "LANG", "LC_ALL"]
+        : ["HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"];
+
+    public static ProcessStartInfo Create(ToolProcessRequest request, bool redirectStandardInput = false)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Executable);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkingDirectory);
+
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = request.Executable,
+            WorkingDirectory = request.WorkingDirectory,
+            RedirectStandardInput = redirectStandardInput,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        foreach (string argument in request.Arguments) startInfo.ArgumentList.Add(argument);
+        SanitizeEnvironment(startInfo, request);
+        return startInfo;
     }
 
     private static void SanitizeEnvironment(ProcessStartInfo startInfo, ToolProcessRequest request)
@@ -105,18 +127,6 @@ public sealed class ToolProcessRunner : IToolProcessRunner
                 throw new ArgumentException($"Invalid tooling environment variable name '{name}'.", nameof(request));
             if (value is null) startInfo.Environment.Remove(name);
             else startInfo.Environment[name] = value;
-        }
-    }
-
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-        }
-        catch
-        {
-            // Cancellation remains authoritative even if the process exited concurrently.
         }
     }
 }
