@@ -804,7 +804,7 @@
           }
         }
       },
-      "NexMUD/0.31.0": {
+      "NexMUD/0.32.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v10.0",
         "dependencies": {
@@ -923,11 +923,22 @@
           "bin/placeholder/NexMud.Scripting.Jint.dll": {}
         }
       },
+      "NexMud.Scripting.Tooling/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v10.0",
+        "compile": {
+          "bin/placeholder/NexMud.Scripting.Tooling.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/NexMud.Scripting.Tooling.dll": {}
+        }
+      },
       "NexMud.Scripting.TypeScript/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v10.0",
         "dependencies": {
-          "NexMud.Scripting": "1.0.0"
+          "NexMud.Scripting": "1.0.0",
+          "NexMud.Scripting.Tooling": "1.0.0"
         },
         "compile": {
           "bin/placeholder/NexMud.Scripting.TypeScript.dll": {}
@@ -1901,7 +1912,7 @@
         "tmds.dbus.protocol.nuspec"
       ]
     },
-    "NexMUD/0.31.0": {
+    "NexMUD/0.32.0": {
       "type": "project",
       "path": "../../src/NexMud.Gui/NexMud.Gui.csproj",
       "msbuildProject": "../../src/NexMud.Gui/NexMud.Gui.csproj"
@@ -1941,6 +1952,11 @@
       "path": "../../src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj",
       "msbuildProject": "../../src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj"
     },
+    "NexMud.Scripting.Tooling/1.0.0": {
+      "type": "project",
+      "path": "../../src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj",
+      "msbuildProject": "../../src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj"
+    },
     "NexMud.Scripting.TypeScript/1.0.0": {
       "type": "project",
       "path": "../../src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj",
@@ -1954,7 +1970,7 @@
   },
   "projectFileDependencyGroups": {
     "net10.0": [
-      "NexMUD >= 0.31.0",
+      "NexMUD >= 0.32.0",
       "NexMud.Adapters >= 1.0.0",
       "NexMud.Client >= 1.0.0",
       "NexMud.Contracts >= 1.0.0",
@@ -1962,6 +1978,7 @@
       "NexMud.Jev >= 1.0.0",
       "NexMud.Scripting >= 1.0.0",
       "NexMud.Scripting.Jint >= 1.0.0",
+      "NexMud.Scripting.Tooling >= 1.0.0",
       "NexMud.Scripting.TypeScript >= 1.0.0",
       "NexMud.Transport >= 1.0.0"
     ]
@@ -2012,6 +2029,9 @@
             },
             "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj": {
               "projectPath": "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj"
+            },
+            "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj": {
+              "projectPath": "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj"
             },
             "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj": {
               "projectPath": "/Users/_m/src/NexMUD-client/src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj"

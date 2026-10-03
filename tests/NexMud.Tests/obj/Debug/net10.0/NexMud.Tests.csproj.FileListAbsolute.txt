@@ -336,3 +336,5 @@
 /Users/_m/src/NexMUD-client/tests/NexMud.Tests/obj/Debug/net10.0/NexMud.Tests.pdb
 /Users/_m/src/NexMUD-client/tests/NexMud.Tests/obj/Debug/net10.0/NexMud.Tests.genruntimeconfig.cache
 /Users/_m/src/NexMUD-client/tests/NexMud.Tests/obj/Debug/net10.0/ref/NexMud.Tests.dll
+/Users/_m/src/NexMUD-client/tests/NexMud.Tests/bin/Debug/net10.0/NexMud.Scripting.Tooling.dll
+/Users/_m/src/NexMUD-client/tests/NexMud.Tests/bin/Debug/net10.0/NexMud.Scripting.Tooling.pdb

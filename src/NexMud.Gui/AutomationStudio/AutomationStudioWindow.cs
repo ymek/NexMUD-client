@@ -94,6 +94,7 @@ internal sealed class AutomationStudioWindow : Window
     private IReadOnlyList<ScriptPackageSnapshot> _packages = [];
     private ScriptPackageSnapshot? _activePackage;
     private bool _bottomCollapsed;
+    private bool _packageOperationRunning;
     private bool _refreshingProfiles;
     private bool _refreshingNavigator;
     private bool _closeApproved;
@@ -383,6 +384,9 @@ internal sealed class AutomationStudioWindow : Window
         commands.Children.Add(Button("New Package", CreatePackageAsync));
         commands.Children.Add(Button("New TS", () => CreateScriptFileAsync(".ts")));
         commands.Children.Add(Button("Build", BuildActivePackageAsync));
+        Button packages = UiTheme.QuietButton("Packages");
+        packages.Click += (_, _) => ShowPackageOperationsMenu(packages);
+        commands.Children.Add(packages);
         commands.Children.Add(Button("Run", RunFunctionAsync));
         commands.Children.Add(Button("Search", SearchAsync));
         _bottomToggle = Button(_bottomCollapsed ? "Panel ▴" : "Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
@@ -392,6 +396,25 @@ internal sealed class AutomationStudioWindow : Window
         Button palette = Button("Quick Open  ⌘P", QuickOpenAsync);
         Grid.SetColumn(palette, 3); grid.Children.Add(palette);
         return grid;
+    }
+
+    private void ShowPackageOperationsMenu(Button anchor)
+    {
+        ContextMenu menu = new();
+        MenuItem restore = new() { Header = "Restore from Lockfile" };
+        restore.Click += async (_, _) => await RestorePackagesAsync().ConfigureAwait(true);
+        MenuItem install = new() { Header = "Install / Resolve" };
+        install.Click += async (_, _) => await InstallPackagesAsync().ConfigureAwait(true);
+        MenuItem update = new() { Header = "Update All" };
+        update.Click += async (_, _) => await UpdatePackagesAsync().ConfigureAwait(true);
+        MenuItem clean = new() { Header = "Clean Generated Artifacts" };
+        clean.Click += async (_, _) => await CleanPackagesAsync().ConfigureAwait(true);
+        menu.Items.Add(restore);
+        menu.Items.Add(install);
+        menu.Items.Add(update);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(clean);
+        menu.Open(anchor);
     }
 
     private Control BuildExternalConflictBar()
@@ -1064,6 +1087,16 @@ internal sealed class AutomationStudioWindow : Window
         reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
         menu.Items.Add(folder);
         menu.Items.Add(reveal);
+        if (node.PackageId is { } packageId)
+        {
+            menu.Items.Add(new Separator());
+            MenuItem update = new() { Header = "Update Dependencies" };
+            update.Click += async (_, _) => await UpdatePackagesAsync(packageId).ConfigureAwait(true);
+            MenuItem clean = new() { Header = "Clean Generated Artifacts" };
+            clean.Click += async (_, _) => await CleanPackagesAsync(packageId).ConfigureAwait(true);
+            menu.Items.Add(update);
+            menu.Items.Add(clean);
+        }
         menu.Open(_organizeButton);
     }
 
@@ -1774,6 +1807,70 @@ internal sealed class AutomationStudioWindow : Window
         return picked?.FunctionRef;
     }
 
+    private Task RestorePackagesAsync() =>
+        RunPackageOperationAsync(
+            "Restore",
+            () => _runtime.ScriptPackages.RestoreAsync(SelectedProfileId, _cts.Token));
+
+    private Task InstallPackagesAsync() =>
+        RunPackageOperationAsync(
+            "Install",
+            () => _runtime.ScriptPackages.InstallAsync(SelectedProfileId, _cts.Token));
+
+    private Task UpdatePackagesAsync(string? packageId = null) =>
+        RunPackageOperationAsync(
+            packageId is null ? "Update all" : $"Update {packageId}",
+            () => _runtime.ScriptPackages.UpdateAsync(SelectedProfileId, packageId, _cts.Token));
+
+    private Task CleanPackagesAsync(string? packageId = null) =>
+        RunPackageOperationAsync(
+            packageId is null ? "Clean workspace" : $"Clean {packageId}",
+            () => _runtime.ScriptPackages.CleanAsync(SelectedProfileId, packageId, _cts.Token));
+
+    private async Task RunPackageOperationAsync(
+        string label,
+        Func<Task<ScriptPackageOperationResult>> operation)
+    {
+        if (_packageOperationRunning)
+        {
+            AddProblem("Packages", "A package-manager operation is already running.");
+            return;
+        }
+
+        _packageOperationRunning = true;
+        if (_bottomCollapsed) ToggleBottom();
+        if (_bottom.Items.Count > 1) _bottom.SelectedIndex = 1;
+        AddConsole($"{label} started…");
+        try
+        {
+            ScriptPackageOperationResult result = await operation().ConfigureAwait(true);
+            foreach (string line in result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                AddConsole(line);
+            foreach (string line in result.StandardError.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                AddConsole($"stderr: {line}");
+
+            if (!result.Success)
+            {
+                AddProblem("Packages", $"{result.Code}: {result.Message}");
+                return;
+            }
+
+            AddConsole($"{label} completed · {result.Message}");
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            AddProblem("Packages", exception.Message);
+        }
+        finally
+        {
+            _packageOperationRunning = false;
+        }
+    }
+
     private async Task BuildActivePackageAsync()
     {
         if (_activePackage is null) { AddProblem("Build", "Select a script package first."); return; }
@@ -1833,7 +1930,8 @@ internal sealed class AutomationStudioWindow : Window
         string? name = await PromptAsync("New Script Package", "Package name", "New package").ConfigureAwait(true);
         if (string.IsNullOrWhiteSpace(name)) return;
         ScriptPackageDefinition created = await _workspace.CreatePackageAsync(SelectedProfileId, name, cancellationToken: _cts.Token).ConfigureAwait(true);
-        await OpenSourceAsync(created.PackageId, "main.ts").ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        await OpenSourceAsync(created.PackageId, created.Entrypoint).ConfigureAwait(true);
     }
 
     private async Task CreateScriptFileAsync(string extension)

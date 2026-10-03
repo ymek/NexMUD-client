@@ -8,7 +8,7 @@
     ".NETCoreApp,Version=v10.0": {
       "NexMud.Tests/1.0.0": {
         "dependencies": {
-          "NexMUD": "0.31.0",
+          "NexMUD": "0.32.0",
           "NexMud.Adapters": "1.0.0",
           "NexMud.Client": "1.0.0",
           "NexMud.Contracts": "1.0.0",
@@ -16,9 +16,10 @@
           "NexMud.Jev": "1.0.0",
           "NexMud.Scripting": "1.0.0",
           "NexMud.Scripting.Jint": "1.0.0",
+          "NexMud.Scripting.Tooling": "1.0.0",
           "NexMud.Scripting.TypeScript": "1.0.0",
           "NexMud.Transport": "1.0.0",
-          "NexMUD.Reference": "0.31.0.0"
+          "NexMUD.Reference": "0.32.0.0"
         },
         "runtime": {
           "NexMud.Tests.dll": {}
@@ -676,7 +677,7 @@
           }
         }
       },
-      "NexMUD/0.31.0": {
+      "NexMUD/0.32.0": {
         "dependencies": {
           "Avalonia": "12.1.2",
           "Avalonia.Controls.WebView": "12.1.0",
@@ -778,9 +779,18 @@
           }
         }
       },
+      "NexMud.Scripting.Tooling/1.0.0": {
+        "runtime": {
+          "NexMud.Scripting.Tooling.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
       "NexMud.Scripting.TypeScript/1.0.0": {
         "dependencies": {
-          "NexMud.Scripting": "1.0.0"
+          "NexMud.Scripting": "1.0.0",
+          "NexMud.Scripting.Tooling": "1.0.0"
         },
         "runtime": {
           "NexMud.Scripting.TypeScript.dll": {
@@ -801,11 +811,11 @@
           }
         }
       },
-      "NexMUD.Reference/0.31.0.0": {
+      "NexMUD.Reference/0.32.0.0": {
         "runtime": {
           "NexMUD.dll": {
-            "assemblyVersion": "0.31.0.0",
-            "fileVersion": "0.31.0.0"
+            "assemblyVersion": "0.32.0.0",
+            "fileVersion": "0.32.0.0"
           }
         }
       }
@@ -1034,7 +1044,7 @@
       "path": "tmds.dbus.protocol/0.94.1",
       "hashPath": "tmds.dbus.protocol.0.94.1.nupkg.sha512"
     },
-    "NexMUD/0.31.0": {
+    "NexMUD/0.32.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""
@@ -1074,6 +1084,11 @@
       "serviceable": false,
       "sha512": ""
     },
+    "NexMud.Scripting.Tooling/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
     "NexMud.Scripting.TypeScript/1.0.0": {
       "type": "project",
       "serviceable": false,
@@ -1084,7 +1099,7 @@
       "serviceable": false,
       "sha512": ""
     },
-    "NexMUD.Reference/0.31.0.0": {
+    "NexMUD.Reference/0.32.0.0": {
       "type": "reference",
       "serviceable": false,
       "sha512": ""
