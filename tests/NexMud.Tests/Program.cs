@@ -528,6 +528,40 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio text models detect external conflicts without losing editor authority", () =>
+        {
+            var registry = new NexMud.Gui.AutomationStudio.StudioTextModelRegistry();
+            const string uri = "nexmud://profile/default/package/tools/src/main.ts";
+            registry.Track(uri, "default", "tools", "src/main.ts", "export const value = 1;\n");
+
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 1;\n"));
+            Assert.False(registry.MatchesBaseline(uri, "export const value = 2;\n"));
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is not null);
+
+            registry.KeepEditorVersion(uri);
+            Assert.True(registry.CanOverwriteExternalChange(uri));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            Assert.False(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 3;\n"));
+            Assert.False(registry.CanOverwriteExternalChange(uri));
+
+            registry.MarkSaved(uri, "export const value = 3;\n");
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 3;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            return Task.CompletedTask;
+        });
+
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
     }

@@ -10,6 +10,12 @@ public sealed record ScriptWorkspaceEntry(
 
 public sealed partial class ScriptWorkspaceService
 {
+    public ScriptWorkspaceWatcher WatchProfile(string profileId)
+    {
+        profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
+        return new ScriptWorkspaceWatcher(profileId, GetScriptsRoot(profileId));
+    }
+
     public Task<IReadOnlyList<ScriptWorkspaceEntry>> ListEntriesAsync(
         string profileId,
         string packageId,
