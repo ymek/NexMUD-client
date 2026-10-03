@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using NexMud.Adapters.Avendar;
 using NexMud.Adapters.Observation;
@@ -663,6 +665,11 @@ public static class Program
             Assert.True(cancelled);
             Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5), "Cancelled tooling process did not terminate promptly.");
         });
+
+        await RunAsync("script package workspace migrates legacy manifest without source loss", ScriptPackageWorkspaceMigratesLegacyManifest);
+        await RunAsync("script package workspace preserves existing package json", ScriptPackageWorkspacePreservesExistingPackageJson);
+        await RunAsync("script package migration rejects unapproved legacy capabilities", ScriptPackageMigrationRejectsUnapprovedCapabilities);
+        await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
@@ -8058,6 +8065,136 @@ public static class Program
             };
             return Task.FromResult(response);
         }
+    }
+
+    private static async Task ScriptPackageWorkspaceMigratesLegacyManifest()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-workspace-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "combat-tools");
+        Directory.CreateDirectory(packageRoot);
+        const string source = "export const preserved = true;\n";
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "main.ts"), source);
+        ScriptPackageDefinition legacy = new(
+            "legacy.combat",
+            "Combat Tools",
+            "2.3.4",
+            "main.ts",
+            ScriptCapability.ReadState | ScriptCapability.SendCommands | ScriptCapability.Log,
+            true);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }));
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult first =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(first.Success);
+            Assert.Equal(1, first.MigratedPackageCount);
+            ScriptPackageCatalogEntry package = Assert.Single(first.Packages);
+            Assert.Equal("legacy.combat", package.Document.NexMud.Id);
+            Assert.Equal("combat-tools", package.Document.Name);
+            Assert.Equal("2.3.4", package.Document.Version);
+            Assert.Equal("./main.ts", package.Document.NexMud.Entry);
+            Assert.True(package.Document.NexMud.Permissions.Contains("state.read"));
+            Assert.True(package.Document.NexMud.Permissions.Contains("commands.send"));
+            Assert.True(package.Enabled);
+            Assert.Equal(source, await File.ReadAllTextAsync(Path.Combine(packageRoot, "main.ts")));
+            Assert.True(File.Exists(Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName)));
+            Assert.True(File.Exists(Path.Combine(root, ScriptPackageWorkspaceMigrator.WorkspaceFileName)));
+            Assert.True((await File.ReadAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.NpmRcFileName)))
+                .Contains("ignore-scripts=true", StringComparison.Ordinal));
+
+            string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+            string firstPackageJson = await File.ReadAllTextAsync(packageJsonPath);
+            ScriptPackageWorkspaceState state = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.True(state.Packages["legacy.combat"].Enabled);
+
+            ScriptPackageWorkspaceMigrationResult second =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(second.Success);
+            Assert.Equal(0, second.MigratedPackageCount);
+            Assert.Equal(firstPackageJson, await File.ReadAllTextAsync(packageJsonPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageWorkspacePreservesExistingPackageJson()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-existing-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "existing");
+        Directory.CreateDirectory(packageRoot);
+        ScriptPackageDocument created = ScriptPackageDocument.CreateNew("existing", "pkg_existing", "12.8.1");
+        JsonObject json = created.Root;
+        json["x-nexmud-test"] = new JsonObject { ["preserve"] = true };
+        string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+        string original = json.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + Environment.NewLine;
+        await File.WriteAllTextAsync(packageJsonPath, original);
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult result =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(result.Success);
+            Assert.Equal(0, result.MigratedPackageCount);
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+            ScriptPackageWorkspaceState state = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.False(state.Packages["pkg_existing"].Enabled);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageMigrationRejectsUnapprovedCapabilities()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-unsafe-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "unsafe");
+        Directory.CreateDirectory(packageRoot);
+        string sourcePath = Path.Combine(packageRoot, "main.ts");
+        await File.WriteAllTextAsync(sourcePath, "export const preserved = true;\n");
+        ScriptPackageDefinition legacy = new(
+            "legacy.unsafe",
+            "Unsafe",
+            "1.0.0",
+            "main.ts",
+            ScriptCapability.ReadState | ScriptCapability.NetworkAccess,
+            false);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }));
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult result =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.False(result.Success);
+            Assert.Equal(0, result.MigratedPackageCount);
+            Assert.False(File.Exists(Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName)));
+            Assert.True(File.Exists(sourcePath), "Migration failure must never remove package source.");
+            Assert.True(Assert.Single(result.Issues).Message.Contains("NetworkAccess", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task ScriptPackageDependencySourcesAreConstrained()
+    {
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier("^1.2.3"));
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier(">=1.0.0 <2.0.0"));
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier("workspace:*"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("https://example.test/pkg.tgz"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("git+ssh://example.test/repo.git"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("file:../../outside"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("link:../outside"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("latest"));
+        return Task.CompletedTask;
     }
 
     private static Task<int> RunToolProcessProbeAsync(string[] args)
