@@ -34,16 +34,21 @@ public sealed class ScriptWorkspaceWatcher : IDisposable
 
     private readonly string _profileId;
     private readonly string _root;
+    private readonly Func<string, string> _packageIdResolver;
     private readonly FileSystemWatcher _watcher;
     private readonly Timer _timer;
     private readonly object _gate = new();
     private readonly Dictionary<string, ScriptWorkspaceExternalChange> _pending = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
-    internal ScriptWorkspaceWatcher(string profileId, string root)
+    internal ScriptWorkspaceWatcher(
+        string profileId,
+        string root,
+        Func<string, string>? packageIdResolver = null)
     {
         _profileId = profileId;
         _root = Path.GetFullPath(root);
+        _packageIdResolver = packageIdResolver ?? (directoryName => directoryName);
         Directory.CreateDirectory(_root);
 
         _watcher = new FileSystemWatcher(_root)
@@ -149,7 +154,13 @@ public sealed class ScriptWorkspaceWatcher : IDisposable
         string relative = Path.GetRelativePath(_root, canonical).Replace('\\', '/');
         if (relative is "." or ".." || relative.StartsWith("../", StringComparison.Ordinal)) return false;
         int slash = relative.IndexOf('/');
-        packageId = slash < 0 ? relative : relative[..slash];
+        string directoryName = slash < 0 ? relative : relative[..slash];
+        if (string.IsNullOrWhiteSpace(directoryName) ||
+            directoryName.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+            directoryName.Equals(ScriptPackageWorkspaceMigrator.NexMudDirectoryName, StringComparison.OrdinalIgnoreCase))
+            return false;
+        try { packageId = _packageIdResolver(directoryName); }
+        catch { packageId = directoryName; }
         relativePath = slash < 0 ? string.Empty : relative[(slash + 1)..];
         return !string.IsNullOrWhiteSpace(packageId) && !IsHidden(relativePath);
     }

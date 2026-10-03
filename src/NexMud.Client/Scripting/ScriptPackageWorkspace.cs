@@ -13,7 +13,8 @@ public sealed record ScriptPackageNexMudMetadata(
     string Id,
     string ApiVersion,
     string Entry,
-    IReadOnlyList<string> Permissions);
+    IReadOnlyList<string> Permissions,
+    string? DisplayName = null);
 
 public sealed record ScriptPackageRuntimeState(bool Enabled = false);
 
@@ -91,7 +92,8 @@ public sealed partial class ScriptPackageDocument
         string entry = NormalizeEntry(RequireString(nexml, "entry"));
         IReadOnlyList<string> permissions = ReadStringArray(nexml, "permissions");
         _ = ScriptPackagePermissionCodec.Decode(permissions);
-        NexMud = new ScriptPackageNexMudMetadata(id, apiVersion, entry, permissions);
+        string? displayName = ReadOptionalString(nexml, "displayName");
+        NexMud = new ScriptPackageNexMudMetadata(id, apiVersion, entry, permissions, displayName);
 
         Dependencies = ReadDependencyMap(root, "dependencies");
         DevDependencies = ReadDependencyMap(root, "devDependencies");
@@ -132,7 +134,8 @@ public sealed partial class ScriptPackageDocument
                                                 ScriptCapability.CreateTimers |
                                                 ScriptCapability.ReadScriptStorage |
                                                 ScriptCapability.WriteScriptStorage |
-                                                ScriptCapability.Log)
+                                                ScriptCapability.Log,
+        string? displayName = null)
     {
         ValidatePackageName(packageName);
         packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
@@ -156,6 +159,8 @@ public sealed partial class ScriptPackageDocument
                 ["permissions"] = CreatePermissionArray(permissions)
             }
         };
+        if (!string.IsNullOrWhiteSpace(displayName))
+            ((JsonObject)root["nexmud"]!)["displayName"] = displayName.Trim();
         return new ScriptPackageDocument(root);
     }
 
@@ -171,13 +176,14 @@ public sealed partial class ScriptPackageDocument
             normalized.PackageId,
             bundledPnpmVersion,
             "./" + normalized.Entrypoint,
-            normalized.Capabilities).WithVersion(normalized.Version);
+            normalized.Capabilities,
+            normalized.Name).WithVersion(normalized.Version);
     }
 
     public ScriptPackageDefinition ToRuntimeDefinition(bool enabled) =>
         new(
             NexMud.Id,
-            Name,
+            NexMud.DisplayName ?? Name,
             Version,
             NexMud.Entry[2..],
             ScriptPackagePermissionCodec.Decode(NexMud.Permissions),
@@ -198,6 +204,18 @@ public sealed partial class ScriptPackageDocument
             string.IsNullOrWhiteSpace(text))
         {
             throw new InvalidOperationException($"package.json property '{propertyName}' must be a non-empty string.");
+        }
+        return text.Trim();
+    }
+
+    private static string? ReadOptionalString(JsonObject root, string propertyName)
+    {
+        if (root[propertyName] is null) return null;
+        if (root[propertyName] is not JsonValue value ||
+            !value.TryGetValue<string>(out string? text) ||
+            string.IsNullOrWhiteSpace(text))
+        {
+            throw new InvalidOperationException($"package.json property '{propertyName}' must be a non-empty string when present.");
         }
         return text.Trim();
     }
@@ -379,6 +397,7 @@ public static partial class ScriptPackageDependencyValidator
 
 public static class ScriptPackageWorkspaceMigrator
 {
+    public const string ManagedPnpmVersion = "12.8.1";
     public const string PackageJsonFileName = "package.json";
     public const string LegacyManifestFileName = "manifest.json";
     public const string WorkspaceFileName = "pnpm-workspace.yaml";
@@ -528,6 +547,23 @@ update-notifier=false
         {
             [packageId] = new ScriptPackageRuntimeState(enabled)
         };
+        await AtomicWriteAsync(
+            statePath,
+            JsonSerializer.Serialize(new ScriptPackageWorkspaceState(1, packages), JsonOptions) + Environment.NewLine,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task RemoveRuntimeStateAsync(
+        string scriptsRoot,
+        string packageId,
+        CancellationToken cancellationToken = default)
+    {
+        packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
+        string statePath = Path.Combine(Path.GetFullPath(scriptsRoot), NexMudDirectoryName, WorkspaceStateFileName);
+        (ScriptPackageWorkspaceState state, bool exists) = await LoadStateAsync(statePath, cancellationToken).ConfigureAwait(false);
+        if (!exists) return;
+        Dictionary<string, ScriptPackageRuntimeState> packages = new(state.Packages, StringComparer.OrdinalIgnoreCase);
+        if (!packages.Remove(packageId)) return;
         await AtomicWriteAsync(
             statePath,
             JsonSerializer.Serialize(new ScriptPackageWorkspaceState(1, packages), JsonOptions) + Environment.NewLine,

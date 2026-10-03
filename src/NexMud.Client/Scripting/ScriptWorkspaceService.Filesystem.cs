@@ -13,7 +13,10 @@ public sealed partial class ScriptWorkspaceService
     public ScriptWorkspaceWatcher WatchProfile(string profileId)
     {
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
-        return new ScriptWorkspaceWatcher(profileId, GetScriptsRoot(profileId));
+        return new ScriptWorkspaceWatcher(
+            profileId,
+            GetScriptsRoot(profileId),
+            directoryName => ResolvePackageIdFromDirectory(profileId, directoryName));
     }
 
     public Task<IReadOnlyList<ScriptWorkspaceEntry>> ListEntriesAsync(

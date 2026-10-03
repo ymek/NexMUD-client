@@ -670,6 +670,8 @@ public static class Program
         await RunAsync("script package workspace preserves existing package json", ScriptPackageWorkspacePreservesExistingPackageJson);
         await RunAsync("script package migration rejects unapproved legacy capabilities", ScriptPackageMigrationRejectsUnapprovedCapabilities);
         await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
+        await RunAsync("script package runtime state remains separate from package json", ScriptPackageRuntimeStateIsSeparate);
+        await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
 
         await RunAsync("script package install uses bundled pnpm with lifecycle scripts disabled", ScriptPackageInstallUsesControlledPnpm);
         await RunAsync("script package restore requires and freezes the workspace lockfile", ScriptPackageRestoreUsesFrozenLockfile);
@@ -8199,6 +8201,56 @@ public static class Program
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("file:../../outside"));
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("link:../outside"));
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("latest"));
+        return Task.CompletedTask;
+    }
+
+    private static async Task ScriptPackageRuntimeStateIsSeparate()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-state-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "tools");
+        Directory.CreateDirectory(packageRoot);
+        ScriptPackageDocument package = ScriptPackageDocument.CreateNew(
+            "tools",
+            "pkg_tools",
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion);
+        string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+        await File.WriteAllTextAsync(packageJsonPath, package.ToJson());
+        string original = await File.ReadAllTextAsync(packageJsonPath);
+
+        try
+        {
+            _ = await ScriptPackageWorkspaceMigrator.EnsureAsync(
+                root,
+                ScriptPackageWorkspaceMigrator.ManagedPnpmVersion);
+            await ScriptPackageWorkspaceMigrator.WriteRuntimeStateAsync(root, "pkg_tools", enabled: true);
+            ScriptPackageWorkspaceState enabled = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.True(enabled.Packages["pkg_tools"].Enabled);
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+
+            await ScriptPackageWorkspaceMigrator.RemoveRuntimeStateAsync(root, "pkg_tools");
+            ScriptPackageWorkspaceState removed = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.False(removed.Packages.ContainsKey("pkg_tools"));
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task ScriptPackageRuntimeDefinitionNormalizesEntrypoint()
+    {
+        ScriptPackageDocument package = ScriptPackageDocument.CreateNew(
+            "tools",
+            "pkg_tools",
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion,
+            displayName: "Tools Package");
+        ScriptPackageDefinition definition = package.ToRuntimeDefinition(enabled: true);
+        Assert.Equal("pkg_tools", definition.PackageId);
+        Assert.Equal("Tools Package", definition.Name);
+        Assert.Equal("src/main.ts", definition.Entrypoint);
+        Assert.True(definition.Enabled);
+        Assert.True(definition.Capabilities.HasFlag(ScriptCapability.SendCommands));
         return Task.CompletedTask;
     }
 
