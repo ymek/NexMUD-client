@@ -252,8 +252,6 @@ internal sealed partial class AutomationStudioWindow
 
     private void ResetTestsPanel(string message)
     {
-        _diagnostics.ResolveSourcesByPrefix(SelectedProfileId, "tests:");
-        RefreshProblems();
         _selectedTestFile = null;
         _selectedTestPackageId = null;
         _selectedTestName = null;
