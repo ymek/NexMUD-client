@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using NexMud.Gui;
 using NexMud.Gui.AutomationStudio;
@@ -94,6 +95,38 @@ internal static class Phase6StudioLanguageHostTests
         Assert.Equal(profileBUri, received?.Uri);
     }
 
+    public static async Task MonacoBridgeRequestsPreserveErrorsAndActivateFallback()
+    {
+        DirectoryInfo? root = new(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "NexMud.slnx")))
+            root = root.Parent;
+        if (root is null) throw new InvalidOperationException("Could not locate NexMUD repository root for Monaco bridge tests.");
+
+        string bridgePath = Path.Combine(root.FullName, "src", "NexMud.Gui", "Assets", "Monaco", "nexmud-editor-bridge.js");
+        string testPath = Path.Combine(root.FullName, "tests", "NexMud.Tests", "monaco-bridge.test.cjs");
+        string nodePath = new ToolchainLocator().ResolveRequired(ToolchainComponentNames.Node).FullPath;
+        ProcessStartInfo startInfo = new(nodePath)
+        {
+            WorkingDirectory = root.FullName,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add(testPath);
+        startInfo.ArgumentList.Add(bridgePath);
+        using Process process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to start bundled Node.js for Monaco bridge tests.");
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        string stdout = await output.ConfigureAwait(false);
+        string stderr = await error.ConfigureAwait(false);
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"Monaco bridge tests failed ({process.ExitCode}).\n{stdout}{stderr}");
+        if (!stdout.Contains("Monaco bridge request/state tests passed", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Monaco bridge tests did not report success.\n{stdout}{stderr}");
+    }
+
     public static Task LanguageServerRequestsAreAllowListed()
     {
         foreach (string method in new[]
@@ -116,6 +149,41 @@ internal static class Phase6StudioLanguageHostTests
         return Task.CompletedTask;
     }
 
+    public static Task LanguageServerErrorsPreserveJsonRpcDetails()
+    {
+        JsonElement data = JsonSerializer.SerializeToElement(new { reason = "missing dependency" });
+        MonacoLanguageServerBridgeError mapped = MonacoEditorHost.MapLanguageServerError(
+            new LanguageServerRequestException(-32602, "Invalid request parameters.", data));
+
+        Assert.Equal(-32602, mapped.Code);
+        Assert.Equal("Invalid request parameters.", mapped.Message);
+        Assert.Equal("missing dependency", mapped.Data?.GetProperty("reason").GetString());
+        Assert.Equal(false, mapped.Unavailable);
+
+        MonacoLanguageServerBridgeError cancelled = MonacoEditorHost.MapLanguageServerError(
+            new OperationCanceledException("Profile request was cancelled."));
+        Assert.Equal(false, cancelled.Unavailable);
+        Assert.Equal("Profile request was cancelled.", cancelled.Message);
+
+        MonacoLanguageServerBridgeError timedOut = MonacoEditorHost.MapLanguageServerError(
+            new OperationCanceledException(), hostTimedOut: true);
+        Assert.Equal(true, timedOut.Unavailable);
+        Assert.Equal("TypeScript language service request timed out.", timedOut.Message);
+
+        MonacoLanguageServerBridgeError internalError = MonacoEditorHost.MapLanguageServerError(
+            new InvalidOperationException("Unexpected provider failure."));
+        Assert.Equal(-32603, internalError.Code);
+        Assert.Equal(false, internalError.Unavailable);
+
+        MonacoLanguageServerBridgeError unavailable = MonacoEditorHost.MapLanguageServerError(
+            new LanguageServerUnavailableException("TypeScript language service is not running."));
+        Assert.Equal(true, unavailable.Unavailable);
+        MonacoLanguageServerBridgeError transportFailure = MonacoEditorHost.MapLanguageServerError(
+            new EndOfStreamException("TypeScript language service stopped unexpectedly."));
+        Assert.Equal(true, transportFailure.Unavailable);
+        return Task.CompletedTask;
+    }
+
     public static async Task UriValidationRejectsTraversal()
     {
         string root = Path.Combine(Path.GetTempPath(), "nexmud-lsp-uri-" + Guid.NewGuid().ToString("N"));
@@ -128,6 +196,91 @@ internal static class Phase6StudioLanguageHostTests
         try { await host.OpenDocumentAsync("profile-a", outside, "../outside.ts", 1, ""); }
         catch (ArgumentException) { rejected = true; }
         Assert.Equal(true, rejected);
+    }
+
+    public static async Task LanguageServerCancellationNotifiesServerOnlyForAbandonedRequests()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nexmud-lsp-cancel-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string serverPath = Path.Combine(root, "server.js");
+        await File.WriteAllTextAsync(serverPath, """
+            const fs = require('fs');
+            const readline = require('readline');
+            const input = readline.createInterface({ input: process.stdin });
+            let buffer = Buffer.alloc(0);
+            process.stdin.on('data', chunk => {
+              buffer = Buffer.concat([buffer, chunk]);
+              while (true) {
+                const boundary = buffer.indexOf('\r\n\r\n');
+                if (boundary < 0) return;
+                const header = buffer.subarray(0, boundary).toString();
+                const length = Number(header.match(/Content-Length: (\d+)/i)[1]);
+                if (buffer.length < boundary + 4 + length) return;
+                const message = JSON.parse(buffer.subarray(boundary + 4, boundary + 4 + length).toString());
+                buffer = buffer.subarray(boundary + 4 + length);
+                if (message.method === '$/cancelRequest')
+                  fs.appendFileSync(__dirname + '/cancelled.jsonl', JSON.stringify(message.params.id) + '\n');
+                else if (message.id !== undefined && message.method === 'cancel-write-fails') {
+                  process.stdin.once('close', () => fs.writeFileSync(__dirname + '/cancel-write-ready', 'ready'));
+                  process.stdin.destroy();
+                }
+                else if (message.id !== undefined && message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
+                else if (message.id !== undefined && message.method === 'completed') send({ jsonrpc: '2.0', id: message.id, result: { ok: true } });
+                else if (message.id !== undefined && message.method === 'shutdown') send({ jsonrpc: '2.0', id: message.id, result: null });
+              }
+            });
+            setInterval(() => {}, 1000);
+            function send(message) {
+              const body = Buffer.from(JSON.stringify(message));
+              process.stdout.write('Content-Length: ' + body.length + '\r\n\r\n');
+              process.stdout.write(body);
+            }
+            """).ConfigureAwait(false);
+
+        ToolchainComponentLocation node = new ToolchainLocator().ResolveRequired(ToolchainComponentNames.Node);
+        await using TypeScriptLanguageService service = new(root, new TestToolchainLocator(node, serverPath));
+        try
+        {
+            await service.StartAsync().ConfigureAwait(false);
+            JsonElement completed = await service.RequestAsync("completed", new { }).ConfigureAwait(false);
+            Assert.Equal(true, completed.GetProperty("ok").GetBoolean());
+
+            using CancellationTokenSource cancellation = new();
+            Task<JsonElement> abandoned = service.RequestAsync("abandoned", new { }, cancellation.Token);
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(250));
+            bool wasCancelled = false;
+            try { _ = await abandoned.ConfigureAwait(false); }
+            catch (OperationCanceledException) { wasCancelled = true; }
+            Assert.Equal(true, wasCancelled);
+
+            string cancelledPath = Path.Combine(root, "cancelled.jsonl");
+            DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+            while (!File.Exists(cancelledPath) && DateTime.UtcNow < deadline)
+                await Task.Delay(20).ConfigureAwait(false);
+            string[] cancelledIds = File.Exists(cancelledPath)
+                ? await File.ReadAllLinesAsync(cancelledPath).ConfigureAwait(false)
+                : [];
+            Assert.Equal(1, cancelledIds.Length);
+            Assert.Equal("3", JsonSerializer.Deserialize<string>(cancelledIds[0]));
+
+            using CancellationTokenSource failedWriteCancellation = new();
+            Task<JsonElement> failedWrite = service.RequestAsync("cancel-write-fails", new { }, failedWriteCancellation.Token);
+            string readyPath = Path.Combine(root, "cancel-write-ready");
+            deadline = DateTime.UtcNow.AddSeconds(3);
+            while (!File.Exists(readyPath) && DateTime.UtcNow < deadline)
+                await Task.Delay(20).ConfigureAwait(false);
+            Assert.Equal(true, File.Exists(readyPath));
+            failedWriteCancellation.Cancel();
+            bool originalCancellationPreserved = false;
+            try { _ = await failedWrite.ConfigureAwait(false); }
+            catch (OperationCanceledException) { originalCancellationPreserved = true; }
+            Assert.Equal(true, originalCancellationPreserved);
+        }
+        finally
+        {
+            await service.StopAsync().ConfigureAwait(false);
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     public static async Task BundledLanguageServerUsesProjectTypesAndReportsLiveDiagnostics()
@@ -282,6 +435,20 @@ internal static class Phase6StudioLanguageHostTests
                 throw new InvalidOperationException($"Expected one item, got {items.Length}.");
             return items[0];
         }
+    }
+
+    private sealed class TestToolchainLocator(ToolchainComponentLocation node, string serverPath) : IToolchainLocator
+    {
+        public string Root => Path.GetDirectoryName(serverPath)!;
+        public ToolchainManifest Manifest => new(1, ToolchainPlatform.CurrentPlatform, ToolchainPlatform.CurrentArchitecture,
+            "test", Array.Empty<ToolchainComponentManifest>());
+        public ToolchainComponentLocation ResolveRequired(string componentName) => componentName switch
+        {
+            ToolchainComponentNames.Node => node,
+            ToolchainComponentNames.TypeScript => new ToolchainComponentLocation(
+                ToolchainComponentNames.TypeScript, "test", serverPath, null, false),
+            _ => throw new InvalidOperationException($"Unexpected toolchain component '{componentName}'.")
+        };
     }
 
     private sealed class FakeTransport : IStudioTypeScriptTransport

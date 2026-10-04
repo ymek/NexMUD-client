@@ -675,10 +675,13 @@ public static class Program
         await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
         await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
         await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
+        await RunAsync("language-server cancellation notifies only abandoned requests", Phase6StudioLanguageHostTests.LanguageServerCancellationNotifiesServerOnlyForAbandonedRequests);
         await RunAsync("Studio language host rehydrates unsaved documents after restart", Phase6StudioLanguageHostTests.RehydratesUnsavedDocumentsAfterTransportRestart);
         await RunAsync("Studio language host routes requests and profile diagnostics", Phase6StudioLanguageHostTests.RoutesRequestsDiagnosticsAndProfileLifecycle);
         await RunAsync("bundled TypeScript language service resolves project dependencies and live diagnostics", Phase6StudioLanguageHostTests.BundledLanguageServerUsesProjectTypesAndReportsLiveDiagnostics);
+        await RunAsync("Monaco bridge request errors preserve details and failures activate fallback", Phase6StudioLanguageHostTests.MonacoBridgeRequestsPreserveErrorsAndActivateFallback);
         await RunAsync("Monaco language-server requests are allow-listed", Phase6StudioLanguageHostTests.LanguageServerRequestsAreAllowListed);
+        await RunAsync("Monaco language-server errors preserve JSON-RPC details", Phase6StudioLanguageHostTests.LanguageServerErrorsPreserveJsonRpcDetails);
         await RunAsync("Studio language host rejects document URI traversal", Phase6StudioLanguageHostTests.UriValidationRejectsTraversal);
         await RunAsync("Studio language host maps script source language ids", Phase6StudioLanguageHostTests.LanguageIdsFollowScriptSourceKinds);
 

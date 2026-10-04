@@ -19,6 +19,12 @@ public sealed class LanguageServerRequestException : Exception
     public JsonElement? DataElement { get; }
 }
 
+public sealed class LanguageServerUnavailableException : Exception
+{
+    public LanguageServerUnavailableException(string message, Exception? innerException = null)
+        : base(message, innerException) { }
+}
+
 /// <summary>
 /// Owns one filesystem-aware typescript-language-server process for one Studio profile workspace.
 /// Monaco integration consumes this host through ordinary LSP requests/notifications; the server
@@ -112,15 +118,16 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(method);
         ThrowIfDisposed();
         ToolProcessSession session = _session
-            ?? throw new InvalidOperationException("TypeScript language service has not been started.");
+            ?? throw new LanguageServerUnavailableException("TypeScript language service has not been started.");
         if (session.HasExited)
-            throw new InvalidOperationException("TypeScript language service is not running.");
+            throw new LanguageServerUnavailableException("TypeScript language service is not running.");
 
         string requestId = Interlocked.Increment(ref _nextRequestId).ToString(CultureInfo.InvariantCulture);
         TaskCompletionSource<JsonElement> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_pending.TryAdd(requestId, completion))
             throw new InvalidOperationException("Unable to register a TypeScript language-service request.");
 
+        bool requestSent = false;
         try
         {
             JsonElement message = JsonSerializer.SerializeToElement(new Dictionary<string, object?>
@@ -135,12 +142,23 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
                 message,
                 _writeGate,
                 cancellationToken).ConfigureAwait(false);
+            requestSent = true;
             TimeSpan wait = timeout ?? TimeSpan.FromSeconds(15);
             return await completion.Task.WaitAsync(wait, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            _pending.TryRemove(requestId, out _);
+            if (_pending.TryRemove(requestId, out _) && requestSent)
+            {
+                try
+                {
+                    await NotifyAsync("$/cancelRequest", new { id = requestId }, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort cancellation must not replace the original request outcome.
+                }
+            }
         }
     }
 
@@ -258,8 +276,10 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            FailPending(exception);
-            Failed?.Invoke(exception);
+            LanguageServerUnavailableException unavailable = exception as LanguageServerUnavailableException
+                ?? new LanguageServerUnavailableException("TypeScript language service transport failed.", exception);
+            FailPending(unavailable);
+            Failed?.Invoke(unavailable);
         }
     }
 

@@ -1768,6 +1768,13 @@ internal sealed class AutomationStudioWindow : Window
                 : SelectedProfileId;
             return _typescript.RequestAsync(profileId, method, parameters, cancellationToken);
         };
+        _monaco.LanguageServerRequestFailed += (method, error) => Dispatcher.UIThread.Post(() =>
+        {
+            AddConsole($"TypeScript language service request '{method}' failed ({error.Code}): {error.Message}");
+            if (!error.Unavailable) return;
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(error.Message);
+        });
         _typescript.DiagnosticsPublished += diagnostics => Dispatcher.UIThread.Post(async () =>
         {
             if (!_typescript.IsOpenDocument(SelectedProfileId, diagnostics.Uri)) return;

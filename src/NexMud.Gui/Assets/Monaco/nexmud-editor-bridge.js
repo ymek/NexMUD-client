@@ -44,16 +44,27 @@
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         lspRequests.delete(requestId);
-        handlers.setLanguageServerAvailable({ available: false });
-        reject(new Error('TypeScript language service request timed out.'));
+        const error = new Error('TypeScript language service request timed out.');
+        error.unavailable = true;
+        reject(error);
       }, 25000);
       lspRequests.set(requestId, {
         resolve: value => { clearTimeout(timeout); resolve(value); },
         reject: error => { clearTimeout(timeout); reject(error); }
       });
-      send('lspRequest', { requestId, method, parameters });
-    }).catch(() => {
-      handlers.setLanguageServerAvailable({ available: false });
+      try {
+        if (typeof globalThis.invokeCSharpAction !== 'function')
+          throw new Error('Monaco bridge transport is unavailable.');
+        send('lspRequest', { requestId, method, parameters });
+      } catch (error) {
+        lspRequests.delete(requestId);
+        clearTimeout(timeout);
+        const transportError = error && typeof error === 'object' ? error : new Error(String(error));
+        transportError.unavailable = true;
+        throw transportError;
+      }
+    }).catch(error => {
+      if (error?.unavailable) handlers.setLanguageServerAvailable({ available: false });
       return undefined;
     });
   }
@@ -112,12 +123,12 @@
       references: enabled,
       rename: enabled,
       diagnostics: enabled,
-      documentHighlights: enabled,
-      onTypeFormattingEdits: enabled,
-      codeActions: enabled,
-      inlayHints: enabled,
+      documentHighlights: true,
+      onTypeFormattingEdits: true,
+      codeActions: true,
+      inlayHints: true,
       signatureHelp: enabled,
-      documentRangeFormattingEdits: enabled
+      documentRangeFormattingEdits: true
     };
     monaco.languages.typescript.typescriptDefaults.setModeConfiguration(modeConfiguration);
     monaco.languages.typescript.javascriptDefaults.setModeConfiguration(modeConfiguration);
@@ -292,8 +303,16 @@
       const pending = lspRequests.get(String(payload.requestId));
       if (!pending) return;
       lspRequests.delete(String(payload.requestId));
-      if (payload.error) pending.reject(new Error(String(payload.error)));
-      else pending.resolve(payload.result);
+      if (payload.error) {
+        const details = payload.error;
+        const error = new Error(typeof details === 'string' ? details : String(details.message ?? 'Language service request failed.'));
+        if (typeof details === 'object' && details !== null) {
+          if (Number.isInteger(details.code)) error.code = details.code;
+          if (Object.prototype.hasOwnProperty.call(details, 'data')) error.data = details.data;
+          error.unavailable = details.unavailable === true;
+        }
+        pending.reject(error);
+      } else pending.resolve(payload.result);
     },
     setLanguageServerAvailable(payload) {
       languageServerAvailable = Boolean(payload.available);

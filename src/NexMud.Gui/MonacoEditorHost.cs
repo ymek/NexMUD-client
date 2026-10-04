@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Avalonia.Controls;
 using Avalonia.Layout;
+using NexMud.Scripting.Tooling;
 using NexMud.Scripting.TypeScript.Declarations;
 
 namespace NexMud.Gui;
@@ -10,6 +11,7 @@ internal sealed record MonacoDocumentChanged(string Uri, int VersionId, int Alte
 internal sealed record MonacoSaveRequested(string? Uri, bool All);
 internal sealed record MonacoSelectionChanged(string Uri, int StartLine, int StartColumn, int EndLine, int EndColumn);
 internal sealed record MonacoEditorFailure(string Message);
+internal sealed record MonacoLanguageServerBridgeError(int Code, string Message, JsonElement? Data, bool Unavailable);
 
 /// <summary>
 /// Narrow versioned bridge around Avalonia NativeWebView. The WebView has editor authority only;
@@ -82,6 +84,7 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
     public event Action<MonacoEditorFailure>? EditorFailed;
     public event Action<string, JsonElement>? EditorCommandInvoked;
     public event Func<string, JsonElement, CancellationToken, Task<JsonElement>>? LanguageServerRequest;
+    public event Action<string, MonacoLanguageServerBridgeError>? LanguageServerRequestFailed;
 
     public Task InitializeAsync()
     {
@@ -177,6 +180,27 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
 
     internal static bool IsAllowedLanguageServerRequest(string method) =>
         AllowedLanguageServerRequests.Contains(method);
+
+    internal static MonacoLanguageServerBridgeError MapLanguageServerError(Exception exception, bool hostTimedOut = false)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception switch
+        {
+            LanguageServerRequestException requestError => new(
+                requestError.Code, requestError.Message, requestError.DataElement, Unavailable: false),
+            LanguageServerUnavailableException => new(-32603, exception.Message, null, Unavailable: true),
+            OperationCanceledException when hostTimedOut => new(
+                -32800, "TypeScript language service request timed out.", null, Unavailable: true),
+            OperationCanceledException => new(
+                -32800, exception.Message.Length == 0 ? "TypeScript language service request was cancelled." : exception.Message,
+                null, Unavailable: false),
+            TimeoutException => new(-32603, exception.Message, null, Unavailable: true),
+            IOException => new(-32603, exception.Message, null, Unavailable: true),
+            ObjectDisposedException => new(-32603, exception.Message, null, Unavailable: true),
+            ToolchainUnavailableException => new(-32603, exception.Message, null, Unavailable: true),
+            _ => new(-32603, exception.Message, null, Unavailable: false)
+        };
+    }
 
     public async Task RevealLocationAsync(string uri, int? line, int? column, CancellationToken cancellationToken = default)
     {
@@ -372,27 +396,28 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         if (requestId.Length == 0) return;
         if (!IsAllowedLanguageServerRequest(method))
         {
-            await SendAsync("lspResponse", new { requestId, error = "Unsupported TypeScript language service request." }).ConfigureAwait(false);
+            MonacoLanguageServerBridgeError error = new(
+                -32601, "Unsupported TypeScript language service request.", null, Unavailable: false);
+            await SendAsync("lspResponse", new { requestId, error }).ConfigureAwait(false);
             return;
         }
         JsonElement parameters = payload.TryGetProperty("parameters", out JsonElement value)
             ? value.Clone()
             : JsonSerializer.SerializeToElement(new { }, JsonOptions);
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(20));
         try
         {
             Func<string, JsonElement, CancellationToken, Task<JsonElement>>? handler = LanguageServerRequest;
-            if (handler is null) throw new InvalidOperationException("TypeScript language service is unavailable.");
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(20));
+            if (handler is null) throw new LanguageServerUnavailableException("TypeScript language service is unavailable.");
             JsonElement result = await handler(method, parameters, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
             await SendAsync("lspResponse", new { requestId, result }).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
-        {
-            await SendAsync("lspResponse", new { requestId, error = "TypeScript language service request timed out." }).ConfigureAwait(false);
-        }
         catch (Exception exception)
         {
-            await SendAsync("lspResponse", new { requestId, error = exception.Message }).ConfigureAwait(false);
+            bool hostTimedOut = exception is OperationCanceledException && timeout.IsCancellationRequested;
+            MonacoLanguageServerBridgeError error = MapLanguageServerError(exception, hostTimedOut);
+            LanguageServerRequestFailed?.Invoke(method, error);
+            await SendAsync("lspResponse", new { requestId, error }).ConfigureAwait(false);
         }
     }
 
