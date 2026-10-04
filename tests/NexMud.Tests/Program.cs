@@ -8395,6 +8395,19 @@ public static class Program
         string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
         string original = json.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + Environment.NewLine;
         await File.WriteAllTextAsync(packageJsonPath, original);
+        ScriptPackageDefinition staleManifest = new(
+            "retired.package",
+            "Retired Package",
+            "0.1.0",
+            "legacy.ts",
+            ScriptCapability.ReadState,
+            true);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(staleManifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                Converters = { new JsonStringEnumConverter() }
+            }));
 
         try
         {
@@ -8402,6 +8415,7 @@ public static class Program
                 await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
             Assert.True(result.Success);
             Assert.Equal(0, result.MigratedPackageCount);
+            Assert.Equal("pkg_existing", Assert.Single(result.Packages).Document.NexMud.Id);
             Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
             ScriptPackageWorkspaceState state = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
             Assert.False(state.Packages["pkg_existing"].Enabled);

@@ -466,7 +466,7 @@ update-notifier=false
 
             try
             {
-                ScriptPackageDefinition? legacy = File.Exists(legacyPath)
+                ScriptPackageDefinition? legacy = !File.Exists(packageJsonPath) && File.Exists(legacyPath)
                     ? await ReadLegacyAsync(legacyPath, cancellationToken).ConfigureAwait(false)
                     : null;
                 ScriptPackageDocument document;
@@ -474,11 +474,6 @@ update-notifier=false
                 if (File.Exists(packageJsonPath))
                 {
                     document = await ScriptPackageDocument.LoadAsync(packageJsonPath, cancellationToken).ConfigureAwait(false);
-                    if (legacy is not null && !document.NexMud.Id.Equals(legacy.PackageId, StringComparison.Ordinal))
-                    {
-                        throw new InvalidOperationException(
-                            $"package.json nexmud.id '{document.NexMud.Id}' does not match legacy package id '{legacy.PackageId}'.");
-                    }
                 }
                 else
                 {
