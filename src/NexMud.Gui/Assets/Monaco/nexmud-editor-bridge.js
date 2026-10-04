@@ -215,13 +215,6 @@
     }));
   }
 
-  function requestSymbols(uriText, requestId) {
-    const model = requireModel(uriText);
-    lspRequest('textDocument/documentSymbol', { textDocument: { uri: model.uri.toString() } })
-      .then(symbols => send('editorCommandInvoked', { command: 'symbolsResult', requestId, uri: uriText, symbols }))
-      .catch(error => send('editorCommandInvoked', { command: 'symbolsResult', requestId, uri: uriText, error: error?.message ?? String(error) }));
-  }
-
   const handlers = {
     initialize(payload) {
       if (payload?.version !== protocolVersion) {
@@ -341,7 +334,6 @@
       const model = requireModel(uriText);
       send('editorCommandInvoked', { command: 'documentContent', requestId: payload.requestId, uri: uriText, content: model.getValue() });
     },
-    requestSymbols(payload) { void requestSymbols(String(payload.uri), payload.requestId); }
   };
 
   globalThis.nexmudEditorBridge = Object.freeze({

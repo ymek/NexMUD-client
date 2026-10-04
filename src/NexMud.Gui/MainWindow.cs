@@ -83,7 +83,6 @@ public sealed class MainWindow : Window
     private readonly NexMudRuntime _runtime;
     private readonly MapperWorkspace _mapperWorkspace;
     private readonly CodexWorkspace _codexWorkspace;
-    private readonly AutomationWorkspace _automationWorkspace;
     private readonly ScriptingWorkspace _scriptingWorkspace;
     private AutomationStudioWindow? _automationStudioWindow;
     private readonly GameplayHudPanel _gameplayHudPanel = new();
@@ -191,11 +190,6 @@ public sealed class MainWindow : Window
             RouteToCodexLocationAsync,
             SubmitCommandAsync,
             _cts.Token);
-        _automationWorkspace = new AutomationWorkspace(runtime, () =>
-        {
-            ShowTool(ToolView.Scripting);
-            return Task.CompletedTask;
-        });
         _scriptingWorkspace = new ScriptingWorkspace(runtime);
         _characterHudPanel = new CharacterHudPanel(ResolveItemInspection);
         _characterWorkspace = new CharacterInventoryWorkspace(ResolveItemInspection, SubmitCommandAsync);
@@ -1978,13 +1972,6 @@ public sealed class MainWindow : Window
                             }
                         });
                         break;
-                    case AutomationKeybindingInvoked _:
-                    case AutomationRuleMatched _:
-                    case AutomationVariableChanged _:
-                    case AutomationWorkflowStateChanged _:
-                    case ScriptLogEmitted { ModuleId: "automation.profile" }:
-                        _automationWorkspace.HandleEvent(envelope.Payload, envelope.Timestamp);
-                        break;
                     case ScriptRuntimeTaskFaulted fault:
                         Dispatcher.UIThread.Post(() => ShowClientMessage(
                             $"{fault.OwnerName} / {fault.Operation}: {fault.Message}",
@@ -2529,11 +2516,7 @@ public sealed class MainWindow : Window
         {
             host.Content = BuildDynamicToolContent(active);
         }
-        if (active == ToolView.Automation)
-        {
-            _automationWorkspace.RefreshSnapshot();
-        }
-        else if (active == ToolView.Scripting)
+        if (active == ToolView.Scripting)
         {
             _scriptingWorkspace.Refresh();
         }
@@ -4263,6 +4246,12 @@ public sealed class MainWindow : Window
 
     private void ShowTool(ToolView requestedView)
     {
+        if (requestedView == ToolView.Automation)
+        {
+            ShowAutomationStudio();
+            return;
+        }
+
         ToolView view = NormalizeToolView(requestedView);
         if (view == ToolView.Context)
         {
@@ -4296,10 +4285,6 @@ public sealed class MainWindow : Window
             case ToolView.Knowledge:
                 _workspaceHost.Content = _codexWorkspace;
                 _codexWorkspace.Activate();
-                break;
-            case ToolView.Automation:
-                _workspaceHost.Content = _automationWorkspace;
-                _automationWorkspace.Activate();
                 break;
             case ToolView.Scripting:
                 _scriptingWorkspace.Refresh();
@@ -4341,9 +4326,6 @@ public sealed class MainWindow : Window
             case ToolView.Knowledge:
                 _codexWorkspace.Deactivate();
                 break;
-            case ToolView.Automation:
-                _automationWorkspace.Deactivate();
-                break;
         }
     }
 
@@ -4380,11 +4362,6 @@ public sealed class MainWindow : Window
                 _worldColumn.Width = new GridLength(50, GridUnitType.Star);
                 _workspaceColumn.MinWidth = 500;
                 _workspaceColumn.Width = new GridLength(50, GridUnitType.Star);
-                break;
-            case ToolView.Automation:
-                _worldColumn.Width = new GridLength(47, GridUnitType.Star);
-                _workspaceColumn.MinWidth = 500;
-                _workspaceColumn.Width = new GridLength(53, GridUnitType.Star);
                 break;
             case ToolView.Scripting:
                 _worldColumn.Width = new GridLength(44, GridUnitType.Star);

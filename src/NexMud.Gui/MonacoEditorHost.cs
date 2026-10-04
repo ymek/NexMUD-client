@@ -215,12 +215,6 @@ internal sealed class MonacoEditorHost : UserControl, IAsyncDisposable
         return payload.TryGetProperty("content", out JsonElement content) ? content.GetString() ?? string.Empty : string.Empty;
     }
 
-    public async Task<JsonElement> RequestSymbolsAsync(string uri, CancellationToken cancellationToken = default)
-    {
-        await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
-        return await RequestAsync("requestSymbols", new { uri }, cancellationToken).ConfigureAwait(false);
-    }
-
     private async Task EnsureReadyAsync(CancellationToken cancellationToken)
     {
         await InitializeAsync().ConfigureAwait(false);

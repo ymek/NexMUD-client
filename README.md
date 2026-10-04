@@ -9,6 +9,9 @@
 - Extended Automation IR with script-backed actions and predicates, including `RunScriptFunction`, capability-derived generated packages, and reference indexing for Studio `Used By` relationships and reference maintenance.
 - Kept Jint as the isolated in-process runtime, added exported-function invocation inside each package engine, and added invocation lifecycle diagnostics for started, waiting, completed, faulted, and cancelled execution.
 - Added build-driven hot reload with last-known-good behavior: successful builds replace the active package while failed builds leave the previously working runtime active.
+- Added package-scoped Vitest discovery and execution with the bundled toolchain, a mocked offline `@nexmud/api`, bounded reports, cancellation, and macOS OS-level filesystem/network sandboxing that fails closed on unsupported hosts.
+- Added profile-aware Problems diagnostics with clickable source locations and clean editor-session restoration across connection-profile switches.
+- Added structured workflow steps with stable identity; legacy DSL is converted only when lossless and otherwise remains preserved.
 - Extended the scripting SDK with read/query Codex access and internal Automation invocation support while retaining capability gating, disabled dynamic string compilation, restricted module resolution, and no unrestricted CLR or filesystem access.
 - Preserved the existing Connection Profiles architecture and left Jev behavior unchanged; the Studio architecture is designed for later Jev integration without coupling Jev into this release.
 - SemVer release: 0.32.0. macOS build: 32000.

@@ -15,8 +15,8 @@ using NexMud.Scripting.Runtime;
 namespace NexMud.Gui.AutomationStudio;
 
 /// <summary>
-/// Automation Studio workbench: Explorer | tabbed document area | contextual Inspector, with a
-/// collapsible bottom panel. Every Automation definition and script source opens as a document tab.
+/// Automation Studio workbench: Explorer and tabbed documents above a collapsible diagnostics panel.
+/// Every automation definition and script source opens as a document tab.
 /// </summary>
 internal sealed partial class AutomationStudioWindow : Window
 {
@@ -35,6 +35,8 @@ internal sealed partial class AutomationStudioWindow : Window
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
     private readonly StudioSessionController _session;
+    private readonly StudioProfileTransitionGate _profileTransitions = new();
+    private readonly StudioDocumentSessionStore _profileDocumentSessions = new();
     private readonly StudioTypeScriptLanguageHost _typescript;
     private readonly AutomationOrganizationStore _organizationStore = new();
     private AutomationOrganizationCatalog _organization = AutomationOrganizationCatalog.Empty;
@@ -43,9 +45,8 @@ internal sealed partial class AutomationStudioWindow : Window
     private readonly StudioTextModelRegistry _textModels = new();
     private readonly HashSet<string> _ignoredMonacoChanges = new(StringComparer.Ordinal);
     private readonly Dictionary<string, MonacoSelectionChanged> _scriptSelections = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string[]> _languageDiagnostics = new(StringComparer.Ordinal);
     private readonly Dictionary<string, StudioLanguageDiagnostics> _pendingLanguageDiagnostics = new(StringComparer.Ordinal);
-    private readonly List<Control> _languageProblemRows = [];
+    private readonly StudioDiagnosticsHub _diagnostics = new();
     private Button? _languageServerRestartButton;
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
     private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
@@ -69,7 +70,6 @@ internal sealed partial class AutomationStudioWindow : Window
     private StudioActivity _activity;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
-    private readonly StackPanel _inspector = new() { Spacing = 8, Margin = new Thickness(12) };
     private readonly StackPanel _problems = new() { Spacing = 3 };
     private readonly StackPanel _console = new() { Spacing = 2 };
     private readonly StackPanel _runtimePanel = new() { Spacing = 3 };
@@ -93,15 +93,14 @@ internal sealed partial class AutomationStudioWindow : Window
     private readonly TextBlock _statusCursor = new() { Foreground = UiTheme.Muted, FontSize = 12 };
     private Border _breadcrumbBar = new();
     private Border _explorerFrame = new();
-    private Border _inspectorFrame = new();
     private GridSplitter _leftSplit = new();
-    private GridSplitter _rightSplit = new();
     private IReadOnlyList<ScriptPackageSnapshot> _packages = [];
     private ScriptPackageSnapshot? _activePackage;
     private bool _bottomCollapsed;
     private bool _packageOperationRunning;
     private bool _refreshingProfiles;
     private bool _refreshingNavigator;
+    private long _navigatorRefreshGeneration;
     private bool _closeApproved;
 
     public AutomationStudioWindow(NexMudRuntime runtime)
@@ -201,7 +200,7 @@ internal sealed partial class AutomationStudioWindow : Window
         {
             ItemsSource = new object[]
             {
-                BottomTab("Problems", _problems), BottomTab("Console", _console), BottomTab("Runtime", _runtimePanel),
+                BottomTab("Problems", _problems), BottomTab("Output", _console), BottomTab("Runtime", _runtimePanel),
                 BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel), BuildTestsTab()
             }
         };
@@ -577,26 +576,139 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         if (_refreshingProfiles) return;
         if (_profile.SelectedItem is not ConnectionProfile selectedProfile) return;
-        if (selectedProfile.Id.Equals(_session.Current.ProfileId, StringComparison.Ordinal)) return;
-        if (_documents.Dirty.Any())
+        long generation = _profileTransitions.Request();
+        string targetProfileId = selectedProfile.Id;
+
+        try
         {
-            AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
-            await RefreshProfilesAsync().ConfigureAwait(true);
-            return;
+            if (!await _profileTransitions.EnterLatestAsync(generation, _cts.Token).ConfigureAwait(true)) return;
+            try
+            {
+                if (!_profileTransitions.IsCurrent(generation) ||
+                    targetProfileId.Equals(_session.Current.ProfileId, StringComparison.Ordinal)) return;
+                if (_documents.Dirty.Any())
+                {
+                    AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
+                    await RefreshProfilesAsync().ConfigureAwait(true);
+                    return;
+                }
+
+                StudioSessionSnapshot previous = _session.Current;
+                _profileDocumentSessions.Capture(previous.ProfileId, _documents.Documents, _documents.Active?.Key);
+                await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
+                if (!_profileTransitions.IsCurrent(generation))
+                {
+                    if (_session.IsCurrent(previous) && _profile.SelectedItem is ConnectionProfile latestProfile &&
+                        latestProfile.Id.Equals(previous.ProfileId, StringComparison.Ordinal) &&
+                        _profileDocumentSessions.TryGet(previous.ProfileId, out StudioDocumentSessionSnapshot snapshot))
+                    {
+                        await RestoreSessionDocumentsAsync(previous, snapshot.Documents, snapshot.ActiveDocumentKey).ConfigureAwait(true);
+                        _profileDocumentSessions.Remove(previous.ProfileId);
+                    }
+                    return;
+                }
+
+                _pendingLanguageDiagnostics.Clear();
+                RefreshProblems();
+                CancelTests("Profile changed.");
+                ResetTestsPanel("Select a package to discover tests.");
+                _session.SwitchProfile(targetProfileId);
+                _diagnostics.ResolveSourcesByPrefix(targetProfileId, "tests:");
+                Interlocked.Increment(ref _navigatorRefreshGeneration);
+                _refreshingNavigator = false;
+                _packages = [];
+                _nodes.Clear();
+                _navigator.ItemsSource = Array.Empty<object>();
+                _activePackage = null;
+                RefreshProblems();
+                await RefreshRuntimePanelAsync().ConfigureAwait(true);
+                _diagnostics.ResolveSourcesByPrefix(previous.ProfileId, "tests:");
+                try
+                {
+                    await _typescript.SwitchProfileAsync(targetProfileId, _cts.Token).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    string message = $"Could not switch TypeScript language service to profile '{targetProfileId}': {exception.Message}";
+                    _diagnostics.ReplaceSource(targetProfileId, "typescript-service",
+                        [new StudioDiagnostic(targetProfileId, "typescript-service", "switch", "Error", message)]);
+                    RefreshProblems();
+                    _pendingLanguageDiagnostics.Clear();
+                    _ = _monaco.SetLanguageServerAvailableAsync(false);
+                    ShowLanguageServerFailure(message);
+                }
+                RestartWorkspaceWatcher();
+                await RefreshNavigatorAsync().ConfigureAwait(true);
+                if (_profileTransitions.IsCurrent(generation) &&
+                    _profileDocumentSessions.TryGet(targetProfileId, out StudioDocumentSessionSnapshot targetSnapshot))
+                {
+                    await RestoreSessionDocumentsAsync(_session.Current, targetSnapshot.Documents, targetSnapshot.ActiveDocumentKey).ConfigureAwait(true);
+                    if (_profileTransitions.IsCurrent(generation)) _profileDocumentSessions.Remove(targetProfileId);
+                }
+            }
+            finally
+            {
+                _profileTransitions.Exit();
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+    }
+
+    private async Task RestoreSessionDocumentsAsync(
+        StudioSessionSnapshot session,
+        IReadOnlyList<StudioDocument> documents,
+        string? activeDocumentKey)
+    {
+        foreach (StudioDocument document in documents)
+        {
+            if (!_session.IsCurrent(session)) return;
+            if (document.IsScript && document.PackageId is not null && document.Path is not null)
+            {
+                ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(
+                    session.ProfileId, document.PackageId, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                if (package is null)
+                {
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because package '{document.PackageId}' no longer exists.");
+                    continue;
+                }
+                try
+                {
+                    await OpenSourceAsync(session, document.PackageId, document.Path).ConfigureAwait(true);
+                }
+                catch (FileNotFoundException)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because its source file no longer exists.");
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because its source directory no longer exists.");
+                }
+            }
+            else
+                _documents.OpenOrFocus(document);
         }
 
-        StudioSessionSnapshot previous = _session.Current;
-        await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
-        _languageDiagnostics.Clear();
-        _pendingLanguageDiagnostics.Clear();
-        RefreshLanguageProblems();
-        CancelTests("Profile changed.");
-        ResetTestsPanel("Select a package to discover tests.");
-        _session.SwitchProfile(selectedProfile.Id);
-        await _typescript.SwitchProfileAsync(selectedProfile.Id, _cts.Token).ConfigureAwait(true);
-        _activePackage = null;
-        RestartWorkspaceWatcher();
-        await RefreshNavigatorAsync().ConfigureAwait(true);
+        if (activeDocumentKey is not null && _documents.Activate(activeDocumentKey))
+        {
+            StudioDocument? activeDocument = _documents.Find(activeDocumentKey);
+            if (activeDocument?.IsScript == true)
+            {
+                if (activeDocument.PackageId is not null)
+                    await SelectPackageAsync(session, activeDocument.PackageId).ConfigureAwait(true);
+                await _monaco.SetActiveDocumentAsync(activeDocumentKey, session.CancellationToken).ConfigureAwait(true);
+            }
+            else
+            {
+                RenderActive();
+            }
+        }
     }
 
     private async Task CloseSessionDocumentsAsync(CancellationToken cancellationToken)
@@ -731,6 +843,11 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task HandleExternalPathDeletedAsync(ScriptWorkspaceExternalChange change)
     {
+        if (string.IsNullOrWhiteSpace(change.RelativePath))
+        {
+            _diagnostics.ResolveSource(change.ProfileId, "tests:" + change.PackageId);
+            RefreshProblems();
+        }
         StudioDocument[] affected = OpenScriptDocuments(change.PackageId, change.RelativePath).ToArray();
         foreach (StudioDocument document in affected)
         {
@@ -851,16 +968,34 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task RefreshNavigatorAsync()
     {
-        _packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
-        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
-        _organization = await _organizationStore.LoadAndReconcileAsync(
-            SelectedProfileId,
-            collections,
-            _cts.Token).ConfigureAwait(true);
-        string? filter = _filter.Text;
+        string profileId = SelectedProfileId;
+        long generation = Interlocked.Increment(ref _navigatorRefreshGeneration);
         _refreshingNavigator = true;
         try
         {
+            IReadOnlyList<ScriptPackageSnapshot> packages = await _workspace.ListPackagesAsync(profileId, _cts.Token).ConfigureAwait(true);
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
+            AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+            AutomationOrganizationCatalog organization = await _organizationStore.LoadAndReconcileAsync(
+                profileId,
+                collections,
+                _cts.Token).ConfigureAwait(true);
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
+            HashSet<string> packageIds = packages
+                .Select(package => package.Definition.PackageId)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (string source in _diagnostics.Snapshot(profileId)
+                         .Select(diagnostic => diagnostic.Source)
+                         .Where(source => source.StartsWith("tests:", StringComparison.Ordinal))
+                         .Distinct(StringComparer.Ordinal))
+            {
+                if (!packageIds.Contains(source["tests:".Length..]))
+                    _diagnostics.ResolveSource(profileId, source);
+            }
+            _packages = packages;
+            _organization = organization;
+            RefreshProblems();
+            string? filter = _filter.Text;
             _nodes.Clear();
             List<object> roots = [];
 
@@ -878,12 +1013,18 @@ internal sealed partial class AutomationStudioWindow : Window
             }
             else if (StudioActivityModel.ShowsScriptPackages(_activity))
             {
-                foreach (ScriptPackageSnapshot package in _packages)
+                foreach (ScriptPackageSnapshot package in packages)
                 {
                     TreeViewItem item = Node(new StudioNode(NodeKind.Package,
                         $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
+                    ContextMenu packageMenu = new();
+                    MenuItem packageToggle = new() { Header = package.Definition.Enabled ? "Disable Package" : "Enable Package" };
+                    packageToggle.Click += async (_, _) => await TogglePackageAsync(package.Definition.PackageId).ConfigureAwait(true);
+                    packageMenu.Items.Add(packageToggle);
+                    item.ContextMenu = packageMenu;
                     IReadOnlyList<ScriptWorkspaceEntry> entries = await _workspace.ListEntriesAsync(
-                        SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+                        profileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+                    if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
                     item.IsExpanded = true;
                     item.ItemsSource = BuildScriptNodes(package.Definition.PackageId, entries, filter);
                     roots.Add(item);
@@ -891,19 +1032,28 @@ internal sealed partial class AutomationStudioWindow : Window
             }
             else if (_activity == StudioActivity.Runtime)
             {
-                foreach (ScriptPackageSnapshot package in _packages)
+                foreach (ScriptPackageSnapshot package in packages)
                     roots.Add(Node(new StudioNode(
                         NodeKind.Package,
                         $"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus}",
                         PackageId: package.Definition.PackageId)));
             }
 
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
             _navigator.ItemsSource = roots;
+            await RefreshRuntimePanelAsync().ConfigureAwait(true);
+            if (IsCurrentNavigatorRefresh(profileId, generation)) RefreshReferencePanel();
         }
-        finally { _refreshingNavigator = false; }
-        await RefreshRuntimePanelAsync().ConfigureAwait(true);
-        RefreshReferencePanel();
+        finally
+        {
+            if (generation == Volatile.Read(ref _navigatorRefreshGeneration))
+                _refreshingNavigator = false;
+        }
     }
+
+    private bool IsCurrentNavigatorRefresh(string profileId, long generation) =>
+        generation == Volatile.Read(ref _navigatorRefreshGeneration) &&
+        string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal);
 
 
     private IReadOnlyList<TreeViewItem> BuildScriptNodes(
@@ -984,14 +1134,43 @@ internal sealed partial class AutomationStudioWindow : Window
     private TreeViewItem AutomationEntryNode(
         StudioDocumentKind kind,
         AutomationEntryInfo entry,
-        AutomationOrganizationItem item) =>
-        Node(new StudioNode(
+        AutomationOrganizationItem item)
+    {
+        TreeViewItem node = Node(new StudioNode(
             NodeKind.Entry,
             $"{(entry.Enabled ? "●" : "○")} {entry.Name}",
             kind,
             entry.Index,
             item.Id,
             item.FolderId));
+        ContextMenu menu = new();
+        MenuItem toggle = new() { Header = entry.Enabled ? "Disable" : "Enable" };
+        toggle.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await ToggleAutomationAsync(document).ConfigureAwait(true);
+        };
+        MenuItem duplicate = new() { Header = "Duplicate" };
+        duplicate.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await DuplicateAutomationAsync(document).ConfigureAwait(true);
+        };
+        MenuItem delete = new() { Header = "Delete…" };
+        delete.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await DeleteAutomationAsync(document).ConfigureAwait(true);
+        };
+        menu.Items.Add(toggle);
+        menu.Items.Add(duplicate);
+        menu.Items.Add(delete);
+        node.ContextMenu = menu;
+        return node;
+    }
 
     private TreeViewItem Node(StudioNode node)
     {
@@ -1678,57 +1857,88 @@ internal sealed partial class AutomationStudioWindow : Window
 
     // ───────────────────────────── Script documents ─────────────────────────────
 
-    private async Task SelectPackageAsync(string packageId)
+    private Task SelectPackageAsync(string packageId) => SelectPackageAsync(_session.Current, packageId);
+
+    private async Task SelectPackageAsync(StudioSessionSnapshot session, string packageId)
     {
-        if (_activePackage?.Definition.PackageId != packageId)
+        if (!_session.IsCurrent(session)) return;
+        string? previousPackageId = _activePackage?.Definition.PackageId;
+        if (!string.Equals(previousPackageId, packageId, StringComparison.Ordinal))
         {
             CancelTests("Package changed.");
             ResetTestsPanel("Package changed. Discover tests.");
+            if (previousPackageId is not null)
+            {
+                _diagnostics.ResolveSource(session.ProfileId, "tests:" + previousPackageId);
+                RefreshProblems();
+            }
         }
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true)
-            ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
+        ScriptPackageSnapshot? package;
+        try
+        {
+            package = await _workspace.GetPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { return; }
+        if (!_session.IsCurrent(session)) return;
+        _activePackage = package ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
     }
 
-    private async Task OpenSourceAsync(string packageId, string relativePath)
+    private Task OpenSourceAsync(string packageId, string relativePath) =>
+        OpenSourceAsync(_session.Current, packageId, relativePath);
+
+    private async Task OpenSourceAsync(StudioSessionSnapshot session, string packageId, string relativePath)
     {
-        await SelectPackageAsync(packageId).ConfigureAwait(true);
-        string uri = SourceDocumentUri(packageId, relativePath);
-        MonacoEditorHost monaco = _monaco;
-        ShowMonaco(true);
-        // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
-        monaco.IsVisible = true;
-        _center.Content = null;
-        if (_documents.Find(uri) is null)
+        try
         {
-            string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
-            try
+            await SelectPackageAsync(session, packageId).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            string profileId = session.ProfileId;
+            string uri = SourceDocumentUri(packageId, relativePath);
+            MonacoEditorHost monaco = _monaco;
+            ShowMonaco(true);
+            // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
+            monaco.IsVisible = true;
+            _center.Content = null;
+            if (_documents.Find(uri) is null)
             {
-                await _typescript.OpenDocumentAsync(SelectedProfileId, uri, relativePath, 1, content, _cts.Token).ConfigureAwait(true);
+                string content = await _workspace.ReadSourceAsync(profileId, packageId, relativePath, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                try
+                {
+                    await _typescript.OpenDocumentAsync(profileId, uri, relativePath, 1, content, session.CancellationToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (!_session.IsCurrent(session)) { return; }
+                catch (Exception exception)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    _ = _monaco.SetLanguageServerAvailableAsync(false);
+                    ShowLanguageServerFailure(exception.Message);
+                }
+                if (!_session.IsCurrent(session)) return;
+                await monaco.OpenDocumentAsync(profileId, packageId, relativePath, content, cancellationToken: session.CancellationToken, documentUri: uri).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                _textModels.Track(uri, profileId, packageId, relativePath, content);
             }
-            catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
-            catch (Exception exception)
+            else if (_textModels.Find(uri) is null)
             {
-                _ = _monaco.SetLanguageServerAvailableAsync(false);
-                ShowLanguageServerFailure(exception.Message);
+                string content = await _workspace.ReadSourceAsync(profileId, packageId, relativePath, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                _textModels.Track(uri, profileId, packageId, relativePath, content);
             }
-            await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token, documentUri: uri).ConfigureAwait(true);
-            _textModels.Track(uri, SelectedProfileId, packageId, relativePath, content);
+            _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
+            {
+                ProfileId = profileId,
+                PackageId = packageId,
+                Path = relativePath,
+                Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
+            });
+            if (!_session.IsCurrent(session)) return;
+            await monaco.SetActiveDocumentAsync(uri, session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            if (_pendingLanguageDiagnostics.Remove(uri, out StudioLanguageDiagnostics? pending))
+                await ApplyLanguageDiagnosticsAsync(pending).ConfigureAwait(true);
         }
-        else if (_textModels.Find(uri) is null)
-        {
-            string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
-            _textModels.Track(uri, SelectedProfileId, packageId, relativePath, content);
-        }
-        _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
-        {
-            ProfileId = SelectedProfileId,
-            PackageId = packageId,
-            Path = relativePath,
-            Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
-        });
-        await monaco.SetActiveDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
-        if (_pendingLanguageDiagnostics.Remove(uri, out StudioLanguageDiagnostics? pending))
-            await ApplyLanguageDiagnosticsAsync(pending).ConfigureAwait(true);
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
     }
 
     private void WireMonaco()
@@ -1736,7 +1946,7 @@ internal sealed partial class AutomationStudioWindow : Window
         _monaco.DocumentClosed += async uri =>
         {
             string profileId = _documents.Find(uri)?.ProfileId ?? SelectedProfileId;
-            _languageDiagnostics.Remove(uri);
+            _diagnostics.ResolveSource(profileId, "typescript:" + uri);
             _pendingLanguageDiagnostics.Remove(uri);
             RefreshLanguageProblems();
             await CloseLanguageDocumentAsync(profileId, uri).ConfigureAwait(false);
@@ -1784,31 +1994,37 @@ internal sealed partial class AutomationStudioWindow : Window
         });
         _typescript.DiagnosticsPublished += diagnostics => Dispatcher.UIThread.Post(async () =>
         {
-            if (!_typescript.IsOpenDocument(SelectedProfileId, diagnostics.Uri)) return;
+            if (!_typescript.IsCurrentProfile(diagnostics.ProfileId, diagnostics.Generation) ||
+                !_typescript.IsOpenDocument(diagnostics.ProfileId, diagnostics.Uri)) return;
             if (_documents.Find(diagnostics.Uri) is not { IsScript: true } openDocument)
             {
                 _pendingLanguageDiagnostics[diagnostics.Uri] = diagnostics;
                 return;
             }
-            if (!string.Equals(openDocument.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            if (!string.Equals(openDocument.ProfileId, diagnostics.ProfileId, StringComparison.Ordinal)) return;
             await ApplyLanguageDiagnosticsAsync(diagnostics).ConfigureAwait(true);
         });
-        _typescript.OutputReceived += line => Dispatcher.UIThread.Post(() =>
+        _typescript.OutputReceived += line => Dispatcher.UIThread.Post(() => AddConsole(line));
+        _typescript.SessionStarted += session => Dispatcher.UIThread.Post(() =>
         {
-            AddConsole(line);
-            if (line == "TypeScript language service started.")
-            {
-                RemoveLanguageServerRestartButton();
-                _ = _monaco.SetLanguageServerAvailableAsync(true);
-            }
+            if (!_typescript.IsCurrentProfile(session.ProfileId, session.Generation) ||
+                !string.Equals(session.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            _diagnostics.ResolveSource(session.ProfileId, "typescript-service");
+            _diagnostics.ResolveSource(session.ProfileId, "studio:TypeScript");
+            RefreshProblems();
+            RemoveLanguageServerRestartButton();
+            _ = _monaco.SetLanguageServerAvailableAsync(true);
         });
-        _typescript.FailureReceived += message => Dispatcher.UIThread.Post(() =>
+        _typescript.FailureReceived += failure => Dispatcher.UIThread.Post(() =>
         {
-            _languageDiagnostics.Clear();
+            if (!_typescript.IsCurrentProfile(failure.ProfileId, failure.Generation) ||
+                !string.Equals(failure.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            _diagnostics.ReplaceSource(failure.ProfileId, "typescript-service",
+                [new StudioDiagnostic(failure.ProfileId, "typescript-service", "failure", "Error", failure.Message)]);
             _pendingLanguageDiagnostics.Clear();
-            RefreshLanguageProblems();
+            RefreshProblems();
             _ = _monaco.SetLanguageServerAvailableAsync(false);
-            ShowLanguageServerFailure(message);
+            ShowLanguageServerFailure(failure.Message);
         });
     }
 
@@ -1851,19 +2067,43 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task ApplyLanguageDiagnosticsAsync(StudioLanguageDiagnostics diagnostics)
     {
+        string profileId = diagnostics.ProfileId;
+        long generation = diagnostics.Generation;
+        StudioDocument? document = _documents.Find(diagnostics.Uri);
+        if (!_typescript.IsCurrentProfile(profileId, generation) ||
+            !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal) ||
+            document is not null && !string.Equals(document.ProfileId, profileId, StringComparison.Ordinal)) return;
         try
         {
             JsonElement values = diagnostics.Parameters.TryGetProperty("diagnostics", out JsonElement items)
                 ? items.Clone()
                 : JsonSerializer.SerializeToElement(Array.Empty<object>());
             await _monaco.SetDiagnosticsAsync(diagnostics.Uri, values, _cts.Token).ConfigureAwait(true);
-            _languageDiagnostics[diagnostics.Uri] = values.EnumerateArray()
-                .Select(item => item.TryGetProperty("message", out JsonElement text) ? text.GetString() ?? "TypeScript diagnostic" : "TypeScript diagnostic")
-                .ToArray();
-            RefreshLanguageProblems();
+            if (!_typescript.IsCurrentProfile(profileId, generation) ||
+                !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal) ||
+                document is not null && !ReferenceEquals(document, _documents.Find(diagnostics.Uri))) return;
+            string source = "typescript:" + diagnostics.Uri;
+            StudioDiagnostic[] issues = values.EnumerateArray().Select((item, index) =>
+            {
+                string message = item.TryGetProperty("message", out JsonElement text) ? text.GetString() ?? "TypeScript diagnostic" : "TypeScript diagnostic";
+                string severity = item.TryGetProperty("severity", out JsonElement severityValue) && severityValue.TryGetInt32(out int code)
+                    ? code switch { 1 => "Error", 2 => "Warning", 3 => "Info", 4 => "Hint", _ => "Error" }
+                    : "Error";
+                string diagnosticCode = item.TryGetProperty("code", out JsonElement codeValue) ? codeValue.ToString() : "";
+                int? line = item.TryGetProperty("range", out JsonElement range) && range.TryGetProperty("start", out JsonElement start) && start.TryGetProperty("line", out JsonElement lineValue) && lineValue.TryGetInt32(out int lineNumber) ? lineNumber + 1 : null;
+                int? column = item.TryGetProperty("range", out range) && range.TryGetProperty("start", out start) && start.TryGetProperty("character", out JsonElement columnValue) && columnValue.TryGetInt32(out int columnNumber) ? columnNumber + 1 : null;
+                return new StudioDiagnostic(profileId, source, $"{index}:{line}:{column}:{diagnosticCode}:{message}", severity, message, document?.PackageId, document?.Path, line, column);
+            }).ToArray();
+            _diagnostics.ReplaceSource(profileId, source, issues);
+            RefreshProblems();
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
-        catch (Exception exception) { AddProblem("TypeScript", exception.Message); }
+        catch (Exception exception) when (_typescript.IsCurrentProfile(profileId, generation) &&
+                                           string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal))
+        {
+            AddProblem("TypeScript", exception.Message);
+        }
+        catch (Exception) { }
     }
 
     private async Task CloseLanguageDocumentAsync(string profileId, string uri)
@@ -1889,18 +2129,7 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private void RefreshLanguageProblems()
     {
-        foreach (Control row in _languageProblemRows) _problems.Children.Remove(row);
-        _languageProblemRows.Clear();
-        foreach ((string uri, string[] messages) in _languageDiagnostics)
-        {
-            foreach (string message in messages)
-            {
-                TextBlock row = Text($"TypeScript: {Path.GetFileName(new Uri(uri).LocalPath)}: {message}");
-                _languageProblemRows.Add(row);
-                _problems.Children.Add(row);
-            }
-        }
-        if (_languageProblemRows.Count > 0 && _bottomCollapsed) ToggleBottom();
+        RefreshProblems();
     }
 
     private async Task SaveScriptAsync(string uri, bool build = true)
@@ -1997,28 +2226,24 @@ internal sealed partial class AutomationStudioWindow : Window
     }
 
     private Task RestorePackagesAsync() =>
-        RunPackageOperationAsync(
-            "Restore",
-            () => _runtime.ScriptPackages.RestoreAsync(SelectedProfileId, _cts.Token));
+        RunPackageOperationAsync("Restore", profileId => _runtime.ScriptPackages.RestoreAsync(profileId, _cts.Token));
 
     private Task InstallPackagesAsync() =>
-        RunPackageOperationAsync(
-            "Install",
-            () => _runtime.ScriptPackages.InstallAsync(SelectedProfileId, _cts.Token));
+        RunPackageOperationAsync("Install", profileId => _runtime.ScriptPackages.InstallAsync(profileId, _cts.Token));
 
     private Task UpdatePackagesAsync(string? packageId = null) =>
         RunPackageOperationAsync(
             packageId is null ? "Update all" : $"Update {packageId}",
-            () => _runtime.ScriptPackages.UpdateAsync(SelectedProfileId, packageId, _cts.Token));
+            profileId => _runtime.ScriptPackages.UpdateAsync(profileId, packageId, _cts.Token));
 
     private Task CleanPackagesAsync(string? packageId = null) =>
         RunPackageOperationAsync(
             packageId is null ? "Clean workspace" : $"Clean {packageId}",
-            () => _runtime.ScriptPackages.CleanAsync(SelectedProfileId, packageId, _cts.Token));
+            profileId => _runtime.ScriptPackages.CleanAsync(profileId, packageId, _cts.Token));
 
     private async Task RunPackageOperationAsync(
         string label,
-        Func<Task<ScriptPackageOperationResult>> operation)
+        Func<string, Task<ScriptPackageOperationResult>> operation)
     {
         if (_packageOperationRunning)
         {
@@ -2026,33 +2251,45 @@ internal sealed partial class AutomationStudioWindow : Window
             return;
         }
 
+        string profileId = SelectedProfileId;
         _packageOperationRunning = true;
         if (_bottomCollapsed) ToggleBottom();
         if (_bottom.Items.Count > 1) _bottom.SelectedIndex = 1;
         AddConsole($"{label} started…");
         try
         {
-            ScriptPackageOperationResult result = await operation().ConfigureAwait(true);
+            ScriptPackageOperationResult result = await operation(profileId).ConfigureAwait(true);
             foreach (string line in result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 AddConsole(line);
             foreach (string line in result.StandardError.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 AddConsole($"stderr: {line}");
 
+            string source = "package-operation:" + label;
             if (!result.Success)
             {
-                AddProblem("Packages", $"{result.Code}: {result.Message}");
+                AddConsole($"{label} failed · {result.Code}: {result.Message}");
+                _diagnostics.ReplaceSource(profileId, source,
+                    [new StudioDiagnostic(profileId, source, "failure", "Error", $"{result.Code}: {result.Message}")]);
+                RefreshProblems();
                 return;
             }
 
+            _diagnostics.ResolveSource(profileId, source);
+            RefreshProblems();
             AddConsole($"{label} completed · {result.Message}");
-            await RefreshNavigatorAsync().ConfigureAwait(true);
+            if (string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal))
+                await RefreshNavigatorAsync().ConfigureAwait(true);
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
         {
         }
         catch (Exception exception)
         {
-            AddProblem("Packages", exception.Message);
+            AddConsole($"{label} failed · {exception.Message}");
+            string source = "package-operation:" + label;
+            _diagnostics.ReplaceSource(profileId, source,
+                [new StudioDiagnostic(profileId, source, "failure", "Error", exception.Message)]);
+            RefreshProblems();
         }
         finally
         {
@@ -2063,33 +2300,60 @@ internal sealed partial class AutomationStudioWindow : Window
     private async Task BuildActivePackageAsync()
     {
         if (_activePackage is null) { AddProblem("Build", "Select a script package first."); return; }
-        ScriptPackageBuildResult result = await _workspace.BuildPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        RenderBuildProblems(result);
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        RenderActive();
+        StudioSessionSnapshot session = _session.Current;
+        string packageId = _activePackage.Definition.PackageId;
+        ScriptPackageBuildResult result;
+        try
+        {
+            result = await _workspace.BuildPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (session.CancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        bool updateActiveStatus = _session.IsCurrent(session) && _activePackage?.Definition.PackageId == packageId;
+        RenderBuildProblems(result, session.ProfileId, updateActiveStatus);
+        if (!updateActiveStatus) return;
+        _activePackage = await _workspace.GetPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        if (_session.IsCurrent(session) && _activePackage?.Definition.PackageId == packageId)
+            RenderActive();
     }
 
-    private void RenderBuildProblems(ScriptPackageSnapshot package) =>
-        _buildState.Text = package.BuildStatus switch
+    private void RenderBuildProblems(ScriptPackageSnapshot? package)
+    {
+        _buildState.Text = package?.BuildStatus switch
         {
             ScriptPackageBuildStatus.Succeeded => "Build ✓",
             ScriptPackageBuildStatus.Failed => "Build ✕",
             _ => "Build —"
         };
-
-    private void RenderBuildProblems(ScriptPackageBuildResult result)
-    {
-        _problems.Children.Clear();
-        foreach (ScriptCompilerDiagnostic diagnostic in result.Diagnostics)
-            AddProblem(diagnostic.Severity.ToString(), $"{diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Code} {diagnostic.Message}");
-        _buildState.Text = result.Success ? "Build ✓" : "Build ✕";
+        _runtimeState.Text = package is null ? "Runtime —" : $"Runtime {package.RuntimeStatus}";
     }
 
-    private async Task TogglePackageAsync()
+    private void RenderBuildProblems(ScriptPackageBuildResult result, string profileId, bool updateActiveStatus = true)
     {
-        if (_activePackage is null) return;
-        await _workspace.SetEnabledAsync(SelectedProfileId, _activePackage.Definition.PackageId, !_activePackage.Definition.Enabled, _cts.Token).ConfigureAwait(true);
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+        string source = "build:" + result.PackageId;
+        _diagnostics.ReplaceSource(profileId, source, result.Diagnostics.Select((diagnostic, index) =>
+            new StudioDiagnostic(profileId, source, $"{index}:{diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column}:{diagnostic.Code}",
+                diagnostic.Severity.ToString(), diagnostic.Message, result.PackageId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column)));
+        foreach (ScriptCompilerDiagnostic diagnostic in result.Diagnostics)
+            AddConsole($"Build {result.PackageId}: {diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Code} {diagnostic.Message}");
+        RefreshProblems();
+        if (updateActiveStatus && profileId == SelectedProfileId)
+            _buildState.Text = result.Success ? "Build ✓" : "Build ✕";
+    }
+
+    private async Task TogglePackageAsync(string packageId)
+    {
+        string profileId = SelectedProfileId;
+        ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(profileId, packageId, _cts.Token).ConfigureAwait(true);
+        if (package is null) return;
+        await _workspace.SetEnabledAsync(profileId, packageId, !package.Definition.Enabled, _cts.Token).ConfigureAwait(true);
+        if (!string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal)) return;
+        if (_activePackage?.Definition.PackageId == packageId)
+            _activePackage = await _workspace.GetPackageAsync(profileId, packageId, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
         RenderActive();
     }
 
@@ -2116,30 +2380,50 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task CreatePackageAsync()
     {
+        StudioSessionSnapshot session = _session.Current;
         string? name = await PromptAsync("New Script Package", "Package name", "New package").ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(name)) return;
-        ScriptPackageDefinition created = await _workspace.CreatePackageAsync(SelectedProfileId, name, cancellationToken: _cts.Token).ConfigureAwait(true);
-        await RefreshNavigatorAsync().ConfigureAwait(true);
-        await OpenSourceAsync(created.PackageId, created.Entrypoint).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name) || !_session.IsCurrent(session)) return;
+        try
+        {
+            ScriptPackageDefinition created = await _workspace.CreatePackageAsync(
+                session.ProfileId, name, cancellationToken: session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            if (_session.IsCurrent(session))
+                await OpenSourceAsync(session, created.PackageId, created.Entrypoint).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Scripts", exception.Message);
+        }
     }
 
     private async Task CreateScriptFileAsync(string extension)
     {
+        StudioSessionSnapshot session = _session.Current;
         (string PackageId, string ParentPath)? location = SelectedScriptLocation();
         if (location is null) { AddProblem("Scripts", "Select a script package or folder first."); return; }
         string defaultName = extension.Equals(".json", StringComparison.OrdinalIgnoreCase) ? "data.json" : $"module{extension}";
         string? name = await PromptAsync("New Script File", "File name", defaultName).ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(name)) return;
+        if (string.IsNullOrWhiteSpace(name) || !_session.IsCurrent(session)) return;
         name = name.Trim();
         if (!name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) name += extension;
         try
         {
             string path = ScriptExplorerTree.Combine(location.Value.ParentPath, name);
-            await _workspace.CreateFileAsync(SelectedProfileId, location.Value.PackageId, path, cancellationToken: _cts.Token).ConfigureAwait(true);
+            await _workspace.CreateFileAsync(
+                session.ProfileId, location.Value.PackageId, path, cancellationToken: session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            await OpenSourceAsync(location.Value.PackageId, path).ConfigureAwait(true);
+            if (_session.IsCurrent(session))
+                await OpenSourceAsync(session, location.Value.PackageId, path).ConfigureAwait(true);
         }
-        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Scripts", exception.Message);
+        }
     }
 
     private async Task SearchAsync()
@@ -2391,12 +2675,12 @@ internal sealed partial class AutomationStudioWindow : Window
         _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
         _breadcrumbBar.IsVisible = active is not null;
         _statusLeft.Text = active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
+        RenderBuildProblems(_activePackage);
         if (active is null)
         {
             ShowMonaco(false);
             _center.Content = EmptyState();
             _statusCursor.Text = "";
-            BuildEmptyInspector();
             return;
         }
         if (active.IsScript)
@@ -2404,17 +2688,12 @@ internal sealed partial class AutomationStudioWindow : Window
             _center.Content = null;
             ShowMonaco(true);
             _ = _monaco.SetActiveDocumentAsync(active.Key, _cts.Token);
-            if (_activePackage is not null) BuildPackageInspector(_activePackage);
-            else BuildEmptyInspector();
             return;
         }
         ShowMonaco(false);
         _statusCursor.Text = "";
         if (_editors.TryGetValue(active.Key, out AutomationDocumentEditor? editor))
-        {
             _center.Content = editor.View;
-            BuildAutomationInspector(active, editor);
-        }
     }
 
     private Control EmptyState()
@@ -2430,72 +2709,7 @@ internal sealed partial class AutomationStudioWindow : Window
         return panel;
     }
 
-    // ───────────────────────────── Inspector (context only) ─────────────────────────────
-
-    private void BuildEmptyInspector()
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading("Automation Studio"));
-        _inspector.Children.Add(Text($"Profile scope: {SelectedProfileId}"));
-        _inspector.Children.Add(Text(SelectedProfileId == _runtime.ActiveConnectionProfile.Id
-            ? "This is the active runtime profile."
-            : "Authoring only: another Connection Profile is currently active."));
-    }
-
-    private void BuildAutomationInspector(StudioDocument document, AutomationDocumentEditor editor)
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading(document.Title));
-        _inspector.Children.Add(Text($"{document.Kind.Label()} · {(editor.IsEnabled ? "Enabled" : "Disabled")}{(document.IsDirty ? " · Unsaved changes" : "")}"));
-        _inspector.Children.Add(Heading("Actions"));
-        _inspector.Children.Add(Button(editor.IsEnabled ? "Disable" : "Enable", () => ToggleAutomationAsync(document)));
-        _inspector.Children.Add(Button("Duplicate", () => DuplicateAutomationAsync(document)));
-        _inspector.Children.Add(Button("Delete…", () => DeleteAutomationAsync(document)));
-
-        int? sourceIndex = document.AutomationId is null
-            ? null
-            : _organization.SourceIndexFor(document.Kind, document.AutomationId);
-        AutomationFunctionReference[] uses = sourceIndex is null
-            ? []
-            : _referencesIndex.Build(_runtime.Settings)
-                .Where(reference => StudioDocumentKinds.FromSource(reference.SourceKind) == document.Kind
-                    && StudioDocumentKinds.DefinitionIndex(reference.DefinitionId) == sourceIndex)
-                .ToArray();
-        _inspector.Children.Add(Heading("Script references"));
-        if (uses.Length == 0) _inspector.Children.Add(Text("None"));
-        foreach (AutomationFunctionReference use in uses)
-        {
-            ExportedScriptFunction? export = _packages.SelectMany(package => package.Exports).FirstOrDefault(item => item.FunctionRef == use.FunctionRef);
-            _inspector.Children.Add(Text($"{(export is null ? "✕" : "✓")} {use.FunctionRef.PackageId}/{use.FunctionRef.ModulePath}#{use.FunctionRef.ExportName}"));
-        }
-    }
-
-    private void BuildPackageInspector(ScriptPackageSnapshot package)
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading(package.Definition.Name));
-        _inspector.Children.Add(Text($"PackageId: {package.Definition.PackageId}"));
-        _inspector.Children.Add(Text($"Enabled: {package.Definition.Enabled}"));
-        _inspector.Children.Add(Text($"Build: {package.BuildStatus}"));
-        _inspector.Children.Add(Text($"Runtime: {package.RuntimeStatus}"));
-        _inspector.Children.Add(Text($"Capabilities: {package.Definition.Capabilities}"));
-        _inspector.Children.Add(Button(package.Definition.Enabled ? "Disable Package" : "Enable Package", TogglePackageAsync));
-        _buildState.Text = package.BuildStatus == ScriptPackageBuildStatus.Succeeded ? "Build ✓" : package.BuildStatus == ScriptPackageBuildStatus.Failed ? "Build ✕" : "Build —";
-        _runtimeState.Text = $"Runtime {package.RuntimeStatus}";
-        if (!string.IsNullOrWhiteSpace(package.LastRuntimeFault)) _inspector.Children.Add(Text($"Fault: {package.LastRuntimeFault}"));
-        _inspector.Children.Add(Heading("Exports"));
-        if (package.Exports.Count == 0) _inspector.Children.Add(Text("No callable exports discovered."));
-        foreach (ExportedScriptFunction export in package.Exports)
-        {
-            Button open = UiTheme.QuietButton($"{export.ModulePath}#{export.ExportName}({string.Join(", ", export.Parameters.Select(parameter => parameter.Name))})");
-            open.HorizontalContentAlignment = HorizontalAlignment.Left;
-            ScriptFunctionRef reference = export.FunctionRef;
-            open.Click += async (_, _) => await OpenDefinitionAsync(reference).ConfigureAwait(true);
-            _inspector.Children.Add(open);
-            IReadOnlyList<AutomationFunctionReference> uses = _referencesIndex.FindUses(_runtime.Settings, export.FunctionRef);
-            if (uses.Count > 0) _inspector.Children.Add(Text($"Used by: {string.Join(", ", uses.Select(use => use.DefinitionName))}"));
-        }
-    }
+    // ───────────────────────────── Bottom panels ─────────────────────────────
 
     // ───────────────────────────── Bottom panels ─────────────────────────────
 
@@ -2514,7 +2728,16 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         _runtimePanel.Children.Clear();
         foreach (ScriptPackageSnapshot package in _packages)
+        {
+            string source = "runtime-fault:" + package.Definition.PackageId;
+            IEnumerable<StudioDiagnostic> fault = package.LastRuntimeFault is null ? [] :
+                [new StudioDiagnostic(SelectedProfileId, source, "last-runtime-fault", "Error", package.LastRuntimeFault, package.Definition.PackageId)];
+            _diagnostics.ReplaceSource(SelectedProfileId, source, fault);
             _runtimePanel.Children.Add(Text($"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus} · enabled={package.Definition.Enabled}"));
+        }
+        RefreshProblems();
+        foreach (StudioDiagnostic diagnostic in _diagnostics.Snapshot(SelectedProfileId).Where(item => item.Source.StartsWith("runtime:", StringComparison.Ordinal)))
+            _runtimePanel.Children.Add(Text($"{diagnostic.Severity}: {diagnostic.PackageId} {diagnostic.FilePath}{(diagnostic.Line is null ? "" : $":{diagnostic.Line}:{diagnostic.Column}")} {diagnostic.Message}"));
         await Task.CompletedTask;
     }
 
@@ -2537,6 +2760,7 @@ internal sealed partial class AutomationStudioWindow : Window
                     string[] snapshot; lock (_events) snapshot = _events.ToArray();
                     foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));
                     if (envelope.Payload is ScriptLogEmitted log) AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
+                    if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
                 });
             }
         }
@@ -2549,13 +2773,84 @@ internal sealed partial class AutomationStudioWindow : Window
         while (_console.Children.Count > 500) _console.Children.RemoveAt(0);
     }
 
+    private void ApplyRuntimeDiagnostic(ScriptRuntimeDiagnosticEmitted diagnostic)
+    {
+        string? profileId = diagnostic.ProfileId;
+        if (string.IsNullOrWhiteSpace(profileId) ||
+            !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal)) return;
+        string source = $"runtime:{diagnostic.ScriptId}:{diagnostic.ScriptInstanceId}";
+        string key = diagnostic.InvocationId?.ToString() ?? diagnostic.OperationId?.ToString() ?? diagnostic.EventId?.ToString() ?? diagnostic.Kind;
+        if (diagnostic.Kind is "InvocationStarted" or "InvocationCompleted" or "ReloadCompleted" or "ScriptUnloaded")
+            _diagnostics.Resolve(profileId, source, key);
+        else if (diagnostic.Kind is "InvocationFaulted" or "PermissionDenied" or "Timeout" or "ResourceLimitExceeded" or "UncaughtException" or "QueueOverflow")
+        {
+            _diagnostics.Upsert(new StudioDiagnostic(profileId, source, key, "Error",
+                diagnostic.Message ?? diagnostic.Kind, diagnostic.ScriptId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column));
+            AddConsole($"Runtime [{diagnostic.ScriptId}] {diagnostic.Kind}: {diagnostic.Message}");
+        }
+        RefreshProblems();
+        _ = RefreshRuntimePanelAsync();
+    }
+
     private void AddProblem(string severity, string message)
     {
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(() => AddProblem(severity, message)); return; }
-        _problems.Children.Add(Text($"{severity}: {message}"));
-        while (_problems.Children.Count > 500) _problems.Children.RemoveAt(0);
+        string source = "studio:" + severity;
+        string level = severity.Equals("Warning", StringComparison.OrdinalIgnoreCase) ? "Warning"
+            : severity.Equals("Info", StringComparison.OrdinalIgnoreCase) ? "Info"
+            : severity.Equals("Hint", StringComparison.OrdinalIgnoreCase) ? "Hint" : "Error";
+        _diagnostics.Upsert(new StudioDiagnostic(SelectedProfileId, source, message, level, message));
+        RefreshProblems();
         if (_bottomCollapsed) ToggleBottom();
         if (_bottom.Items.Count > 0) _bottom.SelectedIndex = 0;
+    }
+
+    private void RefreshProblems()
+    {
+        _problems.Children.Clear();
+        StudioDiagnostic[] items = _diagnostics.Snapshot(SelectedProfileId).ToArray();
+        foreach (IGrouping<string, StudioDiagnostic> group in items.GroupBy(item => item.PackageId ?? item.FilePath ?? item.Source))
+        {
+            int errors = group.Count(item => item.Severity.Equals("Error", StringComparison.OrdinalIgnoreCase));
+            int warnings = group.Count(item => item.Severity.Equals("Warning", StringComparison.OrdinalIgnoreCase));
+            int info = group.Count() - errors - warnings;
+            _problems.Children.Add(Text($"{group.Key} · {errors} errors · {warnings} warnings · {info} info"));
+            foreach (StudioDiagnostic item in group)
+            {
+                string location = item.FilePath is null ? item.Source :
+                    $"{item.FilePath}{(item.Line is null ? "" : $":{item.Line}:{item.Column}")}";
+                Button row = new()
+                {
+                    Content = Text($"{item.Severity}: {location} {item.Message}"),
+                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                    Padding = new Thickness(4, 2),
+                    IsEnabled = item.PackageId is not null && item.FilePath is not null && item.Line is not null
+                };
+                row.Click += async (_, _) => await OpenDiagnosticAsync(item).ConfigureAwait(true);
+                _problems.Children.Add(row);
+            }
+        }
+        if (_languageServerRestartButton is not null) _problems.Children.Add(_languageServerRestartButton);
+    }
+
+    private async Task OpenDiagnosticAsync(StudioDiagnostic diagnostic)
+    {
+        StudioSessionSnapshot session = _session.Current;
+        if (diagnostic.ProfileId != session.ProfileId || diagnostic.PackageId is not { } packageId ||
+            diagnostic.FilePath is not { } filePath || diagnostic.Line is not { } line ||
+            !_packages.Any(package => package.Definition.PackageId == packageId)) return;
+        try
+        {
+            await OpenSourceAsync(session, packageId, filePath).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            await _monaco.RevealLocationAsync(
+                SourceDocumentUri(packageId, filePath), line, diagnostic.Column, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Open diagnostic", exception.Message);
+        }
     }
 
     // ───────────────────────────── Window events ─────────────────────────────

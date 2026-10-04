@@ -380,7 +380,9 @@ public sealed partial class ScriptWorkspaceService
         packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
         if (string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal) && _loadedPackageIds.Contains(packageId))
         {
-            await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(packageId), cancellationToken).ConfigureAwait(false);
+            ScriptModuleId moduleId = new(packageId);
+            await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+            _platform.UnregisterRuntimeProfile(moduleId, profileId);
             _loadedPackageIds.Remove(packageId);
         }
         string packageRoot = GetPackageRoot(profileId, packageId);
@@ -672,7 +674,9 @@ public sealed partial class ScriptWorkspaceService
         {
             if (_loadedPackageIds.Remove(updated.PackageId))
             {
-                await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(updated.PackageId), cancellationToken).ConfigureAwait(false);
+                ScriptModuleId moduleId = new(updated.PackageId);
+                await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+                _platform.UnregisterRuntimeProfile(moduleId, profileId);
                 await PublishRuntimeAsync(profileId, updated.PackageId, ScriptStatus.Disabled, null, cancellationToken).ConfigureAwait(false);
             }
             return;
@@ -688,8 +692,14 @@ public sealed partial class ScriptWorkspaceService
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         if (string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal)) return;
 
+        string? previousProfileId = _loadedRuntimeProfileId;
         foreach (string packageId in _loadedPackageIds.ToArray())
-            await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(packageId), cancellationToken).ConfigureAwait(false);
+        {
+            ScriptModuleId moduleId = new(packageId);
+            await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+            if (previousProfileId is not null)
+                _platform.UnregisterRuntimeProfile(moduleId, previousProfileId);
+        }
         _loadedPackageIds.Clear();
         _loadedRuntimeProfileId = profileId;
 
@@ -762,20 +772,30 @@ public sealed partial class ScriptWorkspaceService
         CompiledScriptPackage package,
         CancellationToken cancellationToken)
     {
-        string storagePath = Path.Combine(GetProfileRoot(profileId), "script-storage.db");
-        IScriptHost host = _platform.CreateHost(
-            package.Manifest.Id,
-            new ScriptPermissionSet(package.Manifest.Permissions),
-            ScriptCommandOrigin.Script,
-            definition.Name,
-            storagePath);
-        bool loaded = _platform.JavaScriptRuntime.Snapshot().Any(snapshot =>
-            snapshot.Id.Value.Equals(definition.PackageId, StringComparison.OrdinalIgnoreCase) &&
-            snapshot.Status is ScriptStatus.Loading or ScriptStatus.Running);
-        if (loaded)
-            await _platform.JavaScriptRuntime.ReloadAsync(package, host, cancellationToken).ConfigureAwait(false);
-        else
-            await _platform.JavaScriptRuntime.LoadAsync(package, host, cancellationToken).ConfigureAwait(false);
+        string? previousProfileId = _platform.RegisterRuntimeProfile(package.Manifest.Id, profileId);
+        try
+        {
+            string storagePath = Path.Combine(GetProfileRoot(profileId), "script-storage.db");
+            IScriptHost host = _platform.CreateHost(
+                package.Manifest.Id,
+                new ScriptPermissionSet(package.Manifest.Permissions),
+                ScriptCommandOrigin.Script,
+                definition.Name,
+                storagePath);
+            bool loaded = _platform.JavaScriptRuntime.Snapshot().Any(snapshot =>
+                snapshot.Id.Value.Equals(definition.PackageId, StringComparison.OrdinalIgnoreCase) &&
+                snapshot.Status is ScriptStatus.Loading or ScriptStatus.Running);
+            if (loaded)
+                await _platform.JavaScriptRuntime.ReloadAsync(package, host, cancellationToken).ConfigureAwait(false);
+            else
+                await _platform.JavaScriptRuntime.LoadAsync(package, host, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _platform.RestoreRuntimeProfile(package.Manifest.Id, profileId, previousProfileId);
+            throw;
+        }
+
         _loadedPackageIds.Add(definition.PackageId);
         await PublishRuntimeAsync(profileId, definition.PackageId, ScriptStatus.Running, null, cancellationToken).ConfigureAwait(false);
     }

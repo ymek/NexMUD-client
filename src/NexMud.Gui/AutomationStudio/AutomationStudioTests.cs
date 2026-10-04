@@ -117,17 +117,21 @@ internal sealed partial class AutomationStudioWindow
         IReadOnlyDictionary<string, IReadOnlyList<string>>? filesByPackage = null,
         IReadOnlyDictionary<string, IReadOnlyList<string>>? namesByPackage = null)
     {
+        CancelTests("Superseded by a new run.");
+        string profileId = SelectedProfileId;
+        _diagnostics.ResolveSourcesByPrefix(profileId, "tests:");
+        RefreshProblems();
+        _testRows.Clear();
+        _failedTestGroups.Clear();
+        _testResults.Children.Clear();
         if (packageIds.Count == 0)
         {
             _testState.Text = "This profile has no script packages.";
             return;
         }
-        CancelTests("Superseded by a new run.");
         CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _testRunCancellation = cancellation;
         long generation = ++_testRunGeneration;
-        string profileId = SelectedProfileId;
-        _testRows.Clear();
         _failedTestGroups.Clear();
         _testResults.Children.Clear();
         _testState.Text = "Saving dirty scripts and running tests…";
@@ -150,6 +154,17 @@ internal sealed partial class AutomationStudioWindow
                 foreach (ScriptTestDiagnostic diagnostic in result.Diagnostics)
                     if (!result.Assertions.Any(assertion => assertion.Status == "failed" && assertion.FilePath == diagnostic.FilePath && assertion.Message == diagnostic.Message))
                         AddTestDiagnostic(packageId, diagnostic);
+                string source = "tests:" + packageId;
+                IEnumerable<StudioDiagnostic> issues = result.Diagnostics.Select((diagnostic, index) =>
+                    new StudioDiagnostic(profileId, source, $"diagnostic:{index}:{diagnostic.FilePath}:{diagnostic.Line}:{diagnostic.Column}:{diagnostic.Message}",
+                        diagnostic.Severity.ToString(), diagnostic.Message, packageId, diagnostic.FilePath, diagnostic.Line, diagnostic.Column))
+                    .Concat(result.Assertions.Where(assertion => assertion.Status == "failed").Select((assertion, index) =>
+                        new StudioDiagnostic(profileId, source, $"assertion:{index}:{assertion.FilePath}:{assertion.Name}", "Error",
+                            assertion.Message ?? $"Test failed: {assertion.Name}", packageId, assertion.FilePath, assertion.Line, assertion.Column)));
+                _diagnostics.ReplaceSource(profileId, source, issues);
+                foreach (string line in result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    AddConsole($"Tests {packageId}: {line}");
+                RefreshProblems();
                 if (!result.Success)
                 {
                     string[] failedFiles = result.Assertions.Where(assertion => assertion.Status == "failed")
@@ -237,6 +252,8 @@ internal sealed partial class AutomationStudioWindow
 
     private void ResetTestsPanel(string message)
     {
+        _diagnostics.ResolveSourcesByPrefix(SelectedProfileId, "tests:");
+        RefreshProblems();
         _selectedTestFile = null;
         _selectedTestPackageId = null;
         _selectedTestName = null;

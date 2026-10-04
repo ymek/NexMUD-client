@@ -112,6 +112,8 @@ public static class Program
         await RunAsync("scripting handler faults stay isolated", ScriptingHandlerFaultStaysIsolated);
         await RunAsync("scripting runaway handler is constrained", ScriptingRunawayHandlerIsConstrained);
         await RunAsync("scripting runtime diagnostics map to TypeScript source", ScriptingRuntimeDiagnosticsMapToTypeScriptSource);
+        await RunAsync("scripting runtime diagnostics retain originating profile", ScriptingRuntimeDiagnosticsKeepOriginatingProfile);
+        await RunAsync("scripting runtime profile restore is conditional", RuntimeProfileRegistryRestoresPreviousOwnerConditionally);
         await RunAsync("Automation compiler is deterministic and capability-derived", AutomationCompilerIsDeterministic);
         await RunAsync("compiled Automation alias executes through Jint with Automation provenance", CompiledAutomationAliasExecutesThroughJint);
         await RunAsync("compiled Automation alias resumes after delayed host completion", CompiledAutomationAliasResumesAfterDelayedHostCompletion);
@@ -326,6 +328,73 @@ public static class Program
             string inside = ScriptWorkspacePath.CombineInside(root, "src/main.ts");
             string canonicalRoot = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
             Assert.True(inside.StartsWith(canonicalRoot, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio diagnostics aggregate, replace, resolve, and isolate profiles", () =>
+        {
+            var hub = new NexMud.Gui.AutomationStudio.StudioDiagnosticsHub();
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "1", "Error", "old"));
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "build:pkg", "2", "Warning", "build"));
+            hub.ReplaceSource("profile-a", "typescript:file.ts",
+            [
+                new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "1", "Error", "updated"),
+                new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "3", "Info", "new")
+            ]);
+            hub.ReplaceSource("profile-b", "typescript:file.ts", []);
+            Assert.Equal(3, hub.Snapshot("profile-a").Count);
+            Assert.Equal("updated", hub.Snapshot("profile-a").Single(item => item.Key == "1").Message);
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Message == "old"));
+            Assert.Equal(0, hub.Snapshot("profile-b").Count);
+            hub.Resolve("profile-a", "typescript:file.ts", "1");
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Key == "1"));
+            hub.ReplaceSource("profile-a", "typescript:file.ts", []);
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "tests:pkg-a", "failed", "Error", "test"));
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "tests:pkg-b", "failed", "Error", "test"));
+            hub.ReplaceSource("profile-a", "tests:pkg-a", []);
+            var remainingTestDiagnostics = hub.Snapshot("profile-a")
+                .Where(item => item.Source.StartsWith("tests:", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(1, remainingTestDiagnostics.Length);
+            Assert.Equal("tests:pkg-b", remainingTestDiagnostics[0].Source);
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-b", "tests:pkg-c", "failed", "Error", "other profile"));
+            hub.ResolveSourcesByPrefix("profile-a", "tests:");
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Source.StartsWith("tests:", StringComparison.Ordinal)));
+            Assert.Equal("other profile", hub.Snapshot("profile-b").Single().Message);
+            Assert.Equal(1, hub.Snapshot("profile-a").Count);
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio profile transitions serialize and discard stale requests", async () =>
+        {
+            var transitions = new NexMud.Gui.AutomationStudio.StudioProfileTransitionGate();
+            using CancellationTokenSource cancellation = new();
+            long first = transitions.Request();
+            Assert.True(await transitions.EnterLatestAsync(first, cancellation.Token));
+            long latest = transitions.Request();
+            Task<bool> staleTransition = transitions.EnterLatestAsync(first, cancellation.Token);
+            transitions.Exit();
+
+            Assert.False(await staleTransition);
+            Assert.True(transitions.IsCurrent(latest));
+            Assert.True(await transitions.EnterLatestAsync(latest, cancellation.Token));
+            transitions.Exit();
+        });
+        await RunAsync("studio document sessions survive superseded profile switches", () =>
+        {
+            var sessions = new NexMud.Gui.AutomationStudio.StudioDocumentSessionStore();
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                "script:pkg/src/main.ts", NexMud.Gui.AutomationStudio.StudioDocumentKind.Script, "main.ts")
+            {
+                ProfileId = "profile-a",
+                PackageId = "pkg",
+                Path = "src/main.ts"
+            };
+            sessions.Capture("profile-a", [document], document.Key);
+            sessions.Capture("profile-a", [], null);
+
+            Assert.True(sessions.TryGet("profile-a", out NexMud.Gui.AutomationStudio.StudioDocumentSessionSnapshot snapshot));
+            Assert.Equal(document.Key, snapshot.ActiveDocumentKey);
+            Assert.Equal("profile-a", snapshot.Documents.Single().ProfileId);
+            sessions.Remove("profile-a");
+            Assert.False(sessions.TryGet("profile-a", out _));
             return Task.CompletedTask;
         });
         await RunAsync("studio profile switch cancels previous generation", () =>
@@ -712,6 +781,7 @@ public static class Program
         await RunAsync("language-server cancellation notifies only abandoned requests", Phase6StudioLanguageHostTests.LanguageServerCancellationNotifiesServerOnlyForAbandonedRequests);
         await RunAsync("Studio language host rehydrates unsaved documents after restart", Phase6StudioLanguageHostTests.RehydratesUnsavedDocumentsAfterTransportRestart);
         await RunAsync("Studio language host routes requests and profile diagnostics", Phase6StudioLanguageHostTests.RoutesRequestsDiagnosticsAndProfileLifecycle);
+        await RunAsync("language transport failures retain originating profile generation", Phase6StudioLanguageHostTests.LanguageTransportFailuresRetainOriginProfileAndGeneration);
         await RunAsync("bundled TypeScript language service resolves project dependencies and live diagnostics", Phase6StudioLanguageHostTests.BundledLanguageServerUsesProjectTypesAndReportsLiveDiagnostics);
         await RunAsync("Monaco bridge request errors preserve details and failures activate fallback", Phase6StudioLanguageHostTests.MonacoBridgeRequestsPreserveErrorsAndActivateFallback);
         await RunAsync("Monaco language-server requests are allow-listed", Phase6StudioLanguageHostTests.LanguageServerRequestsAreAllowListed);
@@ -1358,6 +1428,57 @@ public static class Program
         Assert.True(diagnostics.Records.Any(record =>
                 record.Kind is ScriptDiagnosticKind.Timeout or ScriptDiagnosticKind.ResourceLimitExceeded),
             "A runaway handler must terminate at the Jint execution boundary.");
+    }
+
+    private static Task RuntimeProfileRegistryRestoresPreviousOwnerConditionally()
+    {
+        ScriptRuntimeProfileRegistry profiles = new();
+        ScriptModuleId moduleId = new("restore-module");
+        Guid instanceId = Guid.Empty;
+        Assert.True(profiles.Register(moduleId, "profile-a") is null);
+        Assert.Equal("profile-a", profiles.Register(moduleId, "profile-b"));
+        profiles.Restore(moduleId, "profile-b", "profile-a");
+        Assert.Equal("profile-a", profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)));
+        profiles.Restore(moduleId, "profile-b", null);
+        Assert.Equal("profile-a", profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)));
+        profiles.Restore(moduleId, "profile-a", null);
+        Assert.True(profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)) is null);
+        return Task.CompletedTask;
+    }
+
+    private static async Task ScriptingRuntimeDiagnosticsKeepOriginatingProfile()
+    {
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        ScriptRuntimeProfileRegistry profiles = new();
+        ScriptModuleId moduleId = new("profile-aware-module");
+        Guid oldInstance = Guid.NewGuid();
+        Guid newInstance = Guid.NewGuid();
+        profiles.Register(moduleId, "profile-a");
+        ClientScriptDiagnosticsSink sink = new(events, profiles.Resolve);
+
+        ScriptDiagnosticRecord oldLoaded = new(ScriptDiagnosticKind.ScriptLoaded, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance);
+        sink.Record(oldLoaded);
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted loadedA ? loadedA.ProfileId : null);
+
+        profiles.Unregister(moduleId, "profile-a");
+        profiles.Register(moduleId, "profile-b");
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted faultA ? faultA.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptUnloaded, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted unloadedA ? unloadedA.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.True((await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted lateFault && lateFault.ProfileId is null);
+
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptLoaded, DateTimeOffset.UtcNow, moduleId, "v2", newInstance));
+        Assert.Equal("profile-b", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted loadedB ? loadedB.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptUnloaded, DateTimeOffset.UtcNow, moduleId, "v2", newInstance));
+        Assert.Equal("profile-b", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted unloadedB ? unloadedB.ProfileId : null);
+        profiles.Unregister(moduleId, "profile-b");
+        Assert.True(profiles.Resolve(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v2", newInstance)) is null);
     }
 
     private static async Task ScriptingRuntimeDiagnosticsMapToTypeScriptSource()

@@ -115,7 +115,8 @@ public sealed class NexMudRuntime : IAsyncDisposable
             Scripting,
             ScriptMapper,
             NavigationAuthority,
-            ScriptScheduler);
+            ScriptScheduler,
+            activeProfileId: () => ActiveConnectionProfile.Id);
         _automationEvents = Events.SubscribeLossless();
         AutomationCompiler = new AutomationRuntimeCompiler(Scripting, State, ScriptScheduler);
         Automation = new ClientAutomationService(

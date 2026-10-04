@@ -22,7 +22,7 @@ internal sealed record AutomationEditorServices(
 /// <summary>
 /// Full-width visual designer for one Automation definition. Sections follow the workbench model:
 /// MATCH / SCHEDULE / GESTURE (what starts it), WHEN (conditions) and DO (actions). Primary edit
-/// fields live here, never in the Inspector.
+/// fields live here alongside their automation content.
 /// </summary>
 internal sealed class AutomationDocumentEditor
 {

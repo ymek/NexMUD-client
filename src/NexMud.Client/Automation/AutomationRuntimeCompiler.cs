@@ -38,6 +38,7 @@ public sealed class AutomationRuntimeCompiler
     private AutomationProgram[] _programs = [];
     private long _internalSequence;
     private bool _loaded;
+    private string? _loadedProfileId;
     private string _lineBuffer = string.Empty;
     private string _rollingBuffer = string.Empty;
     private int _rollingBufferCharacters = 8192;
@@ -75,9 +76,13 @@ public sealed class AutomationRuntimeCompiler
             {
                 if (_loaded)
                 {
-                    await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId("automation.profile"), cancellationToken)
+                    ScriptModuleId moduleId = new("automation.profile");
+                    await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken)
                         .ConfigureAwait(false);
+                    if (_loadedProfileId is not null)
+                        _platform.UnregisterRuntimeProfile(moduleId, _loadedProfileId);
                     _loaded = false;
+                    _loadedProfileId = null;
                 }
                 SwapPrograms([]);
                 ResetMatcherBuffers();
@@ -98,7 +103,10 @@ public sealed class AutomationRuntimeCompiler
                 return; // replacement semantics: keep the old runtime active
             }
 
+            string profileId = settings.ActiveConnectionProfile.Id;
+            ScriptModuleId runtimeModuleId = artifact.Package.Manifest.Id;
             if (_loaded &&
+                string.Equals(_loadedProfileId, profileId, StringComparison.Ordinal) &&
                 string.Equals(ContentHash, artifact.ContentHash, StringComparison.Ordinal) &&
                 IsRuntimeRunning())
             {
@@ -113,6 +121,9 @@ public sealed class AutomationRuntimeCompiler
                 new NexMud.Scripting.Permissions.ScriptPermissionSet(artifact.Package.Manifest.Permissions),
                 ScriptCommandOrigin.Automation,
                 "Automation runtime");
+            bool wasLoaded = _loaded;
+            string? previousProfileId = _loadedProfileId;
+            _platform.RegisterRuntimeProfile(runtimeModuleId, profileId);
             try
             {
                 if (_loaded)
@@ -122,12 +133,17 @@ public sealed class AutomationRuntimeCompiler
             }
             catch (Exception exception)
             {
+                if (wasLoaded && previousProfileId is not null)
+                    _platform.RegisterRuntimeProfile(runtimeModuleId, previousProfileId);
+                else
+                    _platform.UnregisterRuntimeProfile(runtimeModuleId, profileId);
                 LastDiagnostics = [new AutomationCompilerDiagnostic("AUTOMATION_LOAD", exception.Message)];
                 return; // ReloadAsync preserves the prior running instance on failure.
             }
 
             bool generationChanged = !string.Equals(_activeGeneration, artifact.RuntimeGeneration, StringComparison.Ordinal);
             _loaded = true;
+            _loadedProfileId = profileId;
             _activeGeneration = artifact.RuntimeGeneration;
             SwapPrograms(artifact.Programs);
             if (generationChanged) ResetMatcherBuffers();

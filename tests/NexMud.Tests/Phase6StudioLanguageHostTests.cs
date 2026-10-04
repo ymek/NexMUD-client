@@ -95,6 +95,43 @@ internal static class Phase6StudioLanguageHostTests
         Assert.Equal(profileBUri, received?.Uri);
     }
 
+    public static async Task LanguageTransportFailuresRetainOriginProfileAndGeneration()
+    {
+        Queue<FakeTransport> transports = new();
+        FakeTransport first = new();
+        FakeTransport second = new();
+        FakeTransport third = new();
+        transports.Enqueue(first);
+        transports.Enqueue(second);
+        transports.Enqueue(third);
+        string root = Path.Combine(Path.GetTempPath(), "nexmud-language-failure-profile");
+        await using StudioTypeScriptLanguageHost host = new(_ => root, _ => transports.Dequeue());
+        List<StudioLanguageFailure> failures = [];
+        host.FailureReceived += failures.Add;
+        string uri = NexMud.Client.Scripting.ScriptLanguageProjectProjection.ToCanonicalFileUri(Path.Combine(root, "pkg", "src", "main.ts"));
+
+        await host.OpenDocumentAsync("profile-a", uri, "src/main.ts", 1, "export {};");
+        first.Fail(new IOException("first profile failure"));
+        Assert.Equal(1, failures.Count);
+        Assert.Equal("profile-a", failures[0].ProfileId);
+        long firstGeneration = failures[0].Generation;
+
+        await host.SwitchProfileAsync("profile-b");
+        string profileBUri = NexMud.Client.Scripting.ScriptLanguageProjectProjection.ToCanonicalFileUri(Path.Combine(root, "pkg-b", "src", "main.ts"));
+        await host.OpenDocumentAsync("profile-b", profileBUri, "src/main.ts", 1, "export {};");
+        first.Fail(new IOException("stale first profile failure"));
+        Assert.Equal(1, failures.Count);
+
+        await host.SwitchProfileAsync("profile-a");
+        await host.OpenDocumentAsync("profile-a", uri, "src/main.ts", 1, "export {};");
+        first.Fail(new IOException("stale repeated profile failure"));
+        third.Fail(new IOException("current repeated profile failure"));
+        Assert.Equal(2, failures.Count);
+        Assert.Equal("profile-a", failures[1].ProfileId);
+        Assert.Equal(true, failures[1].Generation > firstGeneration);
+        Assert.Equal(true, host.IsCurrentProfile(failures[1].ProfileId, failures[1].Generation));
+    }
+
     public static async Task MonacoBridgeRequestsPreserveErrorsAndActivateFallback()
     {
         DirectoryInfo? root = new(AppContext.BaseDirectory);
@@ -504,7 +541,14 @@ internal static class Phase6StudioLanguageHostTests
 
         public event Action<LanguageServerNotification>? NotificationReceived;
         public event Action<string>? StandardErrorReceived { add { } remove { } }
-        public event Action<Exception>? Failed { add { } remove { } }
+        private Action<Exception>? _failed;
+        public event Action<Exception>? Failed
+        {
+            add => _failed += value;
+            remove => _failed -= value;
+        }
+
+        public void Fail(Exception exception) => _failed?.Invoke(exception);
 
         public void Publish(string method, object parameters) =>
             NotificationReceived?.Invoke(new LanguageServerNotification(method, JsonSerializer.SerializeToElement(parameters)));

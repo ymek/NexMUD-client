@@ -104,7 +104,11 @@ internal sealed class ToolingTypeScriptTransport : IStudioTypeScriptTransport
     public ValueTask DisposeAsync() => _inner.DisposeAsync();
 }
 
-internal sealed record StudioLanguageDiagnostics(string Uri, JsonElement Parameters);
+internal sealed record StudioLanguageDiagnostics(string ProfileId, long Generation, string Uri, JsonElement Parameters);
+
+internal sealed record StudioLanguageFailure(string ProfileId, long Generation, string Message);
+
+internal sealed record StudioLanguageSessionStarted(string ProfileId, long Generation);
 
 /// <summary>
 /// Coordinates one filesystem-aware TypeScript language service for the active Studio profile.
@@ -122,9 +126,18 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
     private readonly Func<string, string> _workspaceRoot;
     private readonly Func<string, IStudioTypeScriptTransport> _transportFactory;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private sealed record TransportHandlers(
+        string ProfileId,
+        long Generation,
+        Action<LanguageServerNotification> Notification,
+        Action<string> StandardError,
+        Action<Exception> Failed);
+
     private readonly ConcurrentDictionary<string, OpenDocumentState> _documents = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<IStudioTypeScriptTransport, TransportHandlers> _transportHandlers = new(ReferenceEqualityComparer.Instance);
     private IStudioTypeScriptTransport? _transport;
     private string? _profileId;
+    private long _profileGeneration;
     private int _disposed;
 
     public StudioTypeScriptLanguageHost(
@@ -139,7 +152,12 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
 
     public event Action<StudioLanguageDiagnostics>? DiagnosticsPublished;
     public event Action<string>? OutputReceived;
-    public event Action<string>? FailureReceived;
+    public event Action<StudioLanguageFailure>? FailureReceived;
+    public event Action<StudioLanguageSessionStarted>? SessionStarted;
+
+    public bool IsCurrentProfile(string profileId, long generation) =>
+        string.Equals(Volatile.Read(ref _profileId), profileId, StringComparison.Ordinal) &&
+        Volatile.Read(ref _profileGeneration) == generation;
 
     public async Task OpenDocumentAsync(
         string profileId,
@@ -301,6 +319,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         {
             ThrowIfDisposed();
             await EnsureProfileLockedAsync(profileId).ConfigureAwait(false);
+            Interlocked.Increment(ref _profileGeneration);
             await DisposeTransportLockedAsync().ConfigureAwait(false);
             (transport, _) = await EnsureStartedLockedAsync(cancellationToken).ConfigureAwait(false);
             documentsToRefresh = _documents.Values.ToArray();
@@ -322,7 +341,8 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
             ThrowIfDisposed();
             await DisposeTransportLockedAsync().ConfigureAwait(false);
             _documents.Clear();
-            _profileId = profileId;
+            Volatile.Write(ref _profileId, profileId);
+            Interlocked.Increment(ref _profileGeneration);
         }
         finally
         {
@@ -370,6 +390,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         if (_profileId is null)
         {
             Volatile.Write(ref _profileId, profileId);
+            Interlocked.Increment(ref _profileGeneration);
             return;
         }
         if (string.Equals(_profileId, profileId, StringComparison.Ordinal)) return;
@@ -377,6 +398,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         await DisposeTransportLockedAsync().ConfigureAwait(false);
         _documents.Clear();
         Volatile.Write(ref _profileId, profileId);
+        Interlocked.Increment(ref _profileGeneration);
     }
 
     private async Task<(IStudioTypeScriptTransport Transport, bool Started)> EnsureStartedLockedAsync(
@@ -388,7 +410,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         string profileId = _profileId
             ?? throw new InvalidOperationException("A Studio profile must be selected before starting TypeScript tooling.");
         IStudioTypeScriptTransport transport = _transportFactory(_workspaceRoot(profileId));
-        WireTransport(transport);
+        WireTransport(transport, profileId, Volatile.Read(ref _profileGeneration));
         try
         {
             await transport.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -403,6 +425,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
             }
             _transport = transport;
             OutputReceived?.Invoke("TypeScript language service started.");
+            SessionStarted?.Invoke(new StudioLanguageSessionStarted(profileId, Volatile.Read(ref _profileGeneration)));
             return (transport, true);
         }
         catch
@@ -413,18 +436,27 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         }
     }
 
-    private void WireTransport(IStudioTypeScriptTransport transport)
+    private void WireTransport(IStudioTypeScriptTransport transport, string profileId, long generation)
     {
-        transport.NotificationReceived += TransportNotificationReceived;
-        transport.StandardErrorReceived += TransportStandardErrorReceived;
-        transport.Failed += TransportFailed;
+        Action<LanguageServerNotification> notification = value =>
+            TransportNotificationReceived(transport, profileId, generation, value);
+        Action<string> standardError = value =>
+            TransportStandardErrorReceived(transport, profileId, generation, value);
+        Action<Exception> failed = value =>
+            TransportFailed(transport, profileId, generation, value);
+        TransportHandlers handlers = new(profileId, generation, notification, standardError, failed);
+        _transportHandlers[transport] = handlers;
+        transport.NotificationReceived += handlers.Notification;
+        transport.StandardErrorReceived += handlers.StandardError;
+        transport.Failed += handlers.Failed;
     }
 
     private void UnwireTransport(IStudioTypeScriptTransport transport)
     {
-        transport.NotificationReceived -= TransportNotificationReceived;
-        transport.StandardErrorReceived -= TransportStandardErrorReceived;
-        transport.Failed -= TransportFailed;
+        if (!_transportHandlers.TryRemove(transport, out TransportHandlers? handlers)) return;
+        transport.NotificationReceived -= handlers.Notification;
+        transport.StandardErrorReceived -= handlers.StandardError;
+        transport.Failed -= handlers.Failed;
     }
 
     private void ScheduleDiagnosticsRefresh(
@@ -433,13 +465,16 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         IEnumerable<OpenDocumentState> documents,
         CancellationToken cancellationToken)
     {
+        if (!_transportHandlers.TryGetValue(transport, out TransportHandlers? handlers) ||
+            !string.Equals(handlers.ProfileId, profileId, StringComparison.Ordinal)) return;
         foreach (OpenDocumentState document in documents)
-            _ = RefreshDiagnosticsAsync(transport, profileId, document, cancellationToken);
+            _ = RefreshDiagnosticsAsync(transport, profileId, handlers.Generation, document, cancellationToken);
     }
 
     private async Task RefreshDiagnosticsAsync(
         IStudioTypeScriptTransport transport,
         string profileId,
+        long generation,
         OpenDocumentState document,
         CancellationToken cancellationToken)
     {
@@ -460,10 +495,11 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
                 version = document.Version,
                 diagnostics
             });
-            if (!string.Equals(Volatile.Read(ref _profileId), profileId, StringComparison.Ordinal) ||
+            if (!IsCurrentProfile(profileId, generation) ||
                 !ReferenceEquals(Volatile.Read(ref _transport), transport))
                 return;
-            TransportNotificationReceived(new LanguageServerNotification("textDocument/publishDiagnostics", parameters));
+            TransportNotificationReceived(transport, profileId, generation,
+                new LanguageServerNotification("textDocument/publishDiagnostics", parameters));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -474,29 +510,49 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
         }
     }
 
-    private void TransportNotificationReceived(LanguageServerNotification notification)
+    private void TransportNotificationReceived(
+        IStudioTypeScriptTransport transport,
+        string profileId,
+        long generation,
+        LanguageServerNotification notification)
     {
-        if (!notification.Method.Equals("textDocument/publishDiagnostics", StringComparison.Ordinal)) return;
+        if (!IsCurrentProfile(profileId, generation) ||
+            !ReferenceEquals(Volatile.Read(ref _transport), transport) ||
+            !notification.Method.Equals("textDocument/publishDiagnostics", StringComparison.Ordinal)) return;
         if (!notification.Parameters.TryGetProperty("uri", out JsonElement uriElement) ||
             uriElement.ValueKind != JsonValueKind.String) return;
         string uri = uriElement.GetString() ?? string.Empty;
         if (!notification.Parameters.TryGetProperty("diagnostics", out JsonElement diagnostics) ||
             diagnostics.ValueKind != JsonValueKind.Array) return;
-        string? activeProfileId = Volatile.Read(ref _profileId);
-        if (uri.Length == 0 || activeProfileId is null || !IsCanonicalDocumentUri(activeProfileId, uri) ||
+        if (uri.Length == 0 || !IsCanonicalDocumentUri(profileId, uri) ||
             !_documents.TryGetValue(uri, out OpenDocumentState? openDocument)) return;
         if (notification.Parameters.TryGetProperty("version", out JsonElement versionElement) &&
             versionElement.TryGetInt32(out int version) && version != openDocument.Version) return;
-        DiagnosticsPublished?.Invoke(new StudioLanguageDiagnostics(uri, notification.Parameters));
+        DiagnosticsPublished?.Invoke(new StudioLanguageDiagnostics(profileId, generation, uri, notification.Parameters));
     }
 
-    private void TransportStandardErrorReceived(string line)
+    private void TransportStandardErrorReceived(
+        IStudioTypeScriptTransport transport,
+        string profileId,
+        long generation,
+        string line)
     {
-        if (!string.IsNullOrWhiteSpace(line)) OutputReceived?.Invoke($"TypeScript LSP: {line}");
+        if (IsCurrentProfile(profileId, generation) && ReferenceEquals(Volatile.Read(ref _transport), transport) &&
+            !string.IsNullOrWhiteSpace(line))
+            OutputReceived?.Invoke($"TypeScript LSP: {line}");
     }
 
-    private void TransportFailed(Exception exception) =>
-        FailureReceived?.Invoke($"TypeScript language service stopped unexpectedly: {exception.Message}");
+    private void TransportFailed(
+        IStudioTypeScriptTransport transport,
+        string profileId,
+        long generation,
+        Exception exception)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !IsCurrentProfile(profileId, generation) ||
+            !ReferenceEquals(Volatile.Read(ref _transport), transport)) return;
+        FailureReceived?.Invoke(new StudioLanguageFailure(
+            profileId, generation, $"TypeScript language service stopped unexpectedly: {exception.Message}"));
+    }
 
     private async Task DisposeTransportLockedAsync()
     {
@@ -524,6 +580,7 @@ internal sealed class StudioTypeScriptLanguageHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        Interlocked.Increment(ref _profileGeneration);
         await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
