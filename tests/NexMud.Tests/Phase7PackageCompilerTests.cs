@@ -73,6 +73,20 @@ internal static class Phase7PackageCompilerTests
         Assert.Equal("src/internal.ts", activate.SourceLocation.SourceFile);
     }
 
+    public static async Task RejectsUnresolvedLocalEntrypointExports()
+    {
+        using TemporaryDirectory temporary = new();
+        PackageFixture fixture = await PackageFixture.CreateAsync(temporary.Path).ConfigureAwait(false);
+        ScriptCompileResult result = await new TypeScriptCompiler().CompileAsync(
+            fixture.Request("import { missing } from './internal.js';\nexport { missing as activate };"))
+            .ConfigureAwait(false);
+
+        Assert.True(!result.Success, "TypeScript must reject unresolved entrypoint imports before export discovery.");
+        Assert.True(result.Diagnostics.Any(diagnostic => diagnostic.Severity == ScriptDiagnosticSeverity.Error),
+            "The unresolved import must produce a compiler error.");
+        Assert.Equal(0, result.ExportedFunctions?.Count ?? -1);
+    }
+
     public static async Task PreservesProjectConfiguredTypeLibraries()
     {
         using TemporaryDirectory temporary = new();
