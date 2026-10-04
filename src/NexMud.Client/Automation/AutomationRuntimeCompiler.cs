@@ -230,19 +230,26 @@ public sealed class AutomationRuntimeCompiler
         return true;
     }
 
-    public async Task<bool> RunWorkflowActionsAsync(
+    public async Task<bool> PrepareWorkflowActionsAsync(
         AutomationWorkflow workflow,
-        IMudEvent? currentEvent,
-        IReadOnlyDictionary<string, string>? variables = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(workflow);
         if (!CanAutomate(_state.Current)) return false;
         if (!await EnsureRuntimeRunningAsync(cancellationToken).ConfigureAwait(false)) return false;
 
-        AutomationProgram? program = Programs.FirstOrDefault(candidate =>
-            candidate.Type == AutomationProgramType.Workflow &&
-            candidate.Name.Equals(workflow.Name, StringComparison.OrdinalIgnoreCase));
+        return FindWorkflowProgram(Programs, workflow) is not null;
+    }
+
+    public async Task<bool> RunWorkflowActionsAsync(
+        AutomationWorkflow workflow,
+        IMudEvent? currentEvent,
+        IReadOnlyDictionary<string, string>? variables = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await PrepareWorkflowActionsAsync(workflow, cancellationToken).ConfigureAwait(false)) return false;
+
+        AutomationProgram? program = FindWorkflowProgram(Programs, workflow);
         if (program is null) return false;
 
         Dictionary<string, string?> values = ResolveTemplateValues(program, _state.Current, variables, currentEvent);
@@ -544,7 +551,7 @@ public sealed class AutomationRuntimeCompiler
             AutomationAction[] actions = workflow.Actions?.ToArray() ?? [];
             if (!workflow.Enabled || disabledGroups.Contains(workflow.Group) || actions.Length == 0) continue;
             yield return new AutomationProgram(
-                ResolveId(workflow.Id, "workflow", $"{workflow.Name}\n{workflow.TriggerEvent}\n{workflow.TriggerCondition}\n{workflow.Group}"),
+                WorkflowProgramId(workflow),
                 workflow.Name,
                 AutomationProgramType.Workflow,
                 new WorkflowAutomationTrigger(workflow.TriggerEvent, workflow.TriggerCondition),
@@ -554,6 +561,23 @@ public sealed class AutomationRuntimeCompiler
                 Priority: workflow.Priority,
                 Order: index);
         }
+    }
+
+    internal static AutomationProgram? FindWorkflowProgram(
+        IReadOnlyList<AutomationProgram> programs,
+        AutomationWorkflow workflow)
+    {
+        string id = WorkflowProgramId(workflow);
+        return programs.FirstOrDefault(candidate =>
+            candidate.Type == AutomationProgramType.Workflow &&
+            candidate.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static string WorkflowProgramId(AutomationWorkflow workflow)
+    {
+        if (!string.IsNullOrWhiteSpace(workflow.Id)) return workflow.Id.Trim();
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(workflow)));
+        return $"automation.workflow.{Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant()}";
     }
 
     private static IReadOnlyList<AutomationAction> ResolveActions(

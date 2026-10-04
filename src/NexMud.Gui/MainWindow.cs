@@ -1199,10 +1199,25 @@ public sealed class MainWindow : Window
                     if (Enum.TryParse(binding.Command, true, out ToolView view)) ShowTool(view);
                     break;
                 case KeybindingActionKind.RunAutomation:
-                    if (string.IsNullOrWhiteSpace(binding.Command) ||
-                        !await _runtime.Automation.RunWorkflowAsync(binding.Command, _cts.Token).ConfigureAwait(true))
+                {
+                    string reference = binding.Command ?? string.Empty;
+                    IReadOnlyList<AutomationWorkflow> workflows = _runtime.Settings.Workflows ?? [];
+                    AutomationWorkflow? workflow = workflows.FirstOrDefault(candidate =>
+                        candidate.Id?.Equals(reference, StringComparison.OrdinalIgnoreCase) == true);
+                    if (workflow is null)
+                    {
+                        AutomationWorkflow[] nameMatches = workflows
+                            .Where(candidate => candidate.Name.Equals(reference, StringComparison.OrdinalIgnoreCase))
+                            .Take(2)
+                            .ToArray();
+                        if (nameMatches.Length == 1) workflow = nameMatches[0];
+                    }
+
+                    if (workflow is null || string.IsNullOrWhiteSpace(workflow.Id) ||
+                        !await _runtime.Automation.RunWorkflowAsync(workflow.Id, _cts.Token).ConfigureAwait(true))
                         throw new InvalidOperationException($"Automation '{binding.Command}' is not available to run.");
                     break;
+                }
             }
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)

@@ -199,7 +199,12 @@ public static class Program
         await RunAsync("world scrollback is bounded and searchable", WorldScrollbackIsBoundedAndSearchable);
         await RunAsync("automation expressions support OR predicates variables and entity functions", AutomationExpressionsSupportRichPredicates);
         await RunAsync("automation rules yield to the human override window without dropping commands", AutomationRulesWaitForHumanOverride);
-        await RunAsync("automation workflow settings round trip", AutomationWorkflowSettingsRoundTrip);
+        await RunAsync("automation workflow settings round trip preserves DSL and structured actions", AutomationWorkflowSettingsRoundTrip);
+        await RunAsync("workflow program identity distinguishes duplicate names", WorkflowProgramIdentityDistinguishesDuplicateNames);
+        await RunAsync("workflow settings normalization assigns stable unique ids", WorkflowSettingsNormalizationAssignsStableUniqueIds);
+        await RunAsync("workflow dispatcher preflight prevents partial legacy execution", WorkflowDispatcherPreflightPreventsPartialExecution);
+        await RunAsync("continue mode skips unavailable workflow actions and completes DSL", ContinueModeSkipsUnavailableWorkflowActions);
+        await RunAsync("legacy workflow conversion is conservative and all-or-nothing", LegacyWorkflowConversionIsAllOrNothing);
         await RunAsync("automation workflow dispatches sequential commands without blocking its event reader", AutomationWorkflowDispatchesWithoutDeadlock);
         await RunAsync("automation workflow retries are bounded and observable", AutomationWorkflowRetriesAreBounded);
         await RunAsync("automation workflow concurrency is enforced for manual starts", AutomationWorkflowConcurrencyIsEnforced);
@@ -6523,19 +6528,37 @@ public static class Program
             ClientSettingsStore store = new(path);
             ClientSettings settings = ClientSettings.Default with
             {
-                Workflows = [new AutomationWorkflow(
-                    "recover after kill",
-                    "set last=${combat.target}\nwait !combat.active timeout=5000\njev recovery",
-                    TriggerEvent: nameof(EnemyKilled),
-                    CooldownMilliseconds: 250,
-                    FailureMode: AutomationWorkflowFailureMode.Continue)],
+                Workflows =
+                [
+                    new AutomationWorkflow(
+                        "recover after kill",
+                        "  # keep this comment  \r\n\r\n  send look  \r\n",
+                        TriggerEvent: nameof(EnemyKilled),
+                        CooldownMilliseconds: 250,
+                        FailureMode: AutomationWorkflowFailureMode.Continue),
+                    new AutomationWorkflow("structured only", "", Actions:
+                    [
+                        new SendCommandAutomationAction("score"),
+                        new SetStorageAutomationAction("flag", "ready"),
+                        new DeleteStorageAutomationAction("old-flag")
+                    ])
+                ],
                 Automation = new AutomationPreferences(HumanOverrideMilliseconds: 2200, MaxConcurrentWorkflows: 3, PersistVariables: true)
             };
             await store.SaveAsync(settings);
             ClientSettings loaded = await store.LoadAsync();
-            AutomationWorkflow workflow = Assert.Single(loaded.Workflows!);
+            Assert.Equal(2, loaded.Workflows!.Count);
+            AutomationWorkflow workflow = loaded.Workflows[0];
             Assert.Equal("recover after kill", workflow.Name);
+            Assert.Equal("  # keep this comment  \r\n\r\n  send look  \r\n", workflow.Steps);
             Assert.Equal(nameof(EnemyKilled), workflow.TriggerEvent);
+            AutomationWorkflow structured = loaded.Workflows[1];
+            Assert.Equal(string.Empty, structured.Steps);
+            Assert.Equal(3, structured.Actions!.Count);
+            SetStorageAutomationAction setStorage = Assert.IsType<SetStorageAutomationAction>(structured.Actions[1]);
+            Assert.True(setStorage.Value is JsonElement, "Storage JSON value should round-trip as a JSON element.");
+            Assert.Equal("ready", ((JsonElement)setStorage.Value!).GetString());
+            Assert.IsType<DeleteStorageAutomationAction>(structured.Actions[2]);
             Assert.Equal(2200, loaded.Automation!.HumanOverrideMilliseconds);
             Assert.Equal(3, loaded.Automation.MaxConcurrentWorkflows);
         }
@@ -6543,6 +6566,181 @@ public static class Program
         {
             try { Directory.Delete(directory, true); } catch { }
         }
+    }
+
+    private static Task WorkflowProgramIdentityDistinguishesDuplicateNames()
+    {
+        AutomationWorkflow first = new("duplicate name", "send look", Actions: [new SendCommandAutomationAction("look")]);
+        AutomationWorkflow second = new("duplicate name", "send score", Actions: [new SendCommandAutomationAction("score")]);
+        AutomationProgram firstProgram = new(
+            AutomationRuntimeCompiler.WorkflowProgramId(first), first.Name, AutomationProgramType.Workflow,
+            new WorkflowAutomationTrigger(first.TriggerEvent, first.TriggerCondition), [], first.Actions!);
+        AutomationProgram secondProgram = new(
+            AutomationRuntimeCompiler.WorkflowProgramId(second), second.Name, AutomationProgramType.Workflow,
+            new WorkflowAutomationTrigger(second.TriggerEvent, second.TriggerCondition), [], second.Actions!);
+
+        Assert.True(firstProgram.Id != secondProgram.Id, "Duplicate-name workflows require distinct program identities.");
+        AutomationProgram? selected = AutomationRuntimeCompiler.FindWorkflowProgram([firstProgram, secondProgram], second);
+        Assert.Equal(secondProgram.Id, selected?.Id);
+        Assert.Equal("score", Assert.IsType<SendCommandAutomationAction>(selected!.Actions[0]).Command);
+        return Task.CompletedTask;
+    }
+
+    private static async Task WorkflowSettingsNormalizationAssignsStableUniqueIds()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "nexmud-workflow-ids", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "settings.json");
+        try
+        {
+            ClientSettingsStore store = new(path);
+            ClientSettings settings = ClientSettings.Default with
+            {
+                Workflows =
+                [
+                    new AutomationWorkflow("duplicate name", "send look"),
+                    new AutomationWorkflow("duplicate name", "send score"),
+                    new AutomationWorkflow("duplicate name", "send look")
+                ]
+            };
+            await store.SaveAsync(settings);
+            string[] firstIds = (await store.LoadAsync()).Workflows!.Select(workflow => workflow.Id!).ToArray();
+            Assert.Equal(3, firstIds.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+            await store.SaveAsync(await store.LoadAsync());
+            string[] secondIds = (await store.LoadAsync()).Workflows!.Select(workflow => workflow.Id!).ToArray();
+            Assert.Equal(string.Join(",", firstIds), string.Join(",", secondIds));
+        }
+        finally
+        {
+            try { Directory.Delete(directory, true); } catch { }
+        }
+    }
+
+    private static async Task WorkflowDispatcherPreflightPreventsPartialExecution()
+    {
+        string statePath = Path.Combine(Path.GetTempPath(), $"nexmud-structured-workflow-{Guid.NewGuid():N}.json");
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        StateReducer reducer = new(events.StateEvents);
+        FakeSender sender = new();
+        JevAuthorityService authority = new(events);
+        ActionProcessor actions = new(sender, reducer, authority, events);
+        ClientSettings settings = ClientSettings.Default with
+        {
+            Workflows = [new AutomationWorkflow("workflow with actions", "send look", Actions: [new SendCommandAutomationAction("score")])],
+            Automation = new AutomationPreferences(HumanOverrideMilliseconds: 0)
+        };
+        await using ScriptExecutionSupervisor execution = new();
+        ScriptScheduler scheduler = new();
+        ClientScriptCommands commands = new(actions, reducer, scheduler, () => settings.Automation ?? new AutomationPreferences());
+        ClientAutomationService automation = new(
+            events.SubscribeLossless(), reducer, commands, scheduler, execution, events, () => settings,
+            stateStore: new AutomationStateStore(statePath));
+        using CancellationTokenSource cts = new();
+        Task reducerTask = reducer.RunAsync(cts.Token);
+        Task actionTask = actions.RunAsync(cts.Token);
+        Task automationTask = automation.RunAsync(cts.Token);
+
+        await events.PublishAsync(new ConnectionStateChanged(ConnectionStatus.Connected, "localhost", 4000), "test");
+        await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
+        await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
+                                  reducer.Current.Session.InputMode == SessionInputMode.Normal);
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
+
+        List<AutomationWorkflowStateChanged> states = [];
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+        while (!states.Any(state => state.Status is AutomationWorkflowStatus.Failed or AutomationWorkflowStatus.Completed))
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            if (envelope.Payload is AutomationWorkflowStateChanged state && state.WorkflowName == "workflow with actions")
+                states.Add(state);
+        }
+        Assert.True(states.Any(state => state.Status == AutomationWorkflowStatus.Started));
+        Assert.Equal(AutomationWorkflowStatus.Failed, states[^1].Status);
+        Assert.Equal(0, sender.Commands.Count);
+
+        cts.Cancel();
+        await IgnoreCancellation(reducerTask);
+        await IgnoreCancellation(actionTask);
+        await IgnoreCancellation(automationTask);
+        try { File.Delete(statePath); } catch { }
+        try { File.Delete(statePath + ".tmp"); } catch { }
+    }
+
+    private static async Task ContinueModeSkipsUnavailableWorkflowActions()
+    {
+        string statePath = Path.Combine(Path.GetTempPath(), $"nexmud-structured-continue-{Guid.NewGuid():N}.json");
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        StateReducer reducer = new(events.StateEvents);
+        FakeSender sender = new();
+        JevAuthorityService authority = new(events);
+        ActionProcessor actions = new(sender, reducer, authority, events);
+        ClientSettings settings = ClientSettings.Default with
+        {
+            Workflows = [new AutomationWorkflow(
+                "continue without actions",
+                "send look\nset mode=continued",
+                FailureMode: AutomationWorkflowFailureMode.Continue,
+                Actions: [new SendCommandAutomationAction("score")])],
+            Automation = new AutomationPreferences(HumanOverrideMilliseconds: 0)
+        };
+        await using ScriptExecutionSupervisor execution = new();
+        ScriptScheduler scheduler = new();
+        ClientScriptCommands commands = new(actions, reducer, scheduler, () => settings.Automation ?? new AutomationPreferences());
+        ClientAutomationService automation = new(
+            events.SubscribeLossless(), reducer, commands, scheduler, execution, events, () => settings,
+            stateStore: new AutomationStateStore(statePath));
+        using CancellationTokenSource cts = new();
+        Task reducerTask = reducer.RunAsync(cts.Token);
+        Task actionTask = actions.RunAsync(cts.Token);
+        Task automationTask = automation.RunAsync(cts.Token);
+
+        await events.PublishAsync(new ConnectionStateChanged(ConnectionStatus.Connected, "localhost", 4000), "test");
+        await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
+        await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
+                                  reducer.Current.Session.InputMode == SessionInputMode.Normal);
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
+
+        List<AutomationWorkflowStateChanged> states = [];
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+        while (!states.Any(state => state.Status == AutomationWorkflowStatus.Completed))
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            if (envelope.Payload is AutomationWorkflowStateChanged state && state.WorkflowName == "continue without actions")
+                states.Add(state);
+        }
+        Assert.False(states.Any(state => state.Status == AutomationWorkflowStatus.Failed));
+        Assert.True(states.Any(state => state.Detail?.Contains("continuing without structured actions", StringComparison.Ordinal) == true));
+        Assert.Equal("look", Assert.Single(sender.Commands));
+        Assert.Equal("continued", automation.Variables["mode"]);
+
+        cts.Cancel();
+        await IgnoreCancellation(reducerTask);
+        await IgnoreCancellation(actionTask);
+        await IgnoreCancellation(automationTask);
+        try { File.Delete(statePath); } catch { }
+        try { File.Delete(statePath + ".tmp"); } catch { }
+    }
+
+    private static Task LegacyWorkflowConversionIsAllOrNothing()
+    {
+        Assert.True(LegacyWorkflowStepAdapter.TryConvert("# note\n\nSEND look\nDELAY 125", out IReadOnlyList<AutomationAction> converted, out string? error));
+        Assert.Equal(null, error);
+        Assert.Equal(2, converted.Count);
+        Assert.Equal("look", Assert.IsType<SendCommandAutomationAction>(converted[0]).Command);
+        Assert.Equal(125, Assert.IsType<DelayAutomationAction>(converted[1]).Milliseconds);
+
+        const string unsupported = "send look\n# explanation\n\nif hp < 50 :: send flee";
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert(unsupported, out IReadOnlyList<AutomationAction> rejected, out error));
+        Assert.Equal(0, rejected.Count);
+        Assert.True(error?.Contains("Line 4", StringComparison.Ordinal) == true);
+        Assert.True(error?.Contains("No changes were made", StringComparison.Ordinal) == true);
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("send kill ${target}", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("send   ", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("delay 600001", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("wait 5", out _, out error));
+        return Task.CompletedTask;
     }
 
     private static async Task AutomationWorkflowDispatchesWithoutDeadlock()
@@ -6582,7 +6780,7 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("manual smoke"), "Manual workflow should start without an automatic trigger.");
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])), "Manual workflow should start without an automatic trigger.");
         await WaitUntilAsync(() => sender.Commands.Count == 1 && automation.ActiveWorkflowNames.Count == 0);
         Assert.Equal("look", sender.Commands[0]);
         Assert.False(automation.Variables.ContainsKey("mode"), "Workflow unset step should remove its persistent variable.");
@@ -6630,7 +6828,7 @@ public static class Program
         await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
-        Assert.True(await automation.RunWorkflowAsync("bounded retry"));
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
 
         List<AutomationWorkflowStateChanged> states = [];
         using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(2));
@@ -6667,8 +6865,8 @@ public static class Program
         {
             Workflows =
             [
-                new AutomationWorkflow("first", "delay 500"),
-                new AutomationWorkflow("second", "send look")
+                new AutomationWorkflow("duplicate", "delay 500", Id: "first-id"),
+                new AutomationWorkflow("duplicate", "send look", Id: "second-id")
             ],
             Automation = new AutomationPreferences(MaxCommandsPerSecond: 20, HumanOverrideMilliseconds: 0, MaxConcurrentWorkflows: 1)
         };
@@ -6688,13 +6886,17 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("first"));
-        Assert.False(await automation.RunWorkflowAsync("second"),
+        string firstWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0]);
+        string secondWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows[1]);
+        Assert.True(await automation.RunWorkflowAsync(firstWorkflowId));
+        Assert.False(await automation.RunWorkflowAsync(secondWorkflowId),
             "Manual workflow starts must honor MaxConcurrentWorkflows.");
+        Assert.True(automation.CancelWorkflow(firstWorkflowId), "Cancellation must select by stable workflow ID.");
         await WaitUntilAsync(() => automation.ActiveWorkflowNames.Count == 0);
-        Assert.True(await automation.RunWorkflowAsync("second"),
-            "A workflow should start after the previous execution releases its slot.");
+        Assert.True(await automation.RunWorkflowAsync(secondWorkflowId),
+            "A same-name workflow should start after the previous execution releases its slot.");
         await WaitUntilAsync(() => sender.Commands.Count == 1 && automation.ActiveWorkflowNames.Count == 0);
+        Assert.Equal("look", Assert.Single(sender.Commands));
 
         cts.Cancel();
         await IgnoreCancellation(reducerTask);
@@ -6737,7 +6939,7 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("continue after failure"));
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
         List<AutomationWorkflowStateChanged> states = [];
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
         while (!states.Any(state => state.Status == AutomationWorkflowStatus.Completed))

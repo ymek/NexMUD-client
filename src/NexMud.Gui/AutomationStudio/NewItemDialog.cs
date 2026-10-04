@@ -30,7 +30,7 @@ internal sealed record NewItemTemplate(string Title, string Description, StudioD
         new("Semantic Trigger", "React to a recognised game event such as entering a room.", StudioDocumentKind.SemanticTrigger,
             [new("Name", "on-room-change", "Trigger name"), new("Event", "RoomChanged", "Event name")], "RoomChanged  →  your actions"),
         new("Workflow", "Chain several steps into one reusable sequence.", StudioDocumentKind.Workflow,
-            [new("Name", "buff-up", "Workflow name"), new("First step", "send look", "A workflow step")], "step 1, step 2, step 3"),
+            [new("Name", "buff-up", "Workflow name")], "Add structured actions after creation"),
         new("Script package", "Write TypeScript for logic the visual editors can't express.", StudioDocumentKind.Script,
             [new("Package name", "My scripts", "Shown in the Explorer")], "main.ts with full IntelliSense")
     ];

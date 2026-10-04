@@ -352,20 +352,47 @@ internal sealed class AutomationDocumentEditor
         NumericUpDown cooldown = Number(value.CooldownMilliseconds, 0, 600_000);
         ComboBox failure = Combo(value.FailureMode);
         CheckBox oneShot = Check("One shot", value.OneShot);
-        StepList steps = new(this, value.Steps);
+        TextBox legacySteps = Text(value.Steps);
+        bool legacyStepsEdited = false;
+        legacySteps.TextChanged += (_, _) => legacyStepsEdited = true;
+        legacySteps.AcceptsReturn = true;
+        legacySteps.MinHeight = 140;
         ActionList actions = new(this, value.Actions);
+        Button convert = Quiet("Convert supported legacy steps");
+        TextBlock conversionStatus = new() { Foreground = UiTheme.Warning, TextWrapping = TextWrapping.Wrap, IsVisible = false };
+        convert.HorizontalAlignment = HorizontalAlignment.Left;
+        convert.Click += (_, _) =>
+        {
+            if (!LegacyWorkflowStepAdapter.TryConvert(legacySteps.Text, out IReadOnlyList<AutomationAction> converted, out string? error))
+            {
+                conversionStatus.Text = error;
+                conversionStatus.IsVisible = true;
+                return;
+            }
+            actions.Append(converted);
+            legacySteps.Text = string.Empty;
+            conversionStatus.IsVisible = false;
+            MarkChanged();
+        };
         page.Children.Add(Section("TRIGGER (optional)", Labeled("Name", name),
             Row(Labeled("Event", eventName), Labeled("Condition", triggerCondition))));
-        page.Children.Add(Section("STEPS", steps.View));
-        page.Children.Add(Section("THEN RUN", actions.View));
+        page.Children.Add(Section("LEGACY DSL (preserved verbatim)",
+            new TextBlock { Text = "Comments, blank lines and whitespace are retained. Conversion is explicit and all-or-nothing.", Foreground = UiTheme.Muted, TextWrapping = TextWrapping.Wrap },
+            Labeled("Raw workflow steps", legacySteps), convert, conversionStatus));
+        page.Children.Add(Section(string.IsNullOrWhiteSpace(value.Steps) ? "WORKFLOW ACTIONS" : "THEN RUN (after legacy DSL)", actions.View));
         page.Children.Add(Section("BEHAVIOR", Row(Labeled("Group", group), Labeled("Priority", priority), Labeled("Cooldown (ms)", cooldown), Labeled("On failure", failure)), oneShot));
-        _collect = () => value with
+        _collect = () =>
         {
-            Name = name.Text ?? "", TriggerEvent = BlankToNull(eventName.Text), TriggerCondition = BlankToNull(triggerCondition.Text),
-            Group = NonBlank(group.Text, "Default"), Steps = steps.Value, Priority = (int)(priority.Value ?? value.Priority),
+            if (actions.ValidationError is { } validationError)
+                throw new InvalidOperationException(validationError);
+            return value with
+            {
+                Name = name.Text ?? "", TriggerEvent = BlankToNull(eventName.Text), TriggerCondition = BlankToNull(triggerCondition.Text),
+            Group = NonBlank(group.Text, "Default"), Steps = legacyStepsEdited ? legacySteps.Text ?? string.Empty : value.Steps, Priority = (int)(priority.Value ?? value.Priority),
             CooldownMilliseconds = (int)(cooldown.Value ?? value.CooldownMilliseconds),
             FailureMode = (AutomationWorkflowFailureMode)(failure.SelectedItem ?? value.FailureMode),
-            OneShot = oneShot.IsChecked ?? false, Enabled = IsEnabled, Actions = actions.Values
+                OneShot = oneShot.IsChecked ?? false, Enabled = IsEnabled, Actions = actions.Values
+            };
         };
     }
 
@@ -466,13 +493,24 @@ internal sealed class AutomationDocumentEditor
 
         public Control View { get; }
         public IReadOnlyList<AutomationAction> Values => [.. _actions];
+        public string? ValidationError => _storageErrors.FirstOrDefault(error => error.IsVisible)?.Text;
+        private readonly List<TextBlock> _storageErrors = [];
+
+        public void Append(IEnumerable<AutomationAction> actions)
+        {
+            _actions.AddRange(actions);
+            Changed();
+        }
 
         private void ShowAddMenu(Control anchor)
         {
             ContextMenu menu = new();
             AddItem(menu, "Send Command", () => new SendCommandAutomationAction("look"));
+            AddItem(menu, "Send Commands", () => new SendCommandsAutomationAction(["look", "score"]));
             AddItem(menu, "Wait", () => new DelayAutomationAction(500));
             AddItem(menu, "Log", () => new LogAutomationAction("Info", "message"));
+            AddItem(menu, "Set Storage", () => new SetStorageAutomationAction("key", "value"));
+            AddItem(menu, "Delete Storage", () => new DeleteStorageAutomationAction("key"));
             MenuItem script = new() { Header = "Run Script Function…" };
             script.Click += async (_, _) =>
             {
@@ -497,6 +535,7 @@ internal sealed class AutomationDocumentEditor
         private void Render()
         {
             _rows.Children.Clear();
+            _storageErrors.Clear();
             if (_actions.Count == 0)
                 _rows.Children.Add(new TextBlock { Text = "No actions", Foreground = UiTheme.Faint });
             for (int i = 0; i < _actions.Count; i++)
@@ -528,16 +567,31 @@ internal sealed class AutomationDocumentEditor
                     body.Children.Add(ms);
                     break;
                 case LogAutomationAction log:
-                    body.Children.Add(Heading($"{i + 1}. Log ({log.Level})"));
+                    body.Children.Add(Heading($"{i + 1}. Log"));
+                    body.Children.Add(Bound(log.Level, text => _actions[i] = log with { Level = text }));
                     body.Children.Add(Bound(log.Message, text => _actions[i] = log with { Message = text }));
                     break;
                 case SetStorageAutomationAction set:
                     body.Children.Add(Heading($"{i + 1}. Set Storage"));
-                    body.Children.Add(new TextBlock { Text = $"{set.Key} = {set.Value}", Foreground = UiTheme.Muted, FontFamily = UiTheme.Mono });
+                    body.Children.Add(Bound(set.Key, text => _actions[i] = set with { Key = text }));
+                    TextBlock storageError = new() { Text = "Enter a valid JSON value.", Foreground = UiTheme.Danger, FontSize = 12, IsVisible = false };
+                    _storageErrors.Add(storageError);
+                    TextBox storageValue = Bound(JsonSerializer.Serialize(set.Value), text =>
+                    {
+                        try
+                        {
+                            using JsonDocument parsed = JsonDocument.Parse(text);
+                            _actions[i] = set with { Value = parsed.RootElement.Clone() };
+                            storageError.IsVisible = false;
+                        }
+                        catch (JsonException) { storageError.IsVisible = true; }
+                    });
+                    body.Children.Add(Labeled("Value (JSON)", storageValue));
+                    body.Children.Add(storageError);
                     break;
                 case DeleteStorageAutomationAction delete:
                     body.Children.Add(Heading($"{i + 1}. Delete Storage"));
-                    body.Children.Add(new TextBlock { Text = delete.Key, Foreground = UiTheme.Muted, FontFamily = UiTheme.Mono });
+                    body.Children.Add(Bound(delete.Key, text => _actions[i] = delete with { Key = text }));
                     break;
                 case RunScriptFunctionAutomationAction script:
                     body.Children.Add(_owner.ScriptCard($"{i + 1}. Run Script Function", script.FunctionRef, script.Arguments,
@@ -546,7 +600,7 @@ internal sealed class AutomationDocumentEditor
                         removable: null));
                     break;
             }
-            return Frame(body, i, _actions.Count, Move, Remove);
+            return Frame(body, i, _actions.Count, Move, Remove, Duplicate);
         }
 
         private TextBox Bound(string initial, Action<string> update)
@@ -565,6 +619,8 @@ internal sealed class AutomationDocumentEditor
         }
 
         private void Remove(int index) { _actions.RemoveAt(index); Changed(); }
+
+        private void Duplicate(int index) { _actions.Insert(index + 1, _actions[index]); Changed(); }
     }
 
     /// <summary>Condition list. Editable: state expressions and script predicates; other shapes are shown and removable.</summary>
@@ -666,63 +722,14 @@ internal sealed class AutomationDocumentEditor
         };
     }
 
-    /// <summary>Workflow DSL steps (one per line) as a reorderable vertical list.</summary>
-    private sealed class StepList
-    {
-        private readonly AutomationDocumentEditor _owner;
-        private readonly List<string> _steps;
-        private readonly StackPanel _rows = new() { Spacing = 10 };
-
-        public StepList(AutomationDocumentEditor owner, string steps)
-        {
-            _owner = owner;
-            _steps = [.. steps.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
-            Button add = Quiet("+ Add step");
-            add.HorizontalAlignment = HorizontalAlignment.Left;
-            add.Click += (_, _) => { _steps.Add("send look"); Changed(); };
-            View = new StackPanel { Spacing = 10, Children = { _rows, add } };
-            Render();
-        }
-
-        public Control View { get; }
-        public string Value => string.Join('\n', _steps.Where(step => !string.IsNullOrWhiteSpace(step)));
-
-        private void Changed() { _owner.MarkChanged(); Render(); }
-
-        private void Render()
-        {
-            _rows.Children.Clear();
-            if (_steps.Count == 0) _rows.Children.Add(new TextBlock { Text = "No steps", Foreground = UiTheme.Faint });
-            for (int i = 0; i < _steps.Count; i++)
-            {
-                int at = i;
-                StackPanel body = new() { Spacing = 4 };
-                body.Children.Add(Heading($"{i + 1}. Step"));
-                TextBox box = _owner.Text(_steps[i]);
-                box.TextChanged += (_, _) => { _steps[at] = box.Text ?? ""; _owner.MarkChanged(); };
-                body.Children.Add(box);
-                _rows.Children.Add(Frame(body, i, _steps.Count, Move, Remove));
-            }
-        }
-
-        private void Move(int from, int delta)
-        {
-            int to = from + delta;
-            if (to < 0 || to >= _steps.Count) return;
-            (_steps[from], _steps[to]) = (_steps[to], _steps[from]);
-            Changed();
-        }
-
-        private void Remove(int index) { _steps.RemoveAt(index); Changed(); }
-    }
-
     // ───────────────────────────── Layout and control helpers ─────────────────────────────
 
-    private static Control Frame(Control body, int index, int count, Action<int, int> move, Action<int> remove)
+    private static Control Frame(Control body, int index, int count, Action<int, int> move, Action<int> remove, Action<int>? duplicate = null)
     {
         StackPanel tools = new() { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Top };
         tools.Children.Add(Tool("↑", $"Move up", index > 0, () => move(index, -1)));
         tools.Children.Add(Tool("↓", "Move down", index < count - 1, () => move(index, 1)));
+        if (duplicate is not null) tools.Children.Add(Tool("⧉", "Duplicate", true, () => duplicate(index)));
         tools.Children.Add(Tool("×", "Remove", true, () => remove(index)));
         Grid grid = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
         grid.Children.Add(body);

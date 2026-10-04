@@ -5,6 +5,7 @@ using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using NexMud.Client.Automation;
 using NexMud.Client.Interaction;
 using NexMud.Client.Runtime;
 using NexMud.Client.Settings;
@@ -380,7 +381,7 @@ internal sealed class AutomationWorkspace : UserControl
             OneShot = oneShot.IsChecked ?? false, Enabled = enabled.IsChecked ?? false
         }));
         Button run = UiTheme.QuietButton("Run workflow");
-        run.Click += async (_, _) => await _runtime.Automation.RunWorkflowAsync(value.Name, _runtime.CancellationToken).ConfigureAwait(true);
+        run.Click += async (_, _) => await _runtime.Automation.RunWorkflowAsync(value.Id ?? string.Empty, _runtime.CancellationToken).ConfigureAwait(true);
         actions.Children.Insert(0, run); form.Children.Add(actions); return form;
     }
 
@@ -474,7 +475,7 @@ internal sealed class AutomationWorkspace : UserControl
             case "Keybinding": keys.Add(new CommandKeyBinding("Cmd+1", "scan north", Name: "New keybinding", Context: KeybindingContext.Input)); _filter.SelectedItem = "Keybindings"; break;
             case "Trigger": triggers.Add(new TriggerRule("You are thirsty.", "drink fountain")); _filter.SelectedItem = "Triggers"; break;
             case "State Rule": rules.Add(new GameRule("New state rule", "hp.percent < 30", "look")); _filter.SelectedItem = "State Rules"; break;
-            case "Workflow": workflows.Add(new AutomationWorkflow("New workflow", "send look")); _filter.SelectedItem = "Workflows"; break;
+            case "Workflow": workflows.Add(new AutomationWorkflow("New workflow", "", Actions: [new SendCommandAutomationAction("look")], Id: Guid.NewGuid().ToString("N"))); _filter.SelectedItem = "Workflows"; break;
             case "Timer": timers.Add(new CommandTimer("New timer", 60, "score")); _filter.SelectedItem = "Timers"; break;
             case "Script-backed": await _showScripting().ConfigureAwait(true); return;
         }
