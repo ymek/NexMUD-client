@@ -95,7 +95,9 @@ public sealed record AutomationWorkflow(
     AutomationWorkflowFailureMode FailureMode = AutomationWorkflowFailureMode.Stop,
     bool OneShot = false,
     IReadOnlyList<AutomationAction>? Actions = null,
-    string? Id = null);
+    string? Id = null,
+    bool AllowManualRun = true,
+    string? Hotkey = null);
 
 public sealed record CommandTimer(
     string Name,

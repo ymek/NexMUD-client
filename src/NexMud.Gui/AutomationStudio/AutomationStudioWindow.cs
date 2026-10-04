@@ -317,7 +317,7 @@ internal sealed partial class AutomationStudioWindow : Window
                 menu.Items.Add(item);
             }
             if (kinds.Length > 0) menu.Items.Add(new Separator());
-            foreach (StudioDocumentKind kind in kinds)
+            foreach (StudioDocumentKind kind in kinds.Where(kind => kind != StudioDocumentKind.Workflow))
             {
                 MenuItem folder = new() { Header = $"New {kind.CategoryLabel()} Folder…" };
                 StudioDocumentKind captured = kind;
@@ -1114,6 +1114,32 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         Dictionary<int, AutomationEntryInfo> byIndex = entries.ToDictionary(entry => entry.Index);
         List<TreeViewItem> nodes = [];
+        if (kind == StudioDocumentKind.Workflow)
+        {
+            Dictionary<int, AutomationOrganizationItem> itemByIndex = _organization.ItemsFor(kind)
+                .ToDictionary(item => item.SourceIndex);
+            IGrouping<string, (AutomationWorkflow Workflow, int Index)>[] groups = (_runtime.Settings.Workflows ?? [])
+                .Select((workflow, index) => (Workflow: workflow, Index: index))
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.Workflow.Group) ? "Default" : item.Workflow.Group.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            foreach (IGrouping<string, (AutomationWorkflow Workflow, int Index)> group in groups)
+            {
+                bool groupMatches = StudioFilter.Matches(group.Key, filter);
+                (AutomationWorkflow Workflow, int Index)[] members = group
+                    .Where(item => groupMatches || StudioFilter.Matches(item.Workflow.Name, filter))
+                    .ToArray();
+                if (members.Length == 0) continue;
+                TreeViewItem groupNode = Node(new StudioNode(NodeKind.Category, $"▸ {group.Key} ({group.Count()})", kind));
+                groupNode.IsExpanded = !string.IsNullOrWhiteSpace(filter) || group.Count() <= 12;
+                groupNode.ItemsSource = members
+                    .Where(item => byIndex.ContainsKey(item.Index) && itemByIndex.ContainsKey(item.Index))
+                    .Select(item => AutomationEntryNode(kind, byIndex[item.Index], itemByIndex[item.Index]))
+                    .ToArray();
+                nodes.Add(groupNode);
+            }
+            return nodes;
+        }
         foreach (AutomationOrganizationFolder folder in _organization.FoldersFor(kind))
         {
             TreeViewItem? folderNode = BuildFolderNode(folder, byIndex, filter);
@@ -1249,7 +1275,8 @@ internal sealed partial class AutomationStudioWindow : Window
         node ??= _navigator.SelectedItem is TreeViewItem selected && _nodes.TryGetValue(selected, out StudioNode? found)
             ? found
             : null;
-        bool automationNode = node?.Kind is NodeKind.Entry or NodeKind.Folder;
+        bool automationNode = node?.Kind is NodeKind.Entry or NodeKind.Folder &&
+                              !(node.DocKind == StudioDocumentKind.Workflow && _activity == StudioActivity.Workflows);
         bool scriptNode = _activity == StudioActivity.Scripts &&
                           node?.Kind is NodeKind.Package or NodeKind.SourceFolder or NodeKind.SourceFile;
         _organizeButton.IsVisible = automationNode || scriptNode;

@@ -102,7 +102,7 @@ public sealed class ClientAutomationService
         AutomationPreferences preferences = settings.Automation ?? new AutomationPreferences();
         AutomationWorkflow? workflow = (settings.Workflows ?? Array.Empty<AutomationWorkflow>())
             .FirstOrDefault(candidate => WorkflowId(candidate).Equals(workflowId.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (workflow is null || !workflow.Enabled || !preferences.Enabled ||
+        if (workflow is null || !workflow.Enabled || !workflow.AllowManualRun || !preferences.Enabled ||
             preferences.GetDisabledGroupSet().Contains(workflow.Group) || !CanAutomate(_state.Current))
             return Task.FromResult(false);
         return Task.FromResult(StartWorkflow(workflow, null, cancellationToken));

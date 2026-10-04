@@ -4199,7 +4199,32 @@ public static class Program
         KeybindingService service = new();
         CommandKeyBinding global = new("Ctrl+L", "look", Context: KeybindingContext.Global, Action: KeybindingActionKind.SendCommand, Priority: 1);
         CommandKeyBinding input = new("Ctrl+L", "clear", Context: KeybindingContext.Input, Action: KeybindingActionKind.ClearInput, Priority: 5);
-        service.Configure([global, input]);
+        AutomationWorkflow hotkeyWorkflow = new("hotkey target", "send look", Id: "workflow-stable-id", Hotkey: "F9");
+        AutomationWorkflow disabledWorkflow = new("disabled", "send score", Id: "workflow-disabled", Hotkey: "F10", Enabled: false);
+        AutomationWorkflow manualForbidden = new("manual forbidden", "send score", Id: "workflow-manual-forbidden", Hotkey: "F11", AllowManualRun: false);
+        AutomationWorkflow higherPriority = new("higher priority", "send score", Id: "workflow-high", Hotkey: "F12", Priority: 10);
+        AutomationWorkflow lowerPriority = new("lower priority", "send look", Id: "workflow-low", Hotkey: "F12", Priority: 1);
+        AutomationWorkflow tiedPriority = new("tied priority", "send score", Id: "workflow-tied", Hotkey: "F13", Priority: 5);
+        AutomationWorkflow tiedPriorityOther = new("tied priority other", "send look", Id: "workflow-tied-other", Hotkey: "F13", Priority: 5);
+        service.Configure([global, input], [hotkeyWorkflow, disabledWorkflow, manualForbidden, higherPriority, lowerPriority, tiedPriority, tiedPriorityOther]);
+
+        KeybindingResolution workflowHotkey = service.Resolve("F9", KeybindingContext.Global);
+        Assert.Equal("workflow-stable-id", workflowHotkey.Binding?.Command);
+        Assert.Equal(KeybindingActionKind.RunAutomation, workflowHotkey.Binding?.Action);
+        Assert.Equal(KeybindingService.WorkflowHotkeyBindingId("workflow-stable-id"), workflowHotkey.Binding?.Id);
+        Assert.True(service.Resolve("F10", KeybindingContext.Global).Binding is null, "Disabled workflows must not register hotkeys.");
+        Assert.True(service.Resolve("F11", KeybindingContext.Global).Binding is null, "Manual-run-disabled workflows must not register hotkeys.");
+        Assert.Equal("workflow-high", service.Resolve("F12", KeybindingContext.Global).Binding?.Command,
+            "Workflow hotkeys must honor descending workflow priority.");
+        KeybindingResolution tiedHotkey = service.Resolve("F13", KeybindingContext.Global);
+        Assert.True(tiedHotkey.HasConflict && tiedHotkey.Binding is null,
+            "Equal-priority workflow hotkeys must fail visibly rather than selecting by insertion order.");
+
+        service.Configure([global, input], [hotkeyWorkflow], new AutomationPreferences(Enabled: false));
+        Assert.True(service.Resolve("F9", KeybindingContext.Global).Binding is null,
+            "Globally disabled automation must not register workflow hotkeys.");
+        Assert.Equal(global, service.Resolve("Ctrl+L", KeybindingContext.Global).Binding,
+            "Global automation disable must not remove explicit keybindings.");
 
         KeybindingResolution exact = service.Resolve("Ctrl+L", KeybindingContext.Input);
         Assert.Equal(input, exact.Binding);
@@ -6660,7 +6685,9 @@ public static class Program
                         "  # keep this comment  \r\n\r\n  send look  \r\n",
                         TriggerEvent: nameof(EnemyKilled),
                         CooldownMilliseconds: 250,
-                        FailureMode: AutomationWorkflowFailureMode.Continue),
+                        FailureMode: AutomationWorkflowFailureMode.Continue,
+                        AllowManualRun: false,
+                        Hotkey: "Ctrl+F9"),
                     new AutomationWorkflow("structured only", "", Actions:
                     [
                         new SendCommandAutomationAction("score"),
@@ -6677,6 +6704,13 @@ public static class Program
             Assert.Equal("recover after kill", workflow.Name);
             Assert.Equal("  # keep this comment  \r\n\r\n  send look  \r\n", workflow.Steps);
             Assert.Equal(nameof(EnemyKilled), workflow.TriggerEvent);
+            Assert.False(workflow.AllowManualRun);
+            Assert.Equal("Ctrl+F9", workflow.Hotkey);
+            AutomationWorkflow legacy = JsonSerializer.Deserialize<AutomationWorkflow>(
+                "{\"name\":\"legacy\",\"steps\":\"send look\"}",
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            Assert.True(legacy.AllowManualRun, "Older workflow JSON should default to manual-run enabled.");
+            Assert.True(legacy.Hotkey is null, "Older workflow JSON should default to no hotkey.");
             AutomationWorkflow structured = loaded.Workflows[1];
             Assert.Equal(string.Empty, structured.Steps);
             Assert.Equal(3, structured.Actions!.Count);
@@ -6991,7 +7025,8 @@ public static class Program
             Workflows =
             [
                 new AutomationWorkflow("duplicate", "delay 500", Id: "first-id"),
-                new AutomationWorkflow("duplicate", "send look", Id: "second-id")
+                new AutomationWorkflow("duplicate", "send look", Id: "second-id"),
+                new AutomationWorkflow("manual forbidden", "send score", Id: "manual-forbidden", AllowManualRun: false)
             ],
             Automation = new AutomationPreferences(MaxCommandsPerSecond: 20, HumanOverrideMilliseconds: 0, MaxConcurrentWorkflows: 1)
         };
@@ -7013,6 +7048,8 @@ public static class Program
 
         string firstWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0]);
         string secondWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows[1]);
+        Assert.False(await automation.RunWorkflowAsync("manual-forbidden"),
+            "Workflows with manual execution disabled must reject manual starts.");
         Assert.True(await automation.RunWorkflowAsync(firstWorkflowId));
         Assert.False(await automation.RunWorkflowAsync(secondWorkflowId),
             "Manual workflow starts must honor MaxConcurrentWorkflows.");

@@ -191,6 +191,7 @@ public sealed class ClientSettingsStore
                     Group = string.IsNullOrWhiteSpace(workflow.Group) ? "Default" : workflow.Group.Trim(),
                     Priority = Math.Clamp(workflow.Priority, -10_000, 10_000),
                     CooldownMilliseconds = Math.Clamp(workflow.CooldownMilliseconds, 0, 600_000),
+                    Hotkey = string.IsNullOrWhiteSpace(workflow.Hotkey) ? null : workflow.Hotkey.Trim(),
                     Id = id
                 };
             })

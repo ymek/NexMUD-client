@@ -45,12 +45,36 @@ public sealed class KeybindingService
 {
     private IReadOnlyList<CommandKeyBinding> _bindings = Array.Empty<CommandKeyBinding>();
 
-    public void Configure(IEnumerable<CommandKeyBinding>? bindings)
+    public void Configure(
+        IEnumerable<CommandKeyBinding>? bindings,
+        IEnumerable<AutomationWorkflow>? workflows = null,
+        AutomationPreferences? automation = null)
     {
+        AutomationPreferences preferences = automation ?? new AutomationPreferences();
+        IReadOnlySet<string> disabledGroups = preferences.GetDisabledGroupSet();
+        CommandKeyBinding[] workflowBindings = preferences.Enabled
+            ? (workflows ?? Array.Empty<AutomationWorkflow>())
+                .Where(workflow => workflow.Enabled && workflow.AllowManualRun &&
+                                   !string.IsNullOrWhiteSpace(workflow.Id) &&
+                                   !string.IsNullOrWhiteSpace(workflow.Hotkey) &&
+                                   !disabledGroups.Contains(workflow.Group))
+                .Select(workflow => new CommandKeyBinding(
+                    workflow.Hotkey!,
+                    workflow.Id!,
+                    Name: $"Run {workflow.Name}",
+                    Context: KeybindingContext.Global,
+                    Action: KeybindingActionKind.RunAutomation,
+                    Priority: workflow.Priority,
+                    Id: WorkflowHotkeyBindingId(workflow.Id!)))
+                .ToArray()
+            : [];
         _bindings = (bindings ?? Array.Empty<CommandKeyBinding>())
+            .Concat(workflowBindings)
             .Where(binding => binding.Enabled && !string.IsNullOrWhiteSpace(binding.Gesture))
             .ToArray();
     }
+
+    public static string WorkflowHotkeyBindingId(string workflowId) => $"workflow-hotkey:{workflowId}";
 
     public KeybindingResolution Resolve(KeybindingContext context, Func<CommandKeyBinding, bool> matches)
     {
