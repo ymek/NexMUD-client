@@ -220,10 +220,8 @@ internal static class Phase6StudioLanguageHostTests
                 buffer = buffer.subarray(boundary + 4 + length);
                 if (message.method === '$/cancelRequest')
                   fs.appendFileSync(__dirname + '/cancelled.jsonl', JSON.stringify(message.params.id) + '\n');
-                else if (message.id !== undefined && message.method === 'cancel-write-fails') {
-                  process.stdin.once('close', () => fs.writeFileSync(__dirname + '/cancel-write-ready', 'ready'));
-                  process.stdin.destroy();
-                }
+                else if (message.id !== undefined && message.method === 'cancel-write-fails')
+                  fs.writeFileSync(__dirname + '/cancel-write-ready', 'ready');
                 else if (message.id !== undefined && message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
                 else if (message.id !== undefined && message.method === 'completed') send({ jsonrpc: '2.0', id: message.id, result: { ok: true } });
                 else if (message.id !== undefined && message.method === 'shutdown') send({ jsonrpc: '2.0', id: message.id, result: null });
@@ -238,7 +236,12 @@ internal static class Phase6StudioLanguageHostTests
             """).ConfigureAwait(false);
 
         ToolchainComponentLocation node = new ToolchainLocator().ResolveRequired(ToolchainComponentNames.Node);
-        await using TypeScriptLanguageService service = new(root, new TestToolchainLocator(node, serverPath));
+        CancellationNotificationProbe cancellationProbe = new();
+        await using TypeScriptLanguageService service = new(
+            root,
+            new TestToolchainLocator(node, serverPath),
+            cancellationProbe.SendAsync);
+        cancellationProbe.Attach(service);
         try
         {
             await service.StartAsync().ConfigureAwait(false);
@@ -262,6 +265,8 @@ internal static class Phase6StudioLanguageHostTests
                 : [];
             Assert.Equal(1, cancelledIds.Length);
             Assert.Equal("3", JsonSerializer.Deserialize<string>(cancelledIds[0]));
+            cancellationProbe.AttemptedIds.Clear();
+            cancellationProbe.FailNextWrite = true;
 
             using CancellationTokenSource failedWriteCancellation = new();
             Task<JsonElement> failedWrite = service.RequestAsync("cancel-write-fails", new { }, failedWriteCancellation.Token);
@@ -275,6 +280,8 @@ internal static class Phase6StudioLanguageHostTests
             try { _ = await failedWrite.ConfigureAwait(false); }
             catch (OperationCanceledException) { originalCancellationPreserved = true; }
             Assert.Equal(true, originalCancellationPreserved);
+            Assert.Equal("4", Assert.Single(cancellationProbe.AttemptedIds));
+            Assert.Equal(true, cancellationProbe.LastWriteFailure is not null);
         }
         finally
         {
@@ -449,6 +456,40 @@ internal static class Phase6StudioLanguageHostTests
                 ToolchainComponentNames.TypeScript, "test", serverPath, null, false),
             _ => throw new InvalidOperationException($"Unexpected toolchain component '{componentName}'.")
         };
+    }
+
+    private sealed class CancellationNotificationProbe
+    {
+        private TypeScriptLanguageService? _service;
+
+        public List<string> AttemptedIds { get; } = [];
+        public Exception? LastWriteFailure { get; private set; }
+        public bool FailNextWrite { get; set; }
+
+        public void Attach(TypeScriptLanguageService service) => _service = service;
+
+        public async Task SendAsync(string requestId, CancellationToken cancellationToken)
+        {
+            AttemptedIds.Add(requestId);
+            if (FailNextWrite)
+            {
+                FailNextWrite = false;
+                LastWriteFailure = new IOException("Simulated cancellation notification write failure.");
+                throw LastWriteFailure;
+            }
+
+            try
+            {
+                await (_service ?? throw new InvalidOperationException("Probe is not attached."))
+                    .NotifyAsync("$/cancelRequest", new { id = requestId }, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                LastWriteFailure = exception;
+                throw;
+            }
+        }
     }
 
     private sealed class FakeTransport : IStudioTypeScriptTransport

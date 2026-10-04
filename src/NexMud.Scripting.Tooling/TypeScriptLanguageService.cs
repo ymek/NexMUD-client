@@ -35,6 +35,7 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _workspaceRoot;
     private readonly IToolchainLocator _toolchain;
+    private readonly Func<string, CancellationToken, Task> _cancellationNotifier;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pending = new(StringComparer.Ordinal);
@@ -46,10 +47,17 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
     private int _disposed;
 
     public TypeScriptLanguageService(string workspaceRoot, IToolchainLocator? toolchain = null)
+        : this(workspaceRoot, toolchain, null) { }
+
+    internal TypeScriptLanguageService(
+        string workspaceRoot,
+        IToolchainLocator? toolchain,
+        Func<string, CancellationToken, Task>? cancellationNotifier)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         _workspaceRoot = Path.GetFullPath(workspaceRoot);
         _toolchain = toolchain ?? new ToolchainLocator();
+        _cancellationNotifier = cancellationNotifier ?? NotifyCancellationAsync;
     }
 
     public string WorkspaceRoot => _workspaceRoot;
@@ -152,7 +160,7 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
             {
                 try
                 {
-                    await NotifyAsync("$/cancelRequest", new { id = requestId }, CancellationToken.None).ConfigureAwait(false);
+                    await _cancellationNotifier(requestId, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -161,6 +169,9 @@ public sealed class TypeScriptLanguageService : IAsyncDisposable
             }
         }
     }
+
+    private Task NotifyCancellationAsync(string requestId, CancellationToken cancellationToken) =>
+        NotifyAsync("$/cancelRequest", new { id = requestId }, cancellationToken);
 
     public async Task NotifyAsync(
         string method,
