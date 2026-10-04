@@ -27,6 +27,33 @@ internal static class Phase8ScriptTestServiceTests
         Assert.Equal("test/routes.spec.ts", tests[1].FilePath);
     }
 
+    public static async Task DiscoversTestsFromRequestedProfile()
+    {
+        using TemporaryDirectory temporary = new();
+        string firstRoot = Path.Combine(temporary.Path, "first-package");
+        string secondRoot = Path.Combine(temporary.Path, "second-package");
+        Directory.CreateDirectory(Path.Combine(firstRoot, "src"));
+        Directory.CreateDirectory(Path.Combine(secondRoot, "src"));
+        await File.WriteAllTextAsync(Path.Combine(firstRoot, "src", "first.test.ts"), "");
+        await File.WriteAllTextAsync(Path.Combine(secondRoot, "src", "second.test.ts"), "");
+        ScriptTestService service = new(packageRootResolver: (profileId, packageId) =>
+        {
+            Assert.Equal("package", packageId);
+            return profileId switch
+            {
+                "first-profile" => firstRoot,
+                "second-profile" => secondRoot,
+                _ => throw new InvalidOperationException("Unknown test profile.")
+            };
+        });
+
+        IReadOnlyList<ScriptTestCase> firstTests = await service.DiscoverAsync("first-profile", "package");
+        IReadOnlyList<ScriptTestCase> secondTests = await service.DiscoverAsync("second-profile", "package");
+
+        Assert.Equal("src/first.test.ts", Assert.Single(firstTests).FilePath);
+        Assert.Equal("src/second.test.ts", Assert.Single(secondTests).FilePath);
+    }
+
     public static async Task RunsBundledVitestAndMapsAssertionLocations()
     {
         using TemporaryDirectory temporary = new();
@@ -150,6 +177,22 @@ internal static class Phase8ScriptTestServiceTests
         Assert.True(!result.Success);
         Assert.Equal(1, result.ExitCode);
         Assert.True(result.Diagnostics[0].Message.Contains("invalid JSON report", StringComparison.Ordinal));
+    }
+
+    public static async Task ReportsProcessStartFailures()
+    {
+        using TemporaryDirectory temporary = new();
+        string root = Path.Combine(temporary.Path, "package");
+        Directory.CreateDirectory(Path.Combine(root, "src"));
+        await File.WriteAllTextAsync(Path.Combine(root, "src", "sample.test.ts"), "test('sample', () => {})");
+        ScriptTestService service = new(new FakeToolchain(temporary.Path),
+            new ThrowingRunner("Could not start bundled Node."), (_, _) => root, new PassThroughSandboxProvider());
+
+        ScriptTestRunResult result = await service.RunAsync(new ScriptTestSelection("profile", "package"));
+
+        Assert.False(result.Success);
+        Assert.True(result.ExitCode is null);
+        Assert.Equal("Could not start bundled Node.", result.Diagnostics[0].Message);
     }
 
     public static async Task IgnoresLinkedTestDirectories()
@@ -336,6 +379,12 @@ internal static class Phase8ScriptTestServiceTests
             error = "sandbox unavailable";
             return false;
         }
+    }
+
+    private sealed class ThrowingRunner(string message) : IToolProcessRunner
+    {
+        public Task<ToolProcessResult> RunAsync(ToolProcessRequest request, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(message);
     }
 
     private sealed class RecordingRunner : IToolProcessRunner

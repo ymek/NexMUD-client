@@ -94,12 +94,14 @@ public static class Program
         await RunAsync("package dependency source policy covers optional and peer dependencies", Phase7PackageCompilerTests.DependencySourcesAreValidatedAcrossManifestSections);
         await RunAsync("package compile cache includes dependency graph", Phase7PackageCompilerTests.CacheKeyIncludesDependencyGraph);
         await RunAsync("Phase 8 discovers package tests", Phase8ScriptTestServiceTests.DiscoversSupportedPackageTests);
+        await RunAsync("Phase 8 isolates discovery by profile", Phase8ScriptTestServiceTests.DiscoversTestsFromRequestedProfile);
         await RunAsync("Phase 8 ignores linked test directories", Phase8ScriptTestServiceTests.IgnoresLinkedTestDirectories);
         await RunAsync("Phase 8 runs controlled Vitest and maps locations", Phase8ScriptTestServiceTests.RunsBundledVitestAndMapsAssertionLocations);
         await RunAsync("Phase 8 runs real Vitest with an offline API shim", Phase8ScriptTestServiceTests.RunsRealBundledVitestAgainstOfflineApiShim);
         await RunAsync("Phase 8 escapes selected test names", Phase8ScriptTestServiceTests.AppliesSelectedTestNamesAsEscapedVitestArguments);
         await RunAsync("Phase 8 rejects oversized Vitest reports", Phase8ScriptTestServiceTests.RejectsOversizedVitestReport);
         await RunAsync("Phase 8 reports malformed Vitest reports", Phase8ScriptTestServiceTests.ReportsMalformedVitestReport);
+        await RunAsync("Phase 8 reports process start failures", Phase8ScriptTestServiceTests.ReportsProcessStartFailures);
         await RunAsync("Phase 8 propagates cancellation", Phase8ScriptTestServiceTests.PropagatesTestCancellation);
         await RunAsync("Phase 8 sandbox profile escapes paths and limits roots", Phase8ScriptTestServiceTests.SandboxProfileQuotesPathsAndAllowsOnlyRequestedRoots);
         await RunAsync("Phase 8 fails closed when OS sandbox is unavailable", Phase8ScriptTestServiceTests.SandboxProviderFailsClosedWhenUnavailable);
