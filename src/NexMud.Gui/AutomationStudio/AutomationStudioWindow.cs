@@ -82,11 +82,15 @@ internal sealed partial class AutomationStudioWindow : Window
     private sealed record ScriptFolderChoice(string Path, string Label);
 
     private Button _newButton = new();
+    private Button _refreshScriptsButton = new();
     private Button _organizeButton = new();
+    private Control _scriptActions = new StackPanel();
     private StudioActivity _activity;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
     private readonly StackPanel _problems = new() { Spacing = 3 };
+    private readonly StackPanel _diagnosticsPanel = new() { Spacing = 3 };
+    private readonly StackPanel _buildPanel = new() { Spacing = 3 };
     private readonly StackPanel _console = new() { Spacing = 2 };
     private readonly StackPanel _runtimePanel = new() { Spacing = 3 };
     private readonly StackPanel _eventsPanel = new() { Spacing = 2 };
@@ -204,13 +208,21 @@ internal sealed partial class AutomationStudioWindow : Window
         _body.Children.Add(_explorerFrame);
 
         _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
-        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*"), Background = StudioShellChrome.Canvas };
+        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"), Background = StudioShellChrome.Canvas };
+        StackPanel tabStrip = new() { Orientation = Orientation.Horizontal, Spacing = 0, Children = { _tabs } };
+        Button openDocument = new() { Content = "+", Width = 38, Background = Brushes.Transparent, Foreground = StudioShellChrome.Foreground, BorderThickness = new Thickness(0) };
+        Avalonia.Automation.AutomationProperties.SetName(openDocument, "Open a script document");
+        openDocument.Click += async (_, _) => await QuickOpenAsync().ConfigureAwait(true);
+        tabStrip.Children.Add(openDocument);
         documentArea.Children.Add(new Border
         {
             MinHeight = 40, Background = StudioShellChrome.Card, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1),
-            Child = new ScrollViewer { Content = _tabs, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
+            Child = new ScrollViewer { Content = tabStrip, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
         });
-        _breadcrumbBar = new Border { Child = _breadcrumb, Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1) };
+        Grid breadcrumb = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Background = StudioShellChrome.Canvas };
+        breadcrumb.Children.Add(_breadcrumb);
+        breadcrumb.Children.Add(BuildScriptActions());
+        _breadcrumbBar = new Border { Child = breadcrumb, Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1) };
         Grid.SetRow(_breadcrumbBar, 1);
         documentArea.Children.Add(_breadcrumbBar);
         Control conflictBar = BuildExternalConflictBar();
@@ -221,6 +233,16 @@ internal sealed partial class AutomationStudioWindow : Window
         Grid surface = new() { Background = StudioShellChrome.Canvas, Children = { _center, _monaco } };
         Grid.SetRow(surface, 3);
         documentArea.Children.Add(surface);
+        Grid footer = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Background = StudioShellChrome.Card, Margin = new Thickness(0) };
+        footer.Children.Add(_statusLeft);
+        _buildState.Margin = new Thickness(12, 4);
+        Grid.SetColumn(_buildState, 1);
+        footer.Children.Add(_buildState);
+        _statusCursor.Margin = new Thickness(12, 4);
+        Grid.SetColumn(_statusCursor, 2);
+        footer.Children.Add(_statusCursor);
+        Grid.SetRow(footer, 4);
+        documentArea.Children.Add(footer);
         Border centerFrame = new() { Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), Child = documentArea };
         Grid.SetColumn(centerFrame, 3); _body.Children.Add(centerFrame);
 
@@ -232,8 +254,9 @@ internal sealed partial class AutomationStudioWindow : Window
             FontSize = 12,
             ItemsSource = new object[]
             {
-                BottomTab("Problems", _problems), BottomTab("Output", _console), BottomTab("Runtime", _runtimePanel),
-                BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel), BuildTestsTab()
+                BottomTab("Output", _console), BottomTab("Problems", _problems), BuildTestsTab(),
+                BottomTab("Build", _buildPanel), BottomTab("Diagnostics", _diagnosticsPanel), BottomTab("Runtime", _runtimePanel),
+                BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
             }
         };
         _bottomToggle = new Button
@@ -277,14 +300,23 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         _explorerTitle.Text = StudioActivityModel.ExplorerTitle(_activity);
         _filter.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
-        _filter.PlaceholderText = _activity == StudioActivity.Automations ? "Search automations…" : "Filter";
+        _filter.PlaceholderText = _activity switch
+        {
+            StudioActivity.Automations => "Search automations…",
+            StudioActivity.Scripts => "Search scripts…",
+            StudioActivity.Workflows => "Search workflows…",
+            _ => "Filter"
+        };
+        _newButton.Content = _activity == StudioActivity.Scripts ? "+" : "+ New";
+        _refreshScriptsButton.IsVisible = _activity == StudioActivity.Scripts;
+        _scriptActions.IsVisible = _activity == StudioActivity.Scripts;
         _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
         UpdateOrganizeButton();
     }
 
     private Control BuildExplorerHeader()
     {
-        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(10, 12) };
+        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(10, 12) };
         header.Children.Add(_explorerTitle);
         _organizeButton = UiTheme.QuietButton("Move");
         _organizeButton.Foreground = StudioShellChrome.Foreground;
@@ -293,6 +325,16 @@ internal sealed partial class AutomationStudioWindow : Window
         _organizeButton.Click += async (_, _) => await OrganizeSelectedAsync().ConfigureAwait(true);
         Grid.SetColumn(_organizeButton, 1);
         header.Children.Add(_organizeButton);
+
+        _refreshScriptsButton = UiTheme.QuietButton("↻");
+        _refreshScriptsButton.Width = 34;
+        _refreshScriptsButton.Foreground = StudioShellChrome.Foreground;
+        _refreshScriptsButton.BorderBrush = StudioShellChrome.Border;
+        Avalonia.Automation.AutomationProperties.SetName(_refreshScriptsButton, "Refresh scripts");
+        ToolTip.SetTip(_refreshScriptsButton, "Refresh scripts");
+        _refreshScriptsButton.Click += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
+        Grid.SetColumn(_refreshScriptsButton, 2);
+        header.Children.Add(_refreshScriptsButton);
 
         _newButton = UiTheme.QuietButton("+ New");
         _newButton.Foreground = StudioShellChrome.Foreground;
@@ -326,7 +368,7 @@ internal sealed partial class AutomationStudioWindow : Window
             }
             menu.Open(_newButton);
         };
-        Grid.SetColumn(_newButton, 2);
+        Grid.SetColumn(_newButton, 3);
         header.Children.Add(_newButton);
         UpdateActivityChrome();
         return header;
@@ -408,6 +450,51 @@ internal sealed partial class AutomationStudioWindow : Window
             connection,
             RouteGlobalSearchAsync,
             () => StudioSettingsRequested?.Invoke() ?? Task.CompletedTask);
+    }
+
+    private Control BuildScriptActions()
+    {
+        StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 3, 8, 3), VerticalAlignment = VerticalAlignment.Center };
+        _scriptActions = actions;
+        actions.IsVisible = _activity == StudioActivity.Scripts;
+        Button build = UiTheme.QuietButton("⚒  Build");
+        build.Foreground = StudioShellChrome.Foreground;
+        build.BorderBrush = StudioShellChrome.Border;
+        build.Click += async (_, _) => await BuildActivePackageAsync().ConfigureAwait(true);
+        Button test = UiTheme.QuietButton("▶  Test");
+        test.Foreground = StudioShellChrome.Foreground;
+        test.BorderBrush = StudioShellChrome.Border;
+        test.Click += async (_, _) =>
+        {
+            if (_activePackage is null) _testState.Text = "Select a script package first.";
+            else await RunTestsAsync([_activePackage.Definition.PackageId]).ConfigureAwait(true);
+        };
+        Button testOptions = UiTheme.QuietButton("⌄");
+        testOptions.Foreground = StudioShellChrome.Foreground;
+        testOptions.BorderBrush = StudioShellChrome.Border;
+        testOptions.Click += (_, _) =>
+        {
+            ContextMenu menu = new();
+            (string Label, Func<Task> Action)[] choices =
+            [
+                ("Run all packages", () => RunTestsAsync(_packages.Select(package => package.Definition.PackageId).ToArray())),
+                ("Run active file", () => _documents.Active is { IsScript: true, PackageId: { } packageId, Path: { } path }
+                    ? RunTestsAsync([packageId], new Dictionary<string, IReadOnlyList<string>> { [packageId] = [path] })
+                    : Task.CompletedTask),
+                ("Re-run failed", RerunFailedTestsAsync)
+            ];
+            foreach ((string label, Func<Task> action) in choices)
+            {
+                MenuItem item = new() { Header = label };
+                item.Click += async (_, _) => await action().ConfigureAwait(true);
+                menu.Items.Add(item);
+            }
+            menu.Open(testOptions);
+        };
+        actions.Children.Add(build);
+        actions.Children.Add(test);
+        actions.Children.Add(testOptions);
+        return actions;
     }
 
     private async Task RouteGlobalSearchAsync(string query)
@@ -1054,7 +1141,11 @@ internal sealed partial class AutomationStudioWindow : Window
                         profileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
                     if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
                     item.IsExpanded = true;
-                    item.ItemsSource = BuildScriptNodes(package.Definition.PackageId, entries, filter);
+                    item.ItemsSource = BuildScriptNodes(
+                        package.Definition.PackageId,
+                        entries,
+                        filter,
+                        package.HasNodeModulesDirectory);
                     roots.Add(item);
                 }
             }
@@ -1087,13 +1178,29 @@ internal sealed partial class AutomationStudioWindow : Window
     private IReadOnlyList<TreeViewItem> BuildScriptNodes(
         string packageId,
         IReadOnlyList<ScriptWorkspaceEntry> entries,
-        string? filter) =>
-        ScriptExplorerTree.Build(entries, filter)
+        string? filter,
+        bool hasNodeModulesDirectory) =>
+        ScriptExplorerTree.Build(entries, filter, hasNodeModulesDirectory)
             .Select(entry => ScriptExplorerNode(packageId, entry))
             .ToArray();
 
     private TreeViewItem ScriptExplorerNode(string packageId, ScriptExplorerEntry entry)
     {
+        if (entry.IsIgnored)
+        {
+            return new TreeViewItem
+            {
+                Header = new TextBlock
+                {
+                    Text = $"{entry.Name} (ignored)",
+                    Foreground = StudioShellChrome.Secondary,
+                    FontSize = 12
+                },
+                IsEnabled = false,
+                Opacity = 0.72
+            };
+        }
+
         TreeViewItem node = Node(new StudioNode(
             entry.IsFolder ? NodeKind.SourceFolder : NodeKind.SourceFile,
             entry.IsFolder ? $"▸ {entry.Name}" : entry.Name,
@@ -2397,6 +2504,8 @@ internal sealed partial class AutomationStudioWindow : Window
             _ => "Build —"
         };
         _runtimeState.Text = package is null ? "Runtime —" : $"Runtime {package.RuntimeStatus}";
+        _buildPanel.Children.Clear();
+        _buildPanel.Children.Add(Text(package is null ? "No package selected." : $"{package.Definition.Name} · {package.BuildStatus}"));
     }
 
     private void RenderBuildProblems(ScriptPackageBuildResult result, string profileId, bool updateActiveStatus = true)
@@ -2405,8 +2514,15 @@ internal sealed partial class AutomationStudioWindow : Window
         _diagnostics.ReplaceSource(profileId, source, result.Diagnostics.Select((diagnostic, index) =>
             new StudioDiagnostic(profileId, source, $"{index}:{diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column}:{diagnostic.Code}",
                 diagnostic.Severity.ToString(), diagnostic.Message, result.PackageId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column)));
+        _buildPanel.Children.Clear();
+        _buildPanel.Children.Add(Text($"{result.PackageId} · {(result.Success ? "Build succeeded" : "Build failed")}"));
         foreach (ScriptCompilerDiagnostic diagnostic in result.Diagnostics)
+        {
             AddConsole($"Build {result.PackageId}: {diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Code} {diagnostic.Message}");
+            Button row = new() { Content = Text($"{diagnostic.Severity}: {diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Message}"), HorizontalContentAlignment = HorizontalAlignment.Left };
+            row.Click += async (_, _) => await OpenDiagnosticAsync(new StudioDiagnostic(profileId, source, $"build:{diagnostic.Code}:{diagnostic.SourceFile}:{diagnostic.Line}", diagnostic.Severity.ToString(), diagnostic.Message, result.PackageId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column)).ConfigureAwait(true);
+            _buildPanel.Children.Add(row);
+        }
         RefreshProblems();
         if (updateActiveStatus && profileId == SelectedProfileId)
             _buildState.Text = result.Success ? "Build ✓" : "Build ✕";
@@ -2754,6 +2870,9 @@ internal sealed partial class AutomationStudioWindow : Window
         if (active.IsScript)
         {
             _center.Content = null;
+            _statusCursor.Text = _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection)
+                ? $"Ln {selection.EndLine}, Col {selection.EndColumn}"
+                : "Ln 1, Col 1";
             ShowMonaco(true);
             _ = _monaco.SetActiveDocumentAsync(active.Key, _cts.Token);
             return;
@@ -2879,7 +2998,10 @@ internal sealed partial class AutomationStudioWindow : Window
     private void RefreshProblems()
     {
         _problems.Children.Clear();
+        _diagnosticsPanel.Children.Clear();
         StudioDiagnostic[] items = _diagnostics.Snapshot(SelectedProfileId).ToArray();
+        foreach (StudioDiagnostic item in items)
+            _diagnosticsPanel.Children.Add(Text($"{item.Severity} · {item.Source} · {item.PackageId ?? item.FilePath ?? "Studio"}: {item.Message}"));
         foreach (IGrouping<string, StudioDiagnostic> group in items.GroupBy(item => item.PackageId ?? item.FilePath ?? item.Source))
         {
             int errors = group.Count(item => item.Severity.Equals("Error", StringComparison.OrdinalIgnoreCase));

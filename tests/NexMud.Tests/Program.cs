@@ -587,6 +587,32 @@ public static class Program
             return Task.CompletedTask;
         });
 
+        await RunAsync("studio script explorer shows installed node_modules as ignored", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceEntry[] entries =
+            [
+                new("src/main.ts", false, 10, DateTimeOffset.UnixEpoch)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(
+                    entries,
+                    hasNodeModulesDirectory: true);
+            Assert.SequenceEqual(["src", "node_modules"], roots.Select(entry => entry.Name));
+            NexMud.Gui.AutomationStudio.ScriptExplorerEntry ignored =
+                roots.Single(entry => entry.Name == "node_modules");
+
+            Assert.True(ignored.IsFolder);
+            Assert.True(ignored.IsIgnored);
+            Assert.Equal(0, ignored.Children.Count);
+            Assert.False(roots.Single(entry => entry.Name == "src").IsIgnored);
+            Assert.False(NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(
+                    entries,
+                    "main.ts",
+                    hasNodeModulesDirectory: true)
+                .Any(entry => entry.Name == "node_modules"));
+            return Task.CompletedTask;
+        });
+
         await RunAsync("studio script explorer derives safe file destinations", () =>
         {
             Assert.Equal("src/module.ts", NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "module.ts"));

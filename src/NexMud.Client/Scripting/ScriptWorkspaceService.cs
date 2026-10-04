@@ -61,7 +61,10 @@ public sealed record ScriptPackageSnapshot(
     ScriptStatus RuntimeStatus,
     IReadOnlyList<ExportedScriptFunction> Exports,
     DateTimeOffset? LastBuild,
-    string? LastRuntimeFault = null);
+    string? LastRuntimeFault = null)
+{
+    public bool HasNodeModulesDirectory { get; init; }
+}
 
 public sealed record ScriptWorkspaceSourceFile(string RelativePath, long Size);
 
@@ -167,7 +170,10 @@ public sealed partial class ScriptWorkspaceService
                 runtimeStatus,
                 state.Exports,
                 state.BuiltAt,
-                state.LastRuntimeFault));
+                state.LastRuntimeFault)
+            {
+                HasNodeModulesDirectory = Directory.Exists(Path.Combine(package.PackageRoot, "node_modules"))
+            });
         }
         return packages;
     }

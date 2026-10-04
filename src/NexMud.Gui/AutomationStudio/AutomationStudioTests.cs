@@ -11,6 +11,7 @@ internal sealed partial class AutomationStudioWindow
     private sealed record FailedTestGroup(string PackageId, IReadOnlyList<string> Files, IReadOnlyList<string> Names);
 
     private readonly StackPanel _testPanel = new() { Spacing = 6 };
+    private TabItem _testResultsTab = new();
     private readonly StackPanel _testFiles = new() { Spacing = 2 };
     private readonly StackPanel _testResults = new() { Spacing = 2 };
     private readonly TextBlock _testState = new() { Text = "Select a package to discover tests.", Foreground = UiTheme.Muted };
@@ -69,7 +70,8 @@ internal sealed partial class AutomationStudioWindow
         _testPanel.Children.Add(_testFiles);
         _testPanel.Children.Add(new TextBlock { Text = "Results", FontWeight = FontWeight.SemiBold });
         _testPanel.Children.Add(_testResults);
-        return BottomTab("Tests", _testPanel);
+        _testResultsTab = (TabItem)BottomTab("Test Results", _testPanel);
+        return _testResultsTab;
     }
 
     private static Button TestButton(string label) => new() { Content = label, MinWidth = 90, Margin = new Avalonia.Thickness(2) };
@@ -133,7 +135,7 @@ internal sealed partial class AutomationStudioWindow
         _failedTestGroups.Clear();
         _testResults.Children.Clear();
         _testState.Text = "Saving dirty scripts and running tests…";
-        _bottom.SelectedIndex = _bottom.Items.Count - 1;
+        _bottom.SelectedItem = _testResultsTab;
         try
         {
             foreach (string packageId in packageIds)

@@ -15,6 +15,7 @@ internal sealed record ScriptExplorerEntry(
     IReadOnlyList<ScriptExplorerEntry> Children)
 {
     public bool IsFolder => Kind == ScriptExplorerEntryKind.Folder;
+    public bool IsIgnored { get; init; }
 }
 
 /// <summary>
@@ -28,6 +29,7 @@ internal static class ScriptExplorerTree
         public string Name { get; } = name;
         public string RelativePath { get; } = relativePath;
         public ScriptExplorerEntryKind Kind { get; } = kind;
+        public bool IsIgnored { get; init; }
         public Dictionary<string, MutableNode> Children { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -47,7 +49,8 @@ internal static class ScriptExplorerTree
 
     public static IReadOnlyList<ScriptExplorerEntry> Build(
         IEnumerable<ScriptWorkspaceEntry> entries,
-        string? filter = null)
+        string? filter = null,
+        bool hasNodeModulesDirectory = false)
     {
         ArgumentNullException.ThrowIfNull(entries);
         MutableNode root = new(string.Empty, string.Empty, ScriptExplorerEntryKind.Folder);
@@ -71,6 +74,17 @@ internal static class ScriptExplorerTree
                 }
                 parent = child;
             }
+        }
+
+        if (hasNodeModulesDirectory && !root.Children.ContainsKey("node_modules"))
+        {
+            root.Children.Add("node_modules", new MutableNode(
+                "node_modules",
+                "node_modules",
+                ScriptExplorerEntryKind.Folder)
+            {
+                IsIgnored = true
+            });
         }
 
         return FreezeChildren(root, filter);
@@ -117,7 +131,7 @@ internal static class ScriptExplorerTree
 
     private static IReadOnlyList<ScriptExplorerEntry> FreezeChildren(MutableNode parent, string? filter) =>
         parent.Children.Values
-            .OrderBy(node => node.Kind == ScriptExplorerEntryKind.File)
+            .OrderBy(node => node.IsIgnored ? 1 : node.Kind == ScriptExplorerEntryKind.File ? 2 : 0)
             .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
             .Select(node => Freeze(node, filter))
             .Where(node => node is not null)
@@ -134,7 +148,10 @@ internal static class ScriptExplorerTree
             ? FreezeChildren(node, childFilter)
             : [];
         if (!matches && children.Count == 0) return null;
-        return new ScriptExplorerEntry(node.Kind, node.Name, node.RelativePath, children);
+        return new ScriptExplorerEntry(node.Kind, node.Name, node.RelativePath, children)
+        {
+            IsIgnored = node.IsIgnored
+        };
     }
 
     private static string Normalize(string value)
