@@ -88,6 +88,7 @@ public static class Program
         await RunAsync("TypeScript compiler compiles and type-checks reference script", TypeScriptCompilerCompilesReferenceScript);
         await RunAsync("package compiler bundles dependencies and activates in Jint", Phase7PackageCompilerTests.BundlesPackageDependenciesAndEntrypointExports);
         await RunAsync("package compiler discovers local import entrypoint exports", Phase7PackageCompilerTests.DiscoversEntrypointExportsFromLocalImports);
+        await RunAsync("package compiler discovers aliased local import entrypoint exports", Phase7PackageCompilerTests.DiscoversAliasedEntrypointExportsFromLocalImports);
         await RunAsync("package compiler preserves configured type libraries", Phase7PackageCompilerTests.PreservesProjectConfiguredTypeLibraries);
         await RunAsync("package compiler rejects Node built-in imports", Phase7PackageCompilerTests.RejectsNodeBuiltins);
         await RunAsync("package dependency source policy covers optional and peer dependencies", Phase7PackageCompilerTests.DependencySourcesAreValidatedAcrossManifestSections);

@@ -59,6 +59,20 @@ internal static class Phase7PackageCompilerTests
         Assert.Equal("src/internal.ts", activate.SourceLocation.SourceFile);
     }
 
+    public static async Task DiscoversAliasedEntrypointExportsFromLocalImports()
+    {
+        using TemporaryDirectory temporary = new();
+        PackageFixture fixture = await PackageFixture.CreateAsync(temporary.Path).ConfigureAwait(false);
+        ScriptCompileResult result = await new TypeScriptCompiler().CompileAsync(
+            fixture.Request("import { activate as localActivate } from './internal.js';\nexport { localActivate as activate };")).ConfigureAwait(false);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        ExportedScriptFunction activate = result.Package!.ExportedFunctions.Single();
+        Assert.Equal("activate", activate.ExportName);
+        Assert.Equal("src/index.ts", activate.FunctionRef.ModulePath);
+        Assert.Equal("src/internal.ts", activate.SourceLocation.SourceFile);
+    }
+
     public static async Task PreservesProjectConfiguredTypeLibraries()
     {
         using TemporaryDirectory temporary = new();
