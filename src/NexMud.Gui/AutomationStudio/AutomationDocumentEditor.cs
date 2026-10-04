@@ -17,7 +17,9 @@ internal sealed record AutomationEditorServices(
     Func<ScriptFunctionRef, Task> OpenDefinition,
     Func<ScriptFunctionRef?, Task<ScriptFunctionRef?>> ChooseFunction,
     Func<ScriptFunctionRef, ExportedScriptFunction?> ResolveExport,
-    Func<StudioDocumentKind, string, int?> ResolveAutomationIndex);
+    Func<StudioDocumentKind, string, int?> ResolveAutomationIndex,
+    Func<StudioDocumentKind, string, Task> DuplicateAutomation,
+    Func<StudioDocumentKind, string, Task> DeleteAutomation);
 
 /// <summary>
 /// Full-width visual designer for one Automation definition. Sections follow the workbench model:
@@ -26,13 +28,15 @@ internal sealed record AutomationEditorServices(
 /// </summary>
 internal sealed class AutomationDocumentEditor
 {
-    private const double FormMaxWidth = 960;
+    private const double AutomationFormMaxWidth = 1400;
+    private const double WorkflowFormMaxWidth = 960;
     private const double ControlHeight = 30;
 
     private readonly StudioDocumentKind _kind;
     private readonly string _automationId;
     private readonly AutomationEditorServices _services;
-    private readonly CheckBox _enabled = new() { Content = "Enabled", Foreground = UiTheme.Text, VerticalAlignment = VerticalAlignment.Center };
+    private readonly ToggleSwitch _enabled = new() { Content = "Enabled", Foreground = StudioShellChrome.Foreground, VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _testPreview = new() { Foreground = StudioShellChrome.Secondary, FontSize = 12, TextWrapping = TextWrapping.Wrap, IsVisible = false };
     private Func<object> _collect = () => throw new InvalidOperationException("Editor not built.");
     private bool _loading = true;
 
@@ -95,20 +99,98 @@ internal sealed class AutomationDocumentEditor
     private void Build(object value, string name)
     {
         Title = name;
-        StackPanel page = new() { Spacing = 4, MaxWidth = FormMaxWidth, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(28, 20, 28, 40) };
-        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
-        header.Children.Add(new TextBlock
+        bool automationSurface = _kind != StudioDocumentKind.Workflow;
+        StackPanel page = new()
         {
-            Text = $"{_kind.Label()}: {name}",
-            Foreground = UiTheme.Text,
-            FontSize = 16,
-            FontWeight = FontWeight.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        Grid.SetColumn(_enabled, 1);
+            Spacing = automationSurface ? 0 : 4,
+            MaxWidth = automationSurface ? AutomationFormMaxWidth : WorkflowFormMaxWidth,
+            HorizontalAlignment = automationSurface ? HorizontalAlignment.Stretch : HorizontalAlignment.Left,
+            Margin = automationSurface ? new Thickness(20, 10, 20, 28) : new Thickness(28, 20, 28, 40)
+        };
+        Grid header = new()
+        {
+            ColumnDefinitions = new ColumnDefinitions(automationSurface ? "*,Auto,Auto,Auto,Auto" : "*,Auto"),
+            ColumnSpacing = automationSurface ? 12 : 0
+        };
+        if (automationSurface)
+        {
+            header.Children.Add(new TextBlock
+            {
+                Text = name,
+                Foreground = UiTheme.Text,
+                FontSize = 22,
+                FontWeight = FontWeight.SemiBold,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Border kindBadge = new()
+            {
+                Background = StudioShellChrome.Input,
+                BorderBrush = StudioShellChrome.Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 4),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = _kind.Label(), Foreground = StudioShellChrome.Secondary, FontSize = 12 }
+            };
+            Grid.SetColumn(kindBadge, 1);
+            header.Children.Add(kindBadge);
+            Grid.SetColumn(_enabled, 2);
+            Button test = new()
+            {
+                Content = "▶  Test",
+                MinWidth = 106,
+                Height = 34,
+                Padding = new Thickness(12, 4),
+                Background = StudioShellChrome.Input,
+                Foreground = StudioShellChrome.Foreground,
+                BorderBrush = StudioShellChrome.Border,
+                BorderThickness = new Thickness(1),
+                IsVisible = automationSurface,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            test.Click += (_, _) => PreviewAutomation();
+            Grid.SetColumn(test, 3);
+            header.Children.Add(test);
+
+            ContextMenu menu = new();
+            MenuItem duplicate = new() { Header = "Duplicate" };
+            duplicate.Click += async (_, _) => await _services.DuplicateAutomation(_kind, _automationId).ConfigureAwait(true);
+            MenuItem delete = new() { Header = "Delete…" };
+            delete.Click += async (_, _) => await _services.DeleteAutomation(_kind, _automationId).ConfigureAwait(true);
+            menu.Items.Add(duplicate);
+            menu.Items.Add(delete);
+            Button more = new()
+            {
+                Content = "⋮",
+                Width = 38,
+                Height = 34,
+                Background = StudioShellChrome.Input,
+                Foreground = StudioShellChrome.Foreground,
+                BorderBrush = StudioShellChrome.Border,
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            more.Click += (_, _) => menu.Open(more);
+            Grid.SetColumn(more, 4);
+            header.Children.Add(more);
+        }
+        else
+        {
+            header.Children.Add(new TextBlock
+            {
+                Text = $"{_kind.Label()}: {name}",
+                Foreground = UiTheme.Text,
+                FontSize = 16,
+                FontWeight = FontWeight.SemiBold,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Grid.SetColumn(_enabled, 1);
+        }
         header.Children.Add(_enabled);
         page.Children.Add(header);
+        if (automationSurface) page.Children.Add(_testPreview);
 
         switch (value)
         {
@@ -126,6 +208,47 @@ internal sealed class AutomationDocumentEditor
     }
 
     // ───────────────────────────── Per-kind designers ─────────────────────────────
+
+    private void PreviewAutomation()
+    {
+        object value = _collect();
+        string detail = value switch
+        {
+            CommandAlias alias => alias.Enabled && CommandAliasExpander.TryExpand(alias.Name, [alias], out string expansion)
+                ? $"No-argument expansion: {expansion}. Conditions and {ActionCount(alias.Actions)} configured actions are not executed."
+                : "The alias is disabled or has no previewable expansion.",
+            TriggerRule trigger => $"{trigger.MatchMode} match for {trigger.Scope}: {trigger.Pattern}. {CommandPreview(trigger.Enabled, trigger.Command)}. {ActionCount(trigger.Actions)} configured actions are not executed.",
+            SemanticTriggerRule semantic => $"Event: {semantic.EventName}. {ConditionCount(semantic.Conditions)} conditions and {ActionCount(semantic.Actions)} actions are not evaluated or executed.",
+            CommandKeyBinding binding => $"Gesture: {binding.Gesture}. {CommandPreview(binding.Enabled, binding.Command)}. {ActionCount(binding.Actions)} configured actions are not executed.",
+            CommandTimer timer => $"Interval: {timer.IntervalSeconds}s. {CommandPreview(timer.Enabled, timer.Command)}. Repeat: {timer.Repeat}. {ActionCount(timer.Actions)} configured actions are not executed.",
+            GameRule rule => $"Rule: {rule.Condition}. Activation: {rule.Activation}. {CommandPreview(rule.Enabled, rule.Command)}. {ActionCount(rule.Actions)} configured actions are not executed.",
+            TranscriptHighlightRule highlight => $"Highlight pattern: {highlight.Pattern} ({highlight.MatchMode}). No transcript text is evaluated.",
+            _ => "This automation type does not have a preview."
+        };
+
+        _testPreview.Text = $"Preview only — no MUD commands or actions are run. {(IsAutomationEnabled(value) ? "Enabled" : "Disabled")}: {detail}";
+        _testPreview.IsVisible = true;
+    }
+
+    private static bool IsAutomationEnabled(object value) => value switch
+    {
+        CommandAlias item => item.Enabled,
+        TriggerRule item => item.Enabled,
+        SemanticTriggerRule item => item.Enabled,
+        CommandKeyBinding item => item.Enabled,
+        CommandTimer item => item.Enabled,
+        GameRule item => item.Enabled,
+        TranscriptHighlightRule item => item.Enabled,
+        _ => false
+    };
+
+    private static string CommandPreview(bool enabled, string command) => enabled
+        ? $"Would send: {command}"
+        : $"Would send if enabled: {command}";
+
+    private static int ActionCount(IReadOnlyList<AutomationAction>? actions) => actions?.Count ?? 0;
+
+    private static int ConditionCount(IReadOnlyList<AutomationCondition>? conditions) => conditions?.Count ?? 0;
 
     private void BuildAlias(StackPanel page, CommandAlias value)
     {
@@ -757,12 +880,26 @@ internal sealed class AutomationDocumentEditor
         return button;
     }
 
-    private static Control Section(string title, params Control[] content)
+    private Control Section(string title, params Control[] content)
     {
-        StackPanel section = new() { Spacing = 10, Margin = new Thickness(0, 20, 0, 0) };
+        StackPanel section = new() { Spacing = 10 };
         section.Children.Add(new TextBlock { Text = title, Foreground = UiTheme.Accent, FontSize = 11.5, FontWeight = FontWeight.SemiBold });
         foreach (Control control in content) section.Children.Add(control);
-        return section;
+        if (_kind == StudioDocumentKind.Workflow)
+        {
+            section.Margin = new Thickness(0, 20, 0, 0);
+            return section;
+        }
+        return new Border
+        {
+            Background = StudioShellChrome.Card,
+            BorderBrush = StudioShellChrome.Border,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(16),
+            Margin = new Thickness(0, 14, 0, 0),
+            Child = section
+        };
     }
 
     private static Control Labeled(string label, Control control)

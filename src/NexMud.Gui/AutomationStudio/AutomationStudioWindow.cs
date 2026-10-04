@@ -145,7 +145,7 @@ internal sealed partial class AutomationStudioWindow : Window
         Background = StudioShellChrome.Canvas;
         FontFamily = StudioShellChrome.Font;
         WireMonaco();
-        _filter.PlaceholderText = "Filter";
+        _filter.PlaceholderText = _activity == StudioActivity.Automations ? "Search automations…" : "Filter";
         _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
         Content = BuildLayout();
 
@@ -236,10 +236,6 @@ internal sealed partial class AutomationStudioWindow : Window
                 BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel), BuildTestsTab()
             }
         };
-        _bottom.SelectionChanged += (_, _) =>
-        {
-            if (_bottomCollapsed) ToggleBottom();
-        };
         _bottomToggle = new Button
         {
             Content = _bottomCollapsed ? "⌃" : "⌄",
@@ -281,6 +277,7 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         _explorerTitle.Text = StudioActivityModel.ExplorerTitle(_activity);
         _filter.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+        _filter.PlaceholderText = _activity == StudioActivity.Automations ? "Search automations…" : "Filter";
         _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
         UpdateOrganizeButton();
     }
@@ -1763,7 +1760,18 @@ internal sealed partial class AutomationStudioWindow : Window
         OpenDefinitionAsync,
         ChooseFunctionAsync,
         reference => _packages.SelectMany(package => package.Exports).FirstOrDefault(export => export.FunctionRef == reference),
-        (kind, automationId) => _organization.SourceIndexFor(kind, automationId));
+        (kind, automationId) => _organization.SourceIndexFor(kind, automationId),
+        (kind, automationId) => RunAutomationDocumentActionAsync(kind, automationId, DuplicateAutomationAsync),
+        (kind, automationId) => RunAutomationDocumentActionAsync(kind, automationId, DeleteAutomationAsync));
+
+    private Task RunAutomationDocumentActionAsync(
+        StudioDocumentKind kind,
+        string automationId,
+        Func<StudioDocument, Task> action)
+    {
+        OpenAutomation(kind, automationId);
+        return _documents.Active is { } document ? action(document) : Task.CompletedTask;
+    }
 
     private void OpenAutomation(StudioDocumentKind kind, string automationId)
     {
@@ -1840,6 +1848,7 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task DuplicateAutomationAsync(StudioDocument document)
     {
+        if (!await ResolveDirtyAutomationAsync(document, "duplicating").ConfigureAwait(true)) return;
         try
         {
             if (document.AutomationId is null) return;
@@ -1860,6 +1869,7 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async Task DeleteAutomationAsync(StudioDocument document)
     {
+        if (!await ResolveDirtyAutomationAsync(document, "deleting").ConfigureAwait(true)) return;
         if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete '{document.Title}'? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
         try
         {
@@ -2659,9 +2669,9 @@ internal sealed partial class AutomationStudioWindow : Window
         }
     }
 
-    private async Task CloseDocumentAsync(StudioDocument document)
+    private async Task CloseDocumentAsync(StudioDocument document, bool discardDirtyChanges = false)
     {
-        if (document.IsDirty)
+        if (document.IsDirty && !discardDirtyChanges)
         {
             string choice = await ConfirmDirtyAsync(document.Title).ConfigureAwait(true);
             if (choice == "cancel") return;
@@ -2954,7 +2964,7 @@ internal sealed partial class AutomationStudioWindow : Window
 
     // ───────────────────────────── Dialogs ─────────────────────────────
 
-    private async Task<string> ConfirmDirtyAsync(string what)
+    private async Task<string> ConfirmDirtyAsync(string what, string action = "closing")
     {
         Window dialog = Dialog("Unsaved changes", 430, 180);
         Button save = new() { Content = "Save", MinWidth = 90 };
@@ -2963,8 +2973,25 @@ internal sealed partial class AutomationStudioWindow : Window
         save.Click += (_, _) => dialog.Close("save"); discard.Click += (_, _) => dialog.Close("discard"); cancel.Click += (_, _) => dialog.Close("cancel");
         StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
         buttons.Children.Add(save); buttons.Children.Add(discard); buttons.Children.Add(cancel);
-        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text($"Save changes to {what} before closing?"), buttons } };
+        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text($"Save changes to {what} before {action}?"), buttons } };
         return await dialog.ShowDialog<string>(this).ConfigureAwait(true) ?? "cancel";
+    }
+
+    private async Task<bool> ResolveDirtyAutomationAsync(StudioDocument document, string action)
+    {
+        if (!document.IsDirty) return true;
+        string choice = await ConfirmDirtyAsync(document.Title, action).ConfigureAwait(true);
+        if (choice == "cancel") return false;
+
+        _documents.Activate(document.Key);
+        if (choice == "save")
+        {
+            await SaveActiveAsync().ConfigureAwait(true);
+            return !document.IsDirty;
+        }
+
+        await CloseDocumentAsync(document, discardDirtyChanges: true).ConfigureAwait(true);
+        return true;
     }
 
     private async Task<bool?> ConfirmAsync(string title, string message, string confirm)
