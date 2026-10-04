@@ -9,6 +9,7 @@ using NexMud.Client.Automation;
 using NexMud.Client.Runtime;
 using NexMud.Client.Scripting;
 using NexMud.Client.Settings;
+using NexMud.Contracts.Events;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Runtime;
 
@@ -51,15 +52,30 @@ internal sealed partial class AutomationStudioWindow : Window
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
     private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
     private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
-    private readonly ComboBox _profile = new() { MinWidth = 210 };
-    private readonly TextBox _filter = UiTheme.FieldBox();
+    private readonly ComboBox _profile = new() { MinWidth = 160, MaxWidth = 160 };
+    private readonly TextBox _filter = new()
+    {
+        Background = StudioShellChrome.Input,
+        Foreground = StudioShellChrome.Foreground,
+        BorderBrush = StudioShellChrome.Border,
+        CornerRadius = new CornerRadius(5),
+        MinHeight = 34,
+        Padding = new Thickness(8, 4),
+        FontSize = 13
+    };
     private readonly TreeView _navigator = new();
-    private readonly StackPanel _activityRail = new() { Spacing = 6, Margin = new Thickness(5, 7) };
+    private readonly Border _activityRail = new()
+    {
+        Width = 108,
+        Background = StudioShellChrome.Rail,
+        BorderBrush = StudioShellChrome.Border,
+        BorderThickness = new Thickness(0, 0, 1, 0)
+    };
     private readonly TextBlock _explorerTitle = new()
     {
-        Foreground = UiTheme.Accent,
+        Foreground = StudioShellChrome.Foreground,
         FontWeight = FontWeight.SemiBold,
-        FontSize = NexTypography.Metadata,
+        FontSize = 18,
         VerticalAlignment = VerticalAlignment.Center
     };
     private sealed record FolderChoice(string? FolderId, string Label);
@@ -77,6 +93,8 @@ internal sealed partial class AutomationStudioWindow : Window
     private readonly StackPanel _referencesPanel = new() { Spacing = 3 };
     private readonly TextBlock _buildState = new() { Text = "Build —", Foreground = UiTheme.Muted };
     private readonly TextBlock _runtimeState = new() { Text = "Runtime —", Foreground = UiTheme.Muted };
+    private readonly Border _connectionIndicator = new() { Width = 10, Height = 10, CornerRadius = new CornerRadius(5) };
+    private readonly TextBlock _connectionStatus = new() { Foreground = StudioShellChrome.Foreground };
     private readonly Queue<string> _events = new();
     private readonly CancellationTokenSource _cts = new();
     private Grid _root = new();
@@ -103,6 +121,9 @@ internal sealed partial class AutomationStudioWindow : Window
     private long _navigatorRefreshGeneration;
     private bool _closeApproved;
 
+    internal event Func<string, Task>? GlobalSearchRequested;
+    internal event Func<Task>? StudioSettingsRequested;
+
     public AutomationStudioWindow(NexMudRuntime runtime)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
@@ -111,21 +132,28 @@ internal sealed partial class AutomationStudioWindow : Window
         _typescript = new StudioTypeScriptLanguageHost(_workspace.GetLanguageWorkspaceRoot);
         _bottomCollapsed = _preferences.BottomCollapsed;
         _activity = _preferences.ResolveActivity();
+        UpdateConnectionStatus(_runtime.Transport.IsConnected
+            ? ConnectionStatus.Connected
+            : ConnectionStatus.Disconnected);
 
         Title = "NexMUD Automation Studio";
-        Width = 1440;
-        Height = 900;
-        MinWidth = 1060;
+        Width = 1672;
+        Height = 913;
+        MinWidth = 1180;
         MinHeight = 700;
-        Background = UiTheme.Window;
-        FontFamily = UiTheme.Sans;
+        CanResize = true;
+        Background = StudioShellChrome.Canvas;
+        FontFamily = StudioShellChrome.Font;
         WireMonaco();
         _filter.PlaceholderText = "Filter";
         _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
         Content = BuildLayout();
 
-        _profile.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<ConnectionProfile>(
-            (item, _) => new TextBlock { Text = item?.Name ?? "" }, true);
+        _profile.Background = StudioShellChrome.Input;
+        _profile.Foreground = StudioShellChrome.Foreground;
+        _profile.BorderBrush = StudioShellChrome.Border;
+        _profile.MinHeight = 34;
+        _profile.DisplayMemberBinding = new Avalonia.Data.Binding(nameof(ConnectionProfile.Name));
         _profile.SelectionChanged += ProfileSelectionChanged;
         _navigator.SelectionChanged += NavigatorSelectionChanged;
         _workspace.WorkspaceChanged += WorkspaceChanged;
@@ -149,55 +177,59 @@ internal sealed partial class AutomationStudioWindow : Window
         double bottomHeight = _bottomCollapsed
             ? StudioUiPreferences.CollapsedBottomHeight
             : _preferences.BottomHeight;
-        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{bottomHeight},Auto") };
-        _root.Children.Add(BuildToolbar());
+        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{bottomHeight}") };
+        _root.Children.Add(BuildHeader());
 
         _body = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions($"44,{_preferences.ExplorerWidth},5,*")
+            ColumnDefinitions = new ColumnDefinitions($"108,{_preferences.ExplorerWidth},5,*")
         };
         Grid.SetRow(_body, 1);
         _root.Children.Add(_body);
 
         _body.Children.Add(BuildActivityRail());
 
-        Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*"), Background = StudioShellChrome.Explorer };
         explorer.Children.Add(BuildExplorerHeader());
-        Grid.SetRow(_filter, 1);
         _filter.Margin = new Thickness(8, 0, 8, 6);
+        Grid.SetRow(_filter, 1);
         explorer.Children.Add(_filter);
         ScrollViewer tree = new() { Content = _navigator };
         Grid.SetRow(tree, 2);
         explorer.Children.Add(tree);
         _explorerFrame = Frame("EXPLORER", explorer, withHeader: false);
+        _explorerFrame.Background = StudioShellChrome.Explorer;
+        _explorerFrame.BorderBrush = StudioShellChrome.Border;
         Grid.SetColumn(_explorerFrame, 1);
         _body.Children.Add(_explorerFrame);
 
         _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
-        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*") };
+        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*"), Background = StudioShellChrome.Canvas };
         documentArea.Children.Add(new Border
         {
-            MinHeight = 36, Background = UiTheme.Surface, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1),
+            MinHeight = 40, Background = StudioShellChrome.Card, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1),
             Child = new ScrollViewer { Content = _tabs, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
         });
-        _breadcrumbBar = new Border { Child = _breadcrumb, Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1) };
+        _breadcrumbBar = new Border { Child = _breadcrumb, Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1) };
         Grid.SetRow(_breadcrumbBar, 1);
         documentArea.Children.Add(_breadcrumbBar);
         Control conflictBar = BuildExternalConflictBar();
         Grid.SetRow(conflictBar, 2);
         documentArea.Children.Add(conflictBar);
-        // The Monaco WebView must stay attached to the visual tree for the window's lifetime;
-        // detaching a native WebView destroys its page and every open model.
+        // Keep the native WebView attached for the full window lifetime; detaching it destroys editor state.
         _monaco.MaxHeight = 0;
-        Grid surface = new() { Children = { _center, _monaco } };
+        Grid surface = new() { Background = StudioShellChrome.Canvas, Children = { _center, _monaco } };
         Grid.SetRow(surface, 3);
         documentArea.Children.Add(surface);
-        Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = documentArea };
+        Border centerFrame = new() { Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), Child = documentArea };
         Grid.SetColumn(centerFrame, 3); _body.Children.Add(centerFrame);
 
         GridSplitter horizontal = Splitter(GridResizeDirection.Rows); Grid.SetRow(horizontal, 2); _root.Children.Add(horizontal);
         _bottom = new TabControl
         {
+            Background = StudioShellChrome.Canvas,
+            Foreground = StudioShellChrome.Secondary,
+            FontSize = 12,
             ItemsSource = new object[]
             {
                 BottomTab("Problems", _problems), BottomTab("Output", _console), BottomTab("Runtime", _runtimePanel),
@@ -208,60 +240,32 @@ internal sealed partial class AutomationStudioWindow : Window
         {
             if (_bottomCollapsed) ToggleBottom();
         };
-        Grid.SetRow(_bottom, 3);
-        _root.Children.Add(_bottom);
-        Border status = new()
+        _bottomToggle = new Button
         {
-            Background = UiTheme.Raised, Padding = new Thickness(12, 3),
-            Child = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 18,
-                Children = { _statusLeft }
-            }
+            Content = _bottomCollapsed ? "⌃" : "⌄",
+            Width = 34,
+            Background = StudioShellChrome.Canvas,
+            Foreground = StudioShellChrome.Foreground,
+            BorderThickness = new Thickness(0)
         };
-        Grid statusGrid = (Grid)status.Child;
-        Grid.SetColumn(_statusCursor, 1); statusGrid.Children.Add(_statusCursor);
-        Grid.SetColumn(_buildState, 2); statusGrid.Children.Add(_buildState);
-        Grid.SetColumn(_runtimeState, 3); statusGrid.Children.Add(_runtimeState);
-        Grid.SetRow(status, 4);
-        _root.Children.Add(status);
+        _bottomToggle.Click += (_, _) => ToggleBottom();
+        Grid bottom = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        bottom.Children.Add(_bottom);
+        Grid.SetColumn(_bottomToggle, 1);
+        bottom.Children.Add(_bottomToggle);
+        Grid.SetRow(bottom, 3);
+        _root.Children.Add(bottom);
         return _root;
     }
 
     private Control BuildActivityRail()
     {
         RenderActivityRail();
-        return new Border
-        {
-            Background = UiTheme.Console,
-            BorderBrush = UiTheme.Divider,
-            BorderThickness = new Thickness(0, 0, 1, 0),
-            Child = _activityRail
-        };
+        return _activityRail;
     }
 
-    private void RenderActivityRail()
-    {
-        _activityRail.Children.Clear();
-        _activityRail.Children.Add(ActivityButton("A", "Automations", StudioActivity.Automations));
-        _activityRail.Children.Add(ActivityButton("</>", "Scripts", StudioActivity.Scripts));
-        _activityRail.Children.Add(ActivityButton("W", "Workflows", StudioActivity.Workflows));
-        _activityRail.Children.Add(ActivityButton("⌕", "Search", StudioActivity.Search));
-        _activityRail.Children.Add(ActivityButton("▶", "Runtime", StudioActivity.Runtime));
-    }
-
-    private Button ActivityButton(string glyph, string label, StudioActivity activity)
-    {
-        Button button = UiTheme.QuietButton(glyph);
-        button.Width = 34;
-        button.MinWidth = 34;
-        button.Padding = new Thickness(2);
-        button.Background = _activity == activity ? UiTheme.Raised : Brushes.Transparent;
-        Avalonia.Automation.AutomationProperties.SetName(button, label);
-        ToolTip.SetTip(button, label);
-        button.Click += async (_, _) => await SetActivityAsync(activity).ConfigureAwait(true);
-        return button;
-    }
+    private void RenderActivityRail() =>
+        _activityRail.Child = StudioShellChrome.BuildActivityButtons(_activity, SetActivityAsync);
 
     private async Task SetActivityAsync(StudioActivity activity)
     {
@@ -283,15 +287,19 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private Control BuildExplorerHeader()
     {
-        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(8, 6) };
+        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(10, 12) };
         header.Children.Add(_explorerTitle);
         _organizeButton = UiTheme.QuietButton("Move");
+        _organizeButton.Foreground = StudioShellChrome.Foreground;
+        _organizeButton.BorderBrush = StudioShellChrome.Border;
         _organizeButton.IsVisible = false;
         _organizeButton.Click += async (_, _) => await OrganizeSelectedAsync().ConfigureAwait(true);
         Grid.SetColumn(_organizeButton, 1);
         header.Children.Add(_organizeButton);
 
         _newButton = UiTheme.QuietButton("+ New");
+        _newButton.Foreground = StudioShellChrome.Foreground;
+        _newButton.BorderBrush = StudioShellChrome.Border;
         _newButton.Click += async (_, _) =>
         {
             if (_activity == StudioActivity.Scripts)
@@ -372,38 +380,55 @@ internal sealed partial class AutomationStudioWindow : Window
         return _activePackage is null ? null : (_activePackage.Definition.PackageId, string.Empty);
     }
 
-    private Control BuildToolbar()
+    private Control BuildHeader()
     {
-        Grid grid = new() { ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"), ColumnSpacing = 10, Margin = new Thickness(10, 7) };
-        grid.Children.Add(new TextBlock
+        StackPanel profile = new()
         {
-            Text = "Automation Studio", Foreground = UiTheme.Text, FontSize = NexTypography.Display,
-            FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center
-        });
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                new TextBlock { Text = "Profile:", Foreground = StudioShellChrome.Foreground, VerticalAlignment = VerticalAlignment.Center },
+                _profile
+            }
+        };
+        StackPanel connection = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                _connectionIndicator,
+                _connectionStatus
+            }
+        };
+        _connectionIndicator.VerticalAlignment = VerticalAlignment.Center;
+        _connectionStatus.VerticalAlignment = VerticalAlignment.Center;
+        return StudioShellChrome.BuildHeader(
+            profile,
+            connection,
+            RouteGlobalSearchAsync,
+            () => StudioSettingsRequested?.Invoke() ?? Task.CompletedTask);
+    }
 
-        StackPanel profile = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
-        profile.Children.Add(new TextBlock { Text = "Profile", Foreground = UiTheme.Muted, VerticalAlignment = VerticalAlignment.Center });
-        profile.Children.Add(_profile);
-        Grid.SetColumn(profile, 1); grid.Children.Add(profile);
+    private async Task RouteGlobalSearchAsync(string query)
+    {
+        await SetActivityAsync(StudioActivity.Search).ConfigureAwait(true);
+        if (GlobalSearchRequested is { } searchRequested)
+            await searchRequested(query).ConfigureAwait(true);
+    }
 
-        StackPanel commands = new() { Orientation = Orientation.Horizontal, Spacing = 5, HorizontalAlignment = HorizontalAlignment.Center };
-        commands.Children.Add(Button("Save", SaveActiveAsync));
-        commands.Children.Add(Button("Save All", SaveAllAsync));
-        commands.Children.Add(Button("New Package", CreatePackageAsync));
-        commands.Children.Add(Button("New TS", () => CreateScriptFileAsync(".ts")));
-        commands.Children.Add(Button("Build", BuildActivePackageAsync));
-        Button packages = UiTheme.QuietButton("Packages");
-        packages.Click += (_, _) => ShowPackageOperationsMenu(packages);
-        commands.Children.Add(packages);
-        commands.Children.Add(Button("Run", RunFunctionAsync));
-        commands.Children.Add(Button("Search", SearchAsync));
-        _bottomToggle = Button(_bottomCollapsed ? "Panel ▴" : "Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
-        commands.Children.Add(_bottomToggle);
-        Grid.SetColumn(commands, 2); grid.Children.Add(commands);
-
-        Button palette = Button("Quick Open  ⌘P", QuickOpenAsync);
-        Grid.SetColumn(palette, 3); grid.Children.Add(palette);
-        return grid;
+    private void UpdateConnectionStatus(ConnectionStatus status)
+    {
+        _connectionStatus.Text = status.ToString();
+        _connectionIndicator.Background = status switch
+        {
+            ConnectionStatus.Connected => StudioShellChrome.Success,
+            ConnectionStatus.Connecting => StudioShellChrome.Connecting,
+            _ => StudioShellChrome.Secondary
+        };
     }
 
     private void ShowPackageOperationsMenu(Button anchor)
@@ -441,8 +466,8 @@ internal sealed partial class AutomationStudioWindow : Window
         content.Children.Add(_externalConflictText);
         Grid.SetColumn(actions, 1);
         content.Children.Add(actions);
-        _externalConflictBar.Background = UiTheme.Raised;
-        _externalConflictBar.BorderBrush = UiTheme.Divider;
+        _externalConflictBar.Background = StudioShellChrome.Card;
+        _externalConflictBar.BorderBrush = StudioShellChrome.Border;
         _externalConflictBar.BorderThickness = new Thickness(0, 0, 0, 1);
         _externalConflictBar.Padding = new Thickness(12, 7);
         _externalConflictBar.Child = content;
@@ -506,7 +531,7 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         _bottomCollapsed = !_bottomCollapsed;
         _root.RowDefinitions[3].Height = new GridLength(_bottomCollapsed ? StudioUiPreferences.CollapsedBottomHeight : _preferences.BottomHeight);
-        _bottomToggle.Content = _bottomCollapsed ? "Panel ▴" : "Panel ▾";
+        _bottomToggle.Content = _bottomCollapsed ? "⌃" : "⌄";
     }
 
     private static Button Button(string label, Func<Task> action)
@@ -520,7 +545,7 @@ internal sealed partial class AutomationStudioWindow : Window
     {
         ResizeDirection = direction,
         ResizeBehavior = GridResizeBehavior.PreviousAndNext,
-        Background = UiTheme.Divider
+        Background = StudioShellChrome.Border
     };
 
     private static Border Frame(string title, Control content, bool withHeader = true)
@@ -537,13 +562,19 @@ internal sealed partial class AutomationStudioWindow : Window
             Grid.SetRow(content, 1); grid.Children.Add(content);
             child = grid;
         }
-        return new Border { BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Background = UiTheme.Surface, Child = child };
+        return new Border { BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), Background = StudioShellChrome.Explorer, Child = child };
     }
 
     private static TabItem BottomTab(string header, Control content) => new()
     {
-        Header = header,
-        Content = new ScrollViewer { Content = content, Padding = new Thickness(8) }
+        Header = new TextBlock
+        {
+            Text = header,
+            FontSize = 12,
+            Foreground = StudioShellChrome.Secondary,
+            VerticalAlignment = VerticalAlignment.Center
+        },
+        Content = new ScrollViewer { Content = content, Padding = new Thickness(8), Background = StudioShellChrome.Canvas }
     };
 
     // ───────────────────────────── Lifecycle ─────────────────────────────
@@ -2596,7 +2627,7 @@ internal sealed partial class AutomationStudioWindow : Window
             TextBlock label = new()
             {
                 Text = $"{(document.IsDirty ? "● " : "")}{document.Title}",
-                Foreground = active ? UiTheme.Text : UiTheme.Muted,
+                Foreground = active ? StudioShellChrome.Foreground : StudioShellChrome.Secondary,
                 VerticalAlignment = VerticalAlignment.Center,
                 MaxWidth = 220,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -2604,7 +2635,7 @@ internal sealed partial class AutomationStudioWindow : Window
             Button close = new()
             {
                 Content = "×", Padding = new Thickness(4, 0), MinWidth = 22, Background = Brushes.Transparent,
-                Foreground = UiTheme.Muted, BorderThickness = new Thickness(0)
+                Foreground = StudioShellChrome.Secondary, BorderThickness = new Thickness(0)
             };
             Avalonia.Automation.AutomationProperties.SetName(close, $"Close {document.Title}");
             close.Click += async (_, _) => await CloseDocumentAsync(captured).ConfigureAwait(true);
@@ -2613,8 +2644,8 @@ internal sealed partial class AutomationStudioWindow : Window
             {
                 Child = content,
                 Padding = new Thickness(12, 7, 6, 7),
-                Background = active ? UiTheme.Console : UiTheme.Surface,
-                BorderBrush = active ? UiTheme.Accent : UiTheme.Divider,
+                Background = active ? StudioShellChrome.Input : StudioShellChrome.Card,
+                BorderBrush = active ? StudioShellChrome.Blue : StudioShellChrome.Border,
                 BorderThickness = new Thickness(0, 0, 1, active ? 2 : 1),
                 Cursor = new Cursor(StandardCursorType.Hand)
             };
@@ -2746,6 +2777,8 @@ internal sealed partial class AutomationStudioWindow : Window
         var reader = _runtime.Events.Subscribe(512);
         try
         {
+            await Dispatcher.UIThread.InvokeAsync(() => UpdateConnectionStatus(
+                _runtime.Transport.IsConnected ? ConnectionStatus.Connected : ConnectionStatus.Disconnected));
             await foreach (var envelope in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
                 string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
@@ -2761,6 +2794,7 @@ internal sealed partial class AutomationStudioWindow : Window
                     foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));
                     if (envelope.Payload is ScriptLogEmitted log) AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
                     if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
+                    if (envelope.Payload is ConnectionStateChanged connection) UpdateConnectionStatus(connection.Status);
                 });
             }
         }

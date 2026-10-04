@@ -85,6 +85,7 @@ public sealed class MainWindow : Window
     private readonly CodexWorkspace _codexWorkspace;
     private readonly ScriptingWorkspace _scriptingWorkspace;
     private AutomationStudioWindow? _automationStudioWindow;
+    private bool _returnToStudioAfterSettings;
     private readonly GameplayHudPanel _gameplayHudPanel = new();
     private readonly CharacterHudPanel _characterHudPanel;
     private readonly CharacterInventoryWorkspace _characterWorkspace;
@@ -513,9 +514,21 @@ public sealed class MainWindow : Window
         }
 
         AutomationStudioWindow studio = new(_runtime);
+        studio.StudioSettingsRequested += ShowStudioSettingsAsync;
         studio.Closed += (_, _) => _automationStudioWindow = null;
         _automationStudioWindow = studio;
         studio.Show(this);
+    }
+
+    private async Task ShowStudioSettingsAsync()
+    {
+        if (_automationStudioWindow is { } studio)
+        {
+            _returnToStudioAfterSettings = true;
+            studio.Hide();
+        }
+        Activate();
+        await ShowSettingsAsync().ConfigureAwait(true);
     }
 
     private static Button UtilityButton(string label, string accessibleLabel)
@@ -1800,6 +1813,15 @@ public sealed class MainWindow : Window
             RenderState(_snapshot);
             ShowClientMessage("Settings saved.");
         }
+        if (_returnToStudioAfterSettings && _automationStudioWindow is { } studio)
+        {
+            _returnToStudioAfterSettings = false;
+            studio.Show();
+            studio.Activate();
+            studio.Focus();
+            return;
+        }
+        _returnToStudioAfterSettings = false;
         _command.Focus();
     }
 

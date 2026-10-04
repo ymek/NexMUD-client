@@ -318,6 +318,7 @@ public static class Program
             Assert.False(set.Dirty.Any());
             return Task.CompletedTask;
         });
+        await RunAsync("studio UI preferences default collapsed and preserve saved state", StudioUiPreferencesPreserveBottomCollapse);
         await RunAsync("script workspace paths reject traversal", () =>
         {
             Assert.Throws<ArgumentException>(() =>
@@ -9016,6 +9017,26 @@ Level 30: circle stab        n/a
         set.OpenOrFocus(new NexMud.Gui.AutomationStudio.StudioDocument("a", kind, "dup"));
         if (set.Documents.Count != 2 || set.Active?.Key != "a") throw new InvalidOperationException("reopen must focus, not duplicate");
         if (set.Close("a")?.Key != "b") throw new InvalidOperationException("close must focus neighbor");
+        return Task.CompletedTask;
+    }
+
+    private static Task StudioUiPreferencesPreserveBottomCollapse()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"nexmud-studio-ui-{Guid.NewGuid():N}.json");
+        try
+        {
+            var defaults = NexMud.Gui.AutomationStudio.StudioUiPreferences.Load(path);
+            if (!defaults.BottomCollapsed) throw new InvalidOperationException("default bottom panel must be collapsed");
+
+            defaults.BottomCollapsed = false;
+            defaults.Save(path);
+            if (NexMud.Gui.AutomationStudio.StudioUiPreferences.Load(path).BottomCollapsed)
+                throw new InvalidOperationException("saved expanded panel preference must be restored");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
         return Task.CompletedTask;
     }
 }

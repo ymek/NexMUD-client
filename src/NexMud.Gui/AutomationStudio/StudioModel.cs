@@ -189,9 +189,9 @@ internal sealed class StudioDocumentSet
 /// <summary>Studio layout preferences. Widths/heights are clamped to the ranges defined by the workbench spec.</summary>
 internal sealed class StudioUiPreferences
 {
-    public const double DefaultExplorerWidth = 260, MinExplorerWidth = 220, MaxExplorerWidth = 360;
+    public const double DefaultExplorerWidth = 300, MinExplorerWidth = 240, MaxExplorerWidth = 420;
     public const double DefaultBottomHeight = 240, MinBottomHeight = 120, MaxBottomHeight = 600;
-    public const double CollapsedBottomHeight = 30;
+    public const double CollapsedBottomHeight = 40;
 
     private double _explorerWidth = DefaultExplorerWidth;
     private double _bottomHeight = DefaultBottomHeight;
