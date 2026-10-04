@@ -70,7 +70,6 @@ public sealed class MacOsScriptTestSandboxProvider : IScriptTestSandboxProvider
         profile.AppendLine("(deny default)");
         profile.AppendLine("(import \"system.sb\")");
         profile.AppendLine("(allow process-exec (literal \"" + Quote(node) + "\"))");
-        profile.AppendLine("(allow process-fork)");
         profile.AppendLine("(allow signal (target self))");
         profile.AppendLine("(allow sysctl-read)");
         profile.AppendLine("(deny mach-lookup)");

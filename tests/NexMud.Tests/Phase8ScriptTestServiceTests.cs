@@ -273,6 +273,7 @@ internal static class Phase8ScriptTestServiceTests
         string profile = MacOsScriptTestSandboxProvider.CreateProfile(node, [sandbox, toolchain, dependencies], sandbox);
         Assert.True(profile.Contains("(import \"system.sb\")", StringComparison.Ordinal), "system.sb is imported.");
         Assert.Equal(1, profile.Split("(allow process-exec", StringSplitOptions.None).Length - 1);
+        Assert.True(!profile.Contains("(allow process-fork)", StringComparison.Ordinal), "Child processes are denied.");
         Assert.True(profile.Contains("(allow process-exec (literal \"" + physicalNode + "\"))", StringComparison.Ordinal), profile);
         Assert.True(profile.Contains("(allow file-read* (subpath \"" + physicalSandbox.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"))", StringComparison.Ordinal), profile);
         Assert.Equal(3, profile.Split("(allow file-read*", StringSplitOptions.None).Length - 1);
@@ -321,15 +322,20 @@ internal static class Phase8ScriptTestServiceTests
         string script = """
             import fs from 'node:fs';
             import net from 'node:net';
-            let readDenied = false, writeDenied = false;
+            import { spawnSync } from 'node:child_process';
+            let readDenied = false, writeDenied = false, childProcessDenied = false;
             try { fs.readFileSync(SENTINEL); } catch (e) { readDenied = ['EPERM','EACCES'].includes(e.code); }
             try { fs.writeFileSync(WRITE_TARGET, 'escape'); } catch (e) { writeDenied = ['EPERM','EACCES'].includes(e.code); }
+            try {
+              const child = spawnSync('/bin/cat', [SENTINEL], { encoding: 'utf8' });
+              childProcessDenied = ['EPERM','EACCES'].includes(child.error?.code);
+            } catch (e) { childProcessDenied = ['EPERM','EACCES'].includes(e.code); }
             const networkDenied = await new Promise(resolve => {
               const socket = net.connect(9, '127.0.0.1');
               socket.once('error', error => resolve(['EPERM','EACCES'].includes(error.code)));
               socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
             });
-            console.log(JSON.stringify({ readDenied, writeDenied, networkDenied }));
+            console.log(JSON.stringify({ readDenied, writeDenied, childProcessDenied, networkDenied }));
             """.Replace("SENTINEL", System.Text.Json.JsonSerializer.Serialize(sentinel), StringComparison.Ordinal)
             .Replace("WRITE_TARGET", System.Text.Json.JsonSerializer.Serialize(writeTarget), StringComparison.Ordinal);
         ToolProcessRequest original = new(node, ["--input-type=module", "-e", script], sandbox, [Path.GetDirectoryName(node)!]);
@@ -340,6 +346,7 @@ internal static class Phase8ScriptTestServiceTests
         using System.Text.Json.JsonDocument payload = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
         Assert.True(payload.RootElement.GetProperty("readDenied").GetBoolean());
         Assert.True(payload.RootElement.GetProperty("writeDenied").GetBoolean());
+        Assert.True(payload.RootElement.GetProperty("childProcessDenied").GetBoolean());
         Assert.True(payload.RootElement.GetProperty("networkDenied").GetBoolean());
         Assert.Equal("outside", await File.ReadAllTextAsync(sentinel));
         Assert.False(File.Exists(writeTarget));
