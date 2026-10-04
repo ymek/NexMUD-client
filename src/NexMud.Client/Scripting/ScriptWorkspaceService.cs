@@ -75,6 +75,10 @@ public sealed record ScriptSourceSearchResult(
     int Column,
     string Preview);
 
+public sealed record ScriptSourceSearchOptions(
+    bool MatchCase = false,
+    bool WholeWord = false);
+
 public sealed record ScriptPackageBuildChanged(
     string ProfileId,
     string PackageId,
@@ -735,36 +739,46 @@ public sealed partial class ScriptWorkspaceService
             cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<IReadOnlyList<ScriptSourceSearchResult>> SearchAsync(
+        string profileId,
+        string query,
+        CancellationToken cancellationToken = default) =>
+        SearchAsync(profileId, query, new ScriptSourceSearchOptions(), cancellationToken);
+
     public async Task<IReadOnlyList<ScriptSourceSearchResult>> SearchAsync(
         string profileId,
         string query,
+        ScriptSourceSearchOptions options,
         CancellationToken cancellationToken = default)
     {
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        ArgumentNullException.ThrowIfNull(options);
         ScriptPackageWorkspaceMigrationResult migration =
             await EnsurePackageWorkspaceAsync(profileId, cancellationToken).ConfigureAwait(false);
         List<ScriptSourceSearchResult> results = [];
         foreach (ScriptPackageCatalogEntry package in migration.Packages)
         {
-            foreach (string path in Directory.EnumerateFiles(package.PackageRoot, "*", SearchOption.AllDirectories)
+            foreach (string path in EnumerateBuildInputFiles(package.PackageRoot)
                          .Where(path => !IsGeneratedPackagePath(package.PackageRoot, path))
                          .Where(path => !Path.GetFileName(path).Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
                          .Where(IsSupportedSourcePath))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string[] lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
-                for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+                using StreamReader reader = new(path);
+                int lineNumber = 0;
+                while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
                 {
-                    int column = lines[lineIndex].IndexOf(query, StringComparison.OrdinalIgnoreCase);
+                    lineNumber++;
+                    int column = ScriptSourceSearchMatcher.FindFirst(line, query, options);
                     if (column < 0) continue;
                     string relative = Path.GetRelativePath(package.PackageRoot, path).Replace('\\', '/');
                     results.Add(new ScriptSourceSearchResult(
                         package.Document.NexMud.Id,
                         relative,
-                        lineIndex + 1,
+                        lineNumber,
                         column + 1,
-                        lines[lineIndex].Trim()));
+                        line.Trim()));
                     if (results.Count >= 500) return results;
                 }
             }

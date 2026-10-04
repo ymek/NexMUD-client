@@ -108,6 +108,7 @@ public static class Program
         await RunAsync("Phase 8 fails closed when OS sandbox is unavailable", Phase8ScriptTestServiceTests.SandboxProviderFailsClosedWhenUnavailable);
         await RunAsync("Phase 8 macOS sandbox denies network and outside filesystem", Phase8ScriptTestServiceTests.MacOsSandboxDeniesNetworkAndOutsideFilesystem);
         await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
+        await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
         await RunAsync("scripting vertical slice routes semantic vitals event through central command dispatch", ScriptingVerticalSliceRoutesVitalsToCommand);
         await RunAsync("scripting vertical slice isolates permission denial", ScriptingVerticalSliceDeniesMissingCommandPermission);
         await RunAsync("scripting unload discards late async host completion", ScriptingUnloadDiscardsLateHostCompletion);
