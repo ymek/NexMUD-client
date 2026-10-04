@@ -119,8 +119,6 @@ internal sealed partial class AutomationStudioWindow
     {
         CancelTests("Superseded by a new run.");
         string profileId = SelectedProfileId;
-        _diagnostics.ResolveSourcesByPrefix(profileId, "tests:");
-        RefreshProblems();
         _testRows.Clear();
         _failedTestGroups.Clear();
         _testResults.Children.Clear();
@@ -141,6 +139,9 @@ internal sealed partial class AutomationStudioWindow
             foreach (string packageId in packageIds)
             {
                 cancellation.Token.ThrowIfCancellationRequested();
+                string source = "tests:" + packageId;
+                _diagnostics.ResolveSource(profileId, source);
+                RefreshProblems();
                 foreach (StudioDocument document in _documents.Documents.Where(document =>
                              document.IsScript && document.IsDirty && document.ProfileId == profileId && document.PackageId == packageId).ToArray())
                     await SaveScriptAsync(document.Key, build: false).ConfigureAwait(true);
@@ -154,7 +155,6 @@ internal sealed partial class AutomationStudioWindow
                 foreach (ScriptTestDiagnostic diagnostic in result.Diagnostics)
                     if (!result.Assertions.Any(assertion => assertion.Status == "failed" && assertion.FilePath == diagnostic.FilePath && assertion.Message == diagnostic.Message))
                         AddTestDiagnostic(packageId, diagnostic);
-                string source = "tests:" + packageId;
                 IEnumerable<StudioDiagnostic> issues = result.Diagnostics.Select((diagnostic, index) =>
                     new StudioDiagnostic(profileId, source, $"diagnostic:{index}:{diagnostic.FilePath}:{diagnostic.Line}:{diagnostic.Column}:{diagnostic.Message}",
                         diagnostic.Severity.ToString(), diagnostic.Message, packageId, diagnostic.FilePath, diagnostic.Line, diagnostic.Column))
