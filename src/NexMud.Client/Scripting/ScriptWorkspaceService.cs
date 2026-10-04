@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using NexMud.Client.Paths;
@@ -109,6 +111,7 @@ public sealed partial class ScriptWorkspaceService
     private readonly ClientScriptPlatform _platform;
     private readonly IEventSink _events;
     private readonly IScriptCompiler _compiler;
+    private readonly IScriptPackageManager _packageManager;
     private readonly Func<string> _activeProfileId;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, BuildState> _buildStates = new(StringComparer.OrdinalIgnoreCase);
@@ -119,12 +122,14 @@ public sealed partial class ScriptWorkspaceService
         ClientScriptPlatform platform,
         IEventSink events,
         Func<string> activeProfileId,
-        IScriptCompiler? compiler = null)
+        IScriptCompiler? compiler = null,
+        IScriptPackageManager? packageManager = null)
     {
         _platform = platform ?? throw new ArgumentNullException(nameof(platform));
         _events = events ?? throw new ArgumentNullException(nameof(events));
         _activeProfileId = activeProfileId ?? throw new ArgumentNullException(nameof(activeProfileId));
         _compiler = compiler ?? new TypeScriptCompiler();
+        _packageManager = packageManager ?? new ScriptPackageManager();
     }
 
     public event EventHandler? WorkspaceChanged;
@@ -402,8 +407,7 @@ public sealed partial class ScriptWorkspaceService
         DateTimeOffset builtAt = DateTimeOffset.UtcNow;
 
         List<ScriptSourceFile> sources = [];
-        foreach (string sourcePath in Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories)
-                     .Where(path => !IsGeneratedPackagePath(packageRoot, path))
+        foreach (string sourcePath in EnumerateBuildInputFiles(packageRoot)
                      .Where(path => path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
                                     path.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
                      .OrderBy(path => path, StringComparer.Ordinal))
@@ -423,8 +427,11 @@ public sealed partial class ScriptWorkspaceService
             definition.Capabilities,
             ScriptOwnerKind.UserScript,
             ScriptRuntimeProfile.UserScript);
-        ScriptCompileResult compile = await _compiler.CompileAsync(
-            new ScriptCompileRequest(manifest, ScriptSourceLanguage.TypeScript, sources),
+        ScriptCompileResult compile = await CompilePackageAsync(
+            profileId,
+            packageRoot,
+            manifest,
+            sources,
             cancellationToken).ConfigureAwait(false);
         IReadOnlyList<ExportedScriptFunction> exports = compile.ExportedFunctions ?? Array.Empty<ExportedScriptFunction>();
         ScriptPackageBuildStatus status = compile.Success ? ScriptPackageBuildStatus.Succeeded : ScriptPackageBuildStatus.Failed;
@@ -472,6 +479,163 @@ public sealed partial class ScriptWorkspaceService
             cancellationToken).ConfigureAwait(false);
         WorkspaceChanged?.Invoke(this, EventArgs.Empty);
         return result;
+    }
+
+    private async Task<ScriptCompileResult> CompilePackageAsync(
+        string profileId,
+        string packageRoot,
+        ScriptManifest manifest,
+        IReadOnlyList<ScriptSourceFile> sources,
+        CancellationToken cancellationToken)
+    {
+        ScriptPackageDocument package;
+        try
+        {
+            package = await ScriptPackageDocument.LoadAsync(
+                Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0010",
+                $"Package metadata could not be loaded: {exception.Message}"));
+        }
+
+        if (ScriptPackageDependencyValidator.Validate(package).Count > 0)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0011",
+                "Package metadata contains unsupported dependency sources. Only registry semver and profile-local workspace dependencies are allowed."));
+        }
+
+        if (package.Dependencies.Count > 0 || package.DevDependencies.Count > 0 ||
+            package.OptionalDependencies.Count > 0 || package.PeerDependencies.Count > 0)
+        {
+            ScriptPackageOperationResult restore;
+            try
+            {
+                restore = await _packageManager.RestoreAsync(profileId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0012",
+                    $"Package dependency restore failed: {exception.Message}"));
+            }
+
+            if (!restore.Success)
+            {
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0012",
+                    $"Package dependencies are not ready: {restore.Message}"));
+            }
+        }
+
+        string projectConfigPath = Path.Combine(packageRoot, "tsconfig.json");
+        if (!File.Exists(projectConfigPath))
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0013",
+                "Package TypeScript project configuration is missing."));
+        }
+
+        string scriptsRoot = GetScriptsRoot(profileId);
+        string dependencyGraphHash;
+        try
+        {
+            dependencyGraphHash = await ComputeDependencyGraphHashAsync(scriptsRoot, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0014",
+                $"Package dependency state could not be fingerprinted: {exception.Message}"));
+        }
+        ScriptCompileRequest request = new(manifest, ScriptSourceLanguage.TypeScript, sources)
+        {
+            PackageContext = new ScriptCompilePackageContext(packageRoot, projectConfigPath, dependencyGraphHash)
+        };
+        return await _compiler.CompileAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<string> ComputeDependencyGraphHashAsync(
+        string scriptsRoot,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.GetFullPath(scriptsRoot);
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] separator = [0];
+        string[] explicitInputs =
+        [
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.LockfileName),
+            Path.Combine(root, "pnpm-workspace.yaml"),
+            Path.Combine(root, ".npmrc"),
+            Path.Combine(root, "node_modules", ".pnpm", "lock.yaml"),
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "tsconfig.base.json"),
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "sdk", "@nexmud", "api", "index.d.ts")
+        ];
+        IEnumerable<string> inputs = EnumerateBuildInputFiles(root)
+            .Concat(explicitInputs.Where(File.Exists))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(path => path, StringComparer.Ordinal);
+        foreach (string path in inputs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string relativePath = Path.GetRelativePath(root, path).Replace('\\', '/');
+            hash.AppendData(Encoding.UTF8.GetBytes(relativePath));
+            hash.AppendData(separator);
+            await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                hash.AppendData(buffer, 0, read);
+            hash.AppendData(separator);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static IEnumerable<string> EnumerateBuildInputFiles(string root)
+    {
+        Stack<string> directories = new();
+        directories.Push(root);
+        while (directories.TryPop(out string? directory))
+        {
+            foreach (string file in Directory.EnumerateFiles(directory))
+            {
+                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0)
+                    yield return file;
+            }
+
+            foreach (string child in Directory.EnumerateDirectories(directory))
+            {
+                string name = Path.GetFileName(child);
+                if (name.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals(ScriptPackageWorkspaceMigrator.NexMudDirectoryName, StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+                    (File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0)
+                {
+                    continue;
+                }
+                directories.Push(child);
+            }
+        }
     }
 
     public async Task<IReadOnlyList<ScriptPackageBuildResult>> BuildAllAsync(

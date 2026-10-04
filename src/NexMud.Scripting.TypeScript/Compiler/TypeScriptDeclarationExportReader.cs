@@ -16,11 +16,17 @@ internal static class TypeScriptDeclarationExportReader
     public static IReadOnlyList<ExportedScriptFunction> Discover(
         ScriptModuleId packageId,
         IReadOnlyList<ScriptSourceFile> sources,
-        string outputRoot)
+        string outputRoot,
+        string? entrypoint = null)
     {
+        if (entrypoint is not null)
+            return DiscoverEntrypoint(packageId, sources, outputRoot, entrypoint);
+
         List<ExportedScriptFunction> exports = [];
         foreach (ScriptSourceFile source in sources)
         {
+            if (entrypoint is not null && !source.Path.Equals(entrypoint, StringComparison.Ordinal))
+                continue;
             string extension = Path.GetExtension(source.Path);
             if ((!extension.Equals(".ts", StringComparison.OrdinalIgnoreCase) &&
                  !extension.Equals(".js", StringComparison.OrdinalIgnoreCase)) ||
@@ -89,6 +95,149 @@ internal static class TypeScriptDeclarationExportReader
             .OrderBy(item => item.ModulePath, StringComparer.Ordinal)
             .ThenBy(item => item.ExportName, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static IReadOnlyList<ExportedScriptFunction> DiscoverEntrypoint(
+        ScriptModuleId packageId,
+        IReadOnlyList<ScriptSourceFile> sources,
+        string outputRoot,
+        string entrypoint)
+    {
+        Dictionary<string, ScriptSourceFile> sourceByPath = sources.ToDictionary(source => source.Path, StringComparer.Ordinal);
+        Dictionary<string, Dictionary<string, ExportedScriptFunction>> cache = new(StringComparer.Ordinal);
+        HashSet<string> visiting = new(StringComparer.Ordinal);
+
+        Dictionary<string, ExportedScriptFunction> ReadModule(string modulePath)
+        {
+            if (cache.TryGetValue(modulePath, out Dictionary<string, ExportedScriptFunction>? cached))
+                return cached;
+            if (!sourceByPath.TryGetValue(modulePath, out ScriptSourceFile? source) || !visiting.Add(modulePath))
+                return new Dictionary<string, ExportedScriptFunction>(StringComparer.Ordinal);
+
+            Dictionary<string, ExportedScriptFunction> exports = new(StringComparer.Ordinal);
+            foreach (ExportedScriptFunction item in Discover(packageId, [source], outputRoot))
+                exports.TryAdd(item.ExportName, item);
+            string declarationRelative = Path.ChangeExtension(modulePath, ".d.ts")!.Replace('\\', '/');
+            string declarationPath = Path.Combine(outputRoot, declarationRelative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(declarationPath))
+            {
+                foreach (string line in File.ReadLines(declarationPath))
+                {
+                    if (!TryParseReExport(line, out string specifier, out bool star, out var names)) continue;
+                    string? targetPath = ResolveRelativeModulePath(modulePath, specifier, sourceByPath);
+                    if (targetPath is null) continue;
+                    Dictionary<string, ExportedScriptFunction> targetExports = ReadModule(targetPath);
+                    if (star)
+                    {
+                        foreach ((string name, ExportedScriptFunction item) in targetExports)
+                            exports.TryAdd(name, item);
+                        continue;
+                    }
+
+                    foreach ((string importedName, string exportedName) in names)
+                    {
+                        if (!targetExports.TryGetValue(importedName, out ExportedScriptFunction? item)) continue;
+                        exports.TryAdd(exportedName, item with
+                        {
+                            FunctionRef = new ScriptFunctionRef(packageId.Value, modulePath, exportedName),
+                            DisplayName = exportedName,
+                            ModulePath = modulePath,
+                            ExportName = exportedName
+                        });
+                    }
+                }
+            }
+
+            visiting.Remove(modulePath);
+            cache[modulePath] = exports;
+            return exports;
+        }
+
+        return ReadModule(entrypoint).Values
+            .Select(item => item with
+            {
+                FunctionRef = new ScriptFunctionRef(packageId.Value, entrypoint, item.ExportName),
+                ModulePath = entrypoint
+            })
+            .OrderBy(item => item.ExportName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static bool TryParseReExport(
+        string declaration,
+        out string specifier,
+        out bool star,
+        out IReadOnlyList<(string Imported, string Exported)> names)
+    {
+        specifier = string.Empty;
+        star = false;
+        names = Array.Empty<(string, string)>();
+        string text = declaration.Trim().TrimEnd(';').TrimEnd();
+        int fromIndex = text.LastIndexOf(" from ", StringComparison.Ordinal);
+        if (fromIndex < 0) return false;
+
+        string moduleSpecifier = text[(fromIndex + 6)..].Trim();
+        if (moduleSpecifier.Length < 2 ||
+            (moduleSpecifier[0] != '\'' && moduleSpecifier[0] != '"') ||
+            moduleSpecifier[^1] != moduleSpecifier[0])
+        {
+            return false;
+        }
+
+        string clause = text[..fromIndex].Trim();
+        specifier = moduleSpecifier[1..^1];
+        if (clause.Equals("export *", StringComparison.Ordinal))
+        {
+            star = true;
+            return true;
+        }
+        if (!clause.StartsWith("export {", StringComparison.Ordinal) || !clause.EndsWith('}'))
+            return false;
+
+        List<(string Imported, string Exported)> parsedNames = [];
+        string namesText = clause["export {".Length..^1];
+        foreach (string name in namesText.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            string[] parts = name.Split(" as ", 2, StringSplitOptions.TrimEntries);
+            parsedNames.Add((parts[0], parts.Length == 1 ? parts[0] : parts[1]));
+        }
+        names = parsedNames;
+        return true;
+    }
+
+    private static string? ResolveRelativeModulePath(
+        string sourcePath,
+        string specifier,
+        IReadOnlyDictionary<string, ScriptSourceFile> sources)
+    {
+        if (!specifier.StartsWith(".", StringComparison.Ordinal)) return null;
+        string directory = Path.GetDirectoryName(sourcePath)?.Replace('\\', '/') ?? string.Empty;
+        string combined = string.IsNullOrEmpty(directory) ? specifier : $"{directory}/{specifier}";
+        List<string> segments = [];
+        foreach (string segment in combined.Split('/'))
+        {
+            if (segment is "" or ".") continue;
+            if (segment == "..")
+            {
+                if (segments.Count == 0) return null;
+                segments.RemoveAt(segments.Count - 1);
+            }
+            else
+            {
+                segments.Add(segment);
+            }
+        }
+
+        string basePath = string.Join('/', segments);
+        string extension = Path.GetExtension(basePath);
+        IEnumerable<string> candidates = extension switch
+        {
+            ".js" => [Path.ChangeExtension(basePath, ".ts")!, Path.ChangeExtension(basePath, ".tsx")!, basePath],
+            ".ts" or ".tsx" => [basePath],
+            "" => [basePath + ".ts", basePath + ".tsx", basePath + ".js", basePath + "/index.ts", basePath + "/index.js"],
+            _ => []
+        };
+        return candidates.FirstOrDefault(sources.ContainsKey);
     }
 
     private static bool TryParseFunction(

@@ -86,6 +86,10 @@ public static class Program
         await RunAsync("Jint reload preserves running instance when replacement fails", JintReloadPreservesOldInstanceOnFailure);
         await RunAsync("NexMUD TypeScript declarations track script API version", TypeScriptDeclarationsTrackApiVersion);
         await RunAsync("TypeScript compiler compiles and type-checks reference script", TypeScriptCompilerCompilesReferenceScript);
+        await RunAsync("package compiler bundles dependencies and activates in Jint", Phase7PackageCompilerTests.BundlesPackageDependenciesAndEntrypointExports);
+        await RunAsync("package compiler rejects Node built-in imports", Phase7PackageCompilerTests.RejectsNodeBuiltins);
+        await RunAsync("package dependency source policy covers optional and peer dependencies", Phase7PackageCompilerTests.DependencySourcesAreValidatedAcrossManifestSections);
+        await RunAsync("package compile cache includes dependency graph", Phase7PackageCompilerTests.CacheKeyIncludesDependencyGraph);
         await RunAsync("scripting vertical slice routes semantic vitals event through central command dispatch", ScriptingVerticalSliceRoutesVitalsToCommand);
         await RunAsync("scripting vertical slice isolates permission denial", ScriptingVerticalSliceDeniesMissingCommandPermission);
         await RunAsync("scripting unload discards late async host completion", ScriptingUnloadDiscardsLateHostCompletion);
@@ -2091,6 +2095,18 @@ public static class Program
         if (!result.Success || result.Package is null)
             throw new InvalidOperationException("TypeScript compilation failed: " + string.Join(" | ", result.Diagnostics.Select(value => $"{value.Code}: {value.Message}")));
         return result.Package;
+    }
+
+    internal static async Task AssertCompiledPackageLoadsInJintAsync(CompiledScriptPackage package)
+    {
+        await using ScriptExecutionSupervisor localSupervisor = new();
+        await using ScriptEventHub events = new();
+        CapabilityScriptHost host = CreateJintTestHost(package.Manifest.Id, events, ScriptCapability.None);
+        await using JintScriptRuntime runtime = new(localSupervisor);
+
+        await runtime.LoadAsync(package, host).ConfigureAwait(false);
+        ScriptModuleSnapshot loaded = Assert.Single(runtime.Snapshot());
+        Assert.True(loaded.Loaded, "Jint should load the package with bundled dependencies.");
     }
 
     private static CapabilityScriptHost CreateJintTestHost(

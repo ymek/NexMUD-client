@@ -99,8 +99,12 @@ public sealed class NexMudRuntime : IAsyncDisposable
             commands: ScriptCommands,
             activeProfileId: () => ActiveConnectionProfile.Id,
             applicationCancellation: _cts.Token);
-        ScriptWorkspace = new ScriptWorkspaceService(Scripting, Events, () => ActiveConnectionProfile.Id);
         ScriptPackages = new ScriptPackageManager();
+        ScriptWorkspace = new ScriptWorkspaceService(
+            Scripting,
+            Events,
+            () => ActiveConnectionProfile.Id,
+            packageManager: ScriptPackages);
         Navigator = new AutoMoveService(
             _routeControlEvents,
             State,

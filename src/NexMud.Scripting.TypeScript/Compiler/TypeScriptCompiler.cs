@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Runtime;
@@ -70,6 +71,13 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         try
         {
             compilerIdentity = await ResolveCompilerIdentityAsync(cancellationToken).ConfigureAwait(false);
+            if (request.PackageContext is not null)
+            {
+                IToolchainLocator locator = _toolchainLocator
+                    ?? throw new ToolchainUnavailableException("Bundled esbuild toolchain locator is unavailable.");
+                ToolchainComponentLocation esbuild = locator.ResolveRequired(ToolchainComponentNames.Esbuild);
+                compilerIdentity = $"{compilerIdentity}+esbuild-{esbuild.Version}";
+            }
         }
         catch (Exception exception) when (IsToolchainUnavailable(exception))
         {
@@ -82,6 +90,9 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         {
             return new ScriptCompileResult(true, cached, Array.Empty<ScriptCompilerDiagnostic>(), cachedExports);
         }
+
+        if (request.PackageContext is not null)
+            return await CompilePackageAsync(request, compilerIdentity, cacheKey, cancellationToken).ConfigureAwait(false);
 
         string root = Path.Combine(Path.GetTempPath(), $"nexmud-ts-{Guid.NewGuid():N}");
         string sourceRoot = Path.Combine(root, "src");
@@ -191,6 +202,313 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         {
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    private async Task<ScriptCompileResult> CompilePackageAsync(
+        ScriptCompileRequest request,
+        string compilerIdentity,
+        string cacheKey,
+        CancellationToken cancellationToken)
+    {
+        ScriptCompilePackageContext context = request.PackageContext!;
+        if (!File.Exists(context.ProjectConfigPath))
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0007",
+                $"Package TypeScript configuration was not found: {context.ProjectConfigPath}"));
+        if (!request.Sources.Any(source => source.Path.Equals(request.Manifest.Entrypoint, StringComparison.Ordinal)))
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0007",
+                $"Package entrypoint '{request.Manifest.Entrypoint}' is not present in the source set."));
+
+        string root = Path.Combine(context.PackageRoot, ".nexmud", "build", Guid.NewGuid().ToString("N"));
+        string sourceRoot = Path.Combine(root, "src");
+        string declarationRoot = Path.Combine(root, "types");
+        string bundleRoot = Path.Combine(root, "bundle");
+        try
+        {
+            Directory.CreateDirectory(sourceRoot);
+            Directory.CreateDirectory(declarationRoot);
+            Directory.CreateDirectory(bundleRoot);
+            foreach (ScriptSourceFile source in request.Sources)
+            {
+                string path = Path.Combine(sourceRoot, source.Path.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, source.Content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            }
+
+            string typecheckConfig = Path.Combine(root, "tsconfig.typecheck.json");
+            await File.WriteAllTextAsync(
+                typecheckConfig,
+                BuildPackageConfig(context.ProjectConfigPath, request.EffectiveOptions, sourceRoot, declarationRoot, emitDeclarations: false),
+                Encoding.UTF8,
+                cancellationToken).ConfigureAwait(false);
+            ToolProcessResult typecheck = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", typecheckConfig], root, cancellationToken)
+                .ConfigureAwait(false);
+            IReadOnlyList<ScriptCompilerDiagnostic> diagnostics = ParseDiagnostics(typecheck.Output, root, sourceRoot);
+            if (typecheck.ExitCode != 0)
+            {
+                if (diagnostics.Count == 0)
+                    diagnostics = [new ScriptCompilerDiagnostic(
+                        ScriptDiagnosticSeverity.Error,
+                        "NEXTS0004",
+                        string.IsNullOrWhiteSpace(typecheck.Output) ? "TypeScript project typecheck failed." : typecheck.Output.Trim())];
+                return new ScriptCompileResult(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
+            }
+
+            string declarationConfig = Path.Combine(root, "tsconfig.declarations.json");
+            await File.WriteAllTextAsync(
+                declarationConfig,
+                BuildPackageConfig(context.ProjectConfigPath, request.EffectiveOptions, sourceRoot, declarationRoot, emitDeclarations: true),
+                Encoding.UTF8,
+                cancellationToken).ConfigureAwait(false);
+            ToolProcessResult declarationBuild = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", declarationConfig], root, cancellationToken)
+                .ConfigureAwait(false);
+            diagnostics = diagnostics.Concat(ParseDiagnostics(declarationBuild.Output, root, sourceRoot)).ToArray();
+            if (declarationBuild.ExitCode != 0)
+            {
+                if (!diagnostics.Any(diagnostic => diagnostic.Severity == ScriptDiagnosticSeverity.Error))
+                    diagnostics = diagnostics.Append(new ScriptCompilerDiagnostic(
+                        ScriptDiagnosticSeverity.Error,
+                        "NEXTS0004",
+                        string.IsNullOrWhiteSpace(declarationBuild.Output) ? "TypeScript declaration generation failed." : declarationBuild.Output.Trim())).ToArray();
+                return new ScriptCompileResult(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
+            }
+
+            string compiledEntrypoint = (Path.ChangeExtension(request.Manifest.Entrypoint, ".js")
+                ?? throw new InvalidOperationException("Unable to derive compiled entrypoint.")).Replace('\\', '/');
+            string bundlePath = Path.Combine(bundleRoot, compiledEntrypoint.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(bundlePath)!);
+            string metafilePath = Path.Combine(root, "esbuild-meta.json");
+            string entrypointPath = Path.Combine(sourceRoot, request.Manifest.Entrypoint.Replace('/', Path.DirectorySeparatorChar));
+            ToolProcessResult bundle = await RunEsbuildAsync(
+                [
+                    "--bundle",
+                    "--format=esm",
+                    "--platform=neutral",
+                    $"--target={request.EffectiveOptions.EcmaScriptTarget.ToLowerInvariant()}",
+                    "--external:@nexmud/api",
+                    "--external:node:*",
+                    "--sourcemap=external",
+                    $"--metafile={metafilePath}",
+                    $"--outfile={bundlePath}",
+                    entrypointPath
+                ],
+                root,
+                cancellationToken).ConfigureAwait(false);
+            if (bundle.ExitCode != 0)
+            {
+                string message = string.IsNullOrWhiteSpace(bundle.Output) ? "esbuild could not bundle the package entrypoint." : bundle.Output.Trim();
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0008",
+                    message));
+            }
+
+            ScriptCompilerDiagnostic? incompatibleImport = FindIncompatibleExternalImport(metafilePath);
+            if (incompatibleImport is not null)
+                return ScriptCompileResult.Failed(incompatibleImport);
+            if (!File.Exists(bundlePath))
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0008",
+                    "esbuild completed without producing the package entrypoint bundle."));
+
+            string? sourceMap = null;
+            string mapPath = bundlePath + ".map";
+            if (request.EffectiveOptions.EmitSourceMaps && File.Exists(mapPath))
+            {
+                string rawSourceMap = await File.ReadAllTextAsync(mapPath, cancellationToken).ConfigureAwait(false);
+                sourceMap = NormalizePackageSourceMap(rawSourceMap, mapPath, sourceRoot, context.PackageRoot);
+            }
+            IReadOnlyList<ExportedScriptFunction> exports = TypeScriptDeclarationExportReader.Discover(
+                request.Manifest.Id,
+                request.Sources,
+                declarationRoot,
+                request.Manifest.Entrypoint);
+            ScriptManifest compiledManifest = new(
+                request.Manifest.Id,
+                request.Manifest.Name,
+                request.Manifest.Version,
+                request.Manifest.ApiVersion,
+                compiledEntrypoint,
+                request.Manifest.Permissions,
+                request.Manifest.OwnerKind,
+                request.Manifest.RuntimeProfile);
+            CompiledScriptPackage package = new(
+                compiledManifest,
+                [new CompiledScriptModule(
+                    compiledEntrypoint,
+                    await File.ReadAllTextAsync(bundlePath, cancellationToken).ConfigureAwait(false),
+                    sourceMap,
+                    request.Manifest.Entrypoint)],
+                compilerIdentity,
+                cacheKey,
+                exports);
+            _cache.Put(package);
+            _exportCache[cacheKey] = exports;
+            return new ScriptCompileResult(true, package, diagnostics, exports);
+        }
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
+        {
+            return ToolchainUnavailableResult(exception);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0006",
+                $"Package build boundary failed: {exception.Message}"));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static string NormalizePackageSourceMap(
+        string sourceMap,
+        string mapPath,
+        string sourceRoot,
+        string packageRoot)
+    {
+        JsonObject map = JsonNode.Parse(sourceMap)?.AsObject()
+            ?? throw new JsonException("esbuild returned an invalid source map.");
+        if (map["sources"] is not JsonArray sources)
+            return sourceMap;
+
+        string mapDirectory = Path.GetDirectoryName(mapPath)!;
+        string mapSourceRoot = map["sourceRoot"]?.GetValue<string>() ?? string.Empty;
+        string sourceBase = string.IsNullOrWhiteSpace(mapSourceRoot)
+            ? mapDirectory
+            : Path.GetFullPath(Path.Combine(mapDirectory, mapSourceRoot));
+        for (int index = 0; index < sources.Count; index++)
+        {
+            string? source = sources[index]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(source)) continue;
+            string absoluteSource = Path.GetFullPath(Path.IsPathRooted(source)
+                ? source
+                : Path.Combine(sourceBase, source));
+            string? relativeSource = TryGetRelativePath(sourceRoot, absoluteSource)
+                ?? TryGetRelativePath(packageRoot, absoluteSource);
+            if (relativeSource is null)
+                throw new InvalidOperationException("esbuild source map references a file outside the package build roots.");
+            sources[index] = relativeSource.Replace('\\', '/');
+        }
+
+        map["sourceRoot"] = string.Empty;
+        return map.ToJsonString();
+    }
+
+    private static string? TryGetRelativePath(string root, string path)
+    {
+        string relative = Path.GetRelativePath(ResolvePhysicalPath(root), ResolvePhysicalPath(path));
+        return relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            ? null
+            : relative;
+    }
+
+    private static string ResolvePhysicalPath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string current = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidOperationException("A source-map path must be absolute.");
+        foreach (string segment in fullPath[current.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            FileSystemInfo entry = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : new FileInfo(current);
+            current = entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? current;
+        }
+        return Path.GetFullPath(current);
+    }
+
+    private static string BuildPackageConfig(
+        string projectConfigPath,
+        ScriptCompilerOptions options,
+        string sourceRoot,
+        string outputRoot,
+        bool emitDeclarations)
+    {
+        var config = new
+        {
+            extends = projectConfigPath,
+            compilerOptions = new Dictionary<string, object?>
+            {
+                ["target"] = options.EcmaScriptTarget,
+                ["module"] = "ESNext",
+                ["moduleResolution"] = "Bundler",
+                ["strict"] = options.Strict,
+                ["allowJs"] = true,
+                ["checkJs"] = true,
+                ["sourceMap"] = false,
+                ["declaration"] = emitDeclarations,
+                ["emitDeclarationOnly"] = emitDeclarations,
+                ["declarationMap"] = false,
+                ["noEmit"] = !emitDeclarations,
+                ["noEmitOnError"] = true,
+                ["skipLibCheck"] = true,
+                ["rootDir"] = sourceRoot,
+                ["outDir"] = outputRoot,
+                ["lib"] = new[] { "ES2022" },
+                ["types"] = Array.Empty<string>(),
+                ["resolveJsonModule"] = true
+            },
+            include = new[] { "src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.d.ts" },
+            exclude = new[] { "node_modules", "dist", ".nexmud", "**/*.test.*", "**/*.spec.*" }
+        };
+        return JsonSerializer.Serialize(config);
+    }
+
+    private async Task<ToolProcessResult> RunEsbuildAsync(
+        IReadOnlyList<string> arguments,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        IToolchainLocator locator = _toolchainLocator
+            ?? throw new ToolchainUnavailableException("Bundled esbuild toolchain locator is unavailable.");
+        ToolchainComponentLocation node = locator.ResolveRequired(ToolchainComponentNames.Node);
+        ToolchainComponentLocation esbuild = locator.ResolveRequired(ToolchainComponentNames.Esbuild);
+        return await _processRunner.RunAsync(
+            new ToolProcessRequest(
+                node.FullPath,
+                [esbuild.FullPath, .. arguments],
+                workingDirectory,
+                [Path.GetDirectoryName(node.FullPath)!]),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static ScriptCompilerDiagnostic? FindIncompatibleExternalImport(string metafilePath)
+    {
+        using JsonDocument metafile = JsonDocument.Parse(File.ReadAllText(metafilePath));
+        if (!metafile.RootElement.TryGetProperty("outputs", out JsonElement outputs)) return null;
+        foreach (JsonProperty output in outputs.EnumerateObject())
+        {
+            if (!output.Value.TryGetProperty("imports", out JsonElement imports)) continue;
+            foreach (JsonElement import in imports.EnumerateArray())
+            {
+                if (!import.TryGetProperty("external", out JsonElement external) || !external.GetBoolean()) continue;
+                string path = import.TryGetProperty("path", out JsonElement pathElement)
+                    ? pathElement.GetString() ?? string.Empty
+                    : string.Empty;
+                if (path.Equals("@nexmud/api", StringComparison.Ordinal)) continue;
+                string message = path.StartsWith("node:", StringComparison.Ordinal)
+                    ? $"Node built-in '{path}' is not supported by the NexMUD runtime."
+                    : $"External import '{path}' is not supported by the NexMUD runtime.";
+                return new ScriptCompilerDiagnostic(ScriptDiagnosticSeverity.Error, "NEXTS0009", message);
+            }
+        }
+        return null;
     }
 
     private static string BuildConfig(ScriptCompilerOptions options, string sourceRoot, string outputRoot)

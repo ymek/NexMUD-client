@@ -98,6 +98,8 @@ public sealed partial class ScriptPackageDocument
 
         Dependencies = ReadDependencyMap(root, "dependencies");
         DevDependencies = ReadDependencyMap(root, "devDependencies");
+        OptionalDependencies = ReadDependencyMap(root, "optionalDependencies");
+        PeerDependencies = ReadDependencyMap(root, "peerDependencies");
     }
 
     public string Name { get; }
@@ -105,6 +107,8 @@ public sealed partial class ScriptPackageDocument
     public ScriptPackageNexMudMetadata NexMud { get; }
     public IReadOnlyDictionary<string, string> Dependencies { get; }
     public IReadOnlyDictionary<string, string> DevDependencies { get; }
+    public IReadOnlyDictionary<string, string> OptionalDependencies { get; }
+    public IReadOnlyDictionary<string, string> PeerDependencies { get; }
     public JsonObject Root => (JsonObject)_root.DeepClone();
 
     public static ScriptPackageDocument Parse(string json)
@@ -356,6 +360,8 @@ public static partial class ScriptPackageDependencyValidator
         List<ScriptDependencySourceIssue> issues = [];
         Validate(package.Dependencies, issues);
         Validate(package.DevDependencies, issues);
+        Validate(package.OptionalDependencies, issues);
+        Validate(package.PeerDependencies, issues);
         return issues;
     }
 
