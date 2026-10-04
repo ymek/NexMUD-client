@@ -22,11 +22,32 @@ internal static class ScriptSourceSearchMatcher
             bool endsAtWordBoundary = afterMatch == line.Length || !IsWordCharacter(line[afterMatch]);
             if (!options.WholeWord || (startsAtWordBoundary && endsAtWordBoundary)) return match;
 
-            searchFrom = match + query.Length;
+            searchFrom = match + 1;
         }
 
         return -1;
     }
 
-    private static bool IsWordCharacter(char value) => char.IsLetterOrDigit(value) || value == '_';
+    public static bool MatchesFilters(string searchableText, ScriptSourceSearchOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(searchableText);
+        ArgumentNullException.ThrowIfNull(options);
+        foreach (string term in options.IncludedTerms ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(term)) continue;
+            if (FindFirst(searchableText, term, options) < 0) return false;
+        }
+        foreach (string term in options.ExcludedTerms ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(term)) continue;
+            if (FindFirst(searchableText, term, options) >= 0) return false;
+        }
+        return true;
+    }
+
+    private static bool IsWordCharacter(char value) =>
+        char.IsLetterOrDigit(value) || value == '_' ||
+        char.GetUnicodeCategory(value) is System.Globalization.UnicodeCategory.NonSpacingMark or
+            System.Globalization.UnicodeCategory.SpacingCombiningMark or
+            System.Globalization.UnicodeCategory.EnclosingMark;
 }

@@ -186,6 +186,19 @@ internal sealed class StudioDocumentSet
     public IEnumerable<StudioDocument> Dirty => _documents.Where(d => d.IsDirty);
 }
 
+internal sealed record StudioSavedSearch(
+    string Name,
+    string Query,
+    bool Automations = true,
+    bool Workflows = true,
+    bool Scripts = true,
+    bool Descriptions = true,
+    bool ScriptContent = true,
+    bool MatchCase = false,
+    bool WholeWords = false,
+    string IncludeTerms = "",
+    string ExcludeTerms = "");
+
 /// <summary>Studio layout preferences. Widths/heights are clamped to the ranges defined by the workbench spec.</summary>
 internal sealed class StudioUiPreferences
 {
@@ -200,6 +213,17 @@ internal sealed class StudioUiPreferences
     public double BottomHeight { get => _bottomHeight; set => _bottomHeight = Math.Clamp(value, MinBottomHeight, MaxBottomHeight); }
     public bool BottomCollapsed { get; set; } = true;
     public string ActiveActivity { get; set; } = nameof(StudioActivity.Automations);
+    public List<string> RecentSearches { get; set; } = [];
+    public List<StudioSavedSearch> SavedSearches { get; set; } = [];
+    public bool SearchAutomations { get; set; } = true;
+    public bool SearchWorkflows { get; set; } = true;
+    public bool SearchScripts { get; set; } = true;
+    public bool SearchDescriptions { get; set; } = true;
+    public bool SearchScriptContent { get; set; } = true;
+    public bool SearchMatchCase { get; set; }
+    public bool SearchWholeWords { get; set; }
+    public string SearchIncludeTerms { get; set; } = string.Empty;
+    public string SearchExcludeTerms { get; set; } = string.Empty;
 
     public StudioActivity ResolveActivity() =>
         Enum.TryParse(ActiveActivity, ignoreCase: true, out StudioActivity activity)

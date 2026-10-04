@@ -77,7 +77,9 @@ public sealed record ScriptSourceSearchResult(
 
 public sealed record ScriptSourceSearchOptions(
     bool MatchCase = false,
-    bool WholeWord = false);
+    bool WholeWord = false,
+    IReadOnlyList<string>? IncludedTerms = null,
+    IReadOnlyList<string>? ExcludedTerms = null);
 
 public sealed record ScriptPackageBuildChanged(
     string ProfileId,
@@ -773,6 +775,8 @@ public sealed partial class ScriptWorkspaceService
                     int column = ScriptSourceSearchMatcher.FindFirst(line, query, options);
                     if (column < 0) continue;
                     string relative = Path.GetRelativePath(package.PackageRoot, path).Replace('\\', '/');
+                    string searchable = $"{package.Document.NexMud.Id} {relative} {line}";
+                    if (!ScriptSourceSearchMatcher.MatchesFilters(searchable, options)) continue;
                     results.Add(new ScriptSourceSearchResult(
                         package.Document.NexMud.Id,
                         relative,

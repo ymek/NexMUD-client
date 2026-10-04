@@ -16,4 +16,17 @@ internal static class Phase5SourceSearchTests
 
         return Task.CompletedTask;
     }
+
+    public static Task HandlesOverlappingUnicodeAndFilterTerms()
+    {
+        Assert.Equal(3, ScriptSourceSearchMatcher.FindFirst("xa-a-a", "a-a", new ScriptSourceSearchOptions(WholeWord: true)));
+        Assert.Equal(0, ScriptSourceSearchMatcher.FindFirst("élan", "élan", new ScriptSourceSearchOptions(WholeWord: true)));
+        Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst("élan2", "élan", new ScriptSourceSearchOptions(WholeWord: true)));
+
+        ScriptSourceSearchOptions options = new(IncludedTerms: ["combat", "retreat"], ExcludedTerms: ["unsafe"]);
+        Assert.True(ScriptSourceSearchMatcher.MatchesFilters("combat retreat routine", options));
+        Assert.False(ScriptSourceSearchMatcher.MatchesFilters("combat routine", options));
+        Assert.False(ScriptSourceSearchMatcher.MatchesFilters("combat retreat unsafe routine", options));
+        return Task.CompletedTask;
+    }
 }

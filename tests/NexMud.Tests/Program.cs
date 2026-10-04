@@ -109,6 +109,11 @@ public static class Program
         await RunAsync("Phase 8 macOS sandbox denies network and outside filesystem", Phase8ScriptTestServiceTests.MacOsSandboxDeniesNetworkAndOutsideFilesystem);
         await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
         await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
+        await RunAsync("Phase 5 source search handles overlap, Unicode, and filters", Phase5SourceSearchTests.HandlesOverlappingUnicodeAndFilterTerms);
+        await RunAsync("Studio search matcher honors case and whole-word filters", StudioSearchMatcherTests.MatchesCaseAndWholeWordOptions);
+        await RunAsync("Studio search matcher applies include and exclude terms", StudioSearchMatcherTests.AppliesIncludeAndExcludeTerms);
+        await RunAsync("Studio search matcher ranks title matches", StudioSearchMatcherTests.RanksExactAndTitleMatchesFirst);
+        await RunAsync("Studio saved search preserves scope and filters", StudioSearchMatcherTests.SavedSearchRoundTripsScopesAndFilters);
         await RunAsync("scripting vertical slice routes semantic vitals event through central command dispatch", ScriptingVerticalSliceRoutesVitalsToCommand);
         await RunAsync("scripting vertical slice isolates permission denial", ScriptingVerticalSliceDeniesMissingCommandPermission);
         await RunAsync("scripting unload discards late async host completion", ScriptingUnloadDiscardsLateHostCompletion);

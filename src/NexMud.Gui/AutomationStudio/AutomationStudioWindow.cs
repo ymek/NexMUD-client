@@ -151,7 +151,9 @@ internal sealed partial class AutomationStudioWindow : Window
         WireMonaco();
         _filter.PlaceholderText = _activity == StudioActivity.Automations ? "Search automations…" : "Filter";
         _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
+        InitializeSearchUi();
         Content = BuildLayout();
+        if (_activity == StudioActivity.Search) RenderSearchActivity();
 
         _profile.Background = StudioShellChrome.Input;
         _profile.Foreground = StudioShellChrome.Foreground;
@@ -194,13 +196,13 @@ internal sealed partial class AutomationStudioWindow : Window
         _body.Children.Add(BuildActivityRail());
 
         Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*"), Background = StudioShellChrome.Explorer };
+        _explorerTreeScroll.Content = _navigator;
         explorer.Children.Add(BuildExplorerHeader());
         _filter.Margin = new Thickness(8, 0, 8, 6);
         Grid.SetRow(_filter, 1);
         explorer.Children.Add(_filter);
-        ScrollViewer tree = new() { Content = _navigator };
-        Grid.SetRow(tree, 2);
-        explorer.Children.Add(tree);
+        Grid.SetRow(_explorerTreeScroll, 2);
+        explorer.Children.Add(_explorerTreeScroll);
         _explorerFrame = Frame("EXPLORER", explorer, withHeader: false);
         _explorerFrame.Background = StudioShellChrome.Explorer;
         _explorerFrame.BorderBrush = StudioShellChrome.Border;
@@ -209,7 +211,10 @@ internal sealed partial class AutomationStudioWindow : Window
 
         _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
         Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"), Background = StudioShellChrome.Canvas };
-        StackPanel tabStrip = new() { Orientation = Orientation.Horizontal, Spacing = 0, Children = { _tabs } };
+        StackPanel tabStrip = new() { Orientation = Orientation.Horizontal, Spacing = 0 };
+        tabStrip.Children.Add(_searchTab);
+        tabStrip.Children.Add(_searchTabClose);
+        tabStrip.Children.Add(_tabs);
         Button openDocument = new() { Content = "+", Width = 38, Background = Brushes.Transparent, Foreground = StudioShellChrome.Foreground, BorderThickness = new Thickness(0) };
         Avalonia.Automation.AutomationProperties.SetName(openDocument, "Open a script document");
         openDocument.Click += async (_, _) => await QuickOpenAsync().ConfigureAwait(true);
@@ -294,6 +299,8 @@ internal sealed partial class AutomationStudioWindow : Window
         RenderActivityRail();
         UpdateActivityChrome();
         await RefreshNavigatorAsync().ConfigureAwait(true);
+        if (activity == StudioActivity.Search) RenderSearchActivity();
+        else RenderActive();
     }
 
     private void UpdateActivityChrome()
@@ -307,10 +314,18 @@ internal sealed partial class AutomationStudioWindow : Window
             StudioActivity.Workflows => "Search workflows…",
             _ => "Filter"
         };
-        _newButton.Content = _activity == StudioActivity.Scripts ? "+" : "+ New";
+        _newButton.Content = _activity switch
+        {
+            StudioActivity.Scripts => "+",
+            StudioActivity.Search => "+ New Search",
+            _ => "+ New"
+        };
         _refreshScriptsButton.IsVisible = _activity == StudioActivity.Scripts;
         _scriptActions.IsVisible = _activity == StudioActivity.Scripts;
-        _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+        _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows or StudioActivity.Search;
+        if (_activity == StudioActivity.Search) RefreshSearchSidebar();
+        else _explorerTreeScroll.Content = _navigator;
+        UpdateSearchTab();
         UpdateOrganizeButton();
     }
 
@@ -344,6 +359,11 @@ internal sealed partial class AutomationStudioWindow : Window
             if (_activity == StudioActivity.Scripts)
             {
                 ShowNewScriptMenu();
+                return;
+            }
+            if (_activity == StudioActivity.Search)
+            {
+                BeginNewSearch();
                 return;
             }
 
@@ -500,6 +520,8 @@ internal sealed partial class AutomationStudioWindow : Window
     private async Task RouteGlobalSearchAsync(string query)
     {
         await SetActivityAsync(StudioActivity.Search).ConfigureAwait(true);
+        _searchInput.Text = query;
+        await RunSearchAsync().ConfigureAwait(true);
         if (GlobalSearchRequested is { } searchRequested)
             await searchRequested(query).ConfigureAwait(true);
     }
@@ -727,6 +749,7 @@ internal sealed partial class AutomationStudioWindow : Window
                 RefreshProblems();
                 CancelTests("Profile changed.");
                 ResetTestsPanel("Select a package to discover tests.");
+                InvalidateSearchForProfileChange();
                 _session.SwitchProfile(targetProfileId);
                 _diagnostics.ResolveSourcesByPrefix(targetProfileId, "tests:");
                 Interlocked.Increment(ref _navigatorRefreshGeneration);
@@ -764,6 +787,8 @@ internal sealed partial class AutomationStudioWindow : Window
                     await RestoreSessionDocumentsAsync(_session.Current, targetSnapshot.Documents, targetSnapshot.ActiveDocumentKey).ConfigureAwait(true);
                     if (_profileTransitions.IsCurrent(generation)) _profileDocumentSessions.Remove(targetProfileId);
                 }
+                if (_activity == StudioActivity.Search && !string.IsNullOrWhiteSpace(_searchInput.Text))
+                    await RunSearchAsync().ConfigureAwait(true);
             }
             finally
             {
@@ -2854,6 +2879,13 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private void RenderActive()
     {
+        if (_activity == StudioActivity.Search)
+        {
+            RenderSearchActivity();
+            return;
+        }
+
+        _breadcrumbBar.IsVisible = true;
         StudioDocument? active = _documents.Active;
         RenderExternalConflict();
         _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
@@ -3098,6 +3130,8 @@ internal sealed partial class AutomationStudioWindow : Window
             _workspaceWatcher = null;
         }
         CancelTests("Studio closed.");
+        _searchCancellation?.Cancel();
+        _searchCancellation = null;
         _cts.Cancel();
         if (_body.ColumnDefinitions.Count >= 4)
             _preferences.ExplorerWidth = _body.ColumnDefinitions[1].ActualWidth;
