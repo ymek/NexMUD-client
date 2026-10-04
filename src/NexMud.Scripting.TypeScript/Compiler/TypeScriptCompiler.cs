@@ -460,8 +460,6 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 ["skipLibCheck"] = true,
                 ["rootDir"] = sourceRoot,
                 ["outDir"] = outputRoot,
-                ["lib"] = new[] { "ES2022" },
-                ["types"] = Array.Empty<string>(),
                 ["resolveJsonModule"] = true
             },
             include = new[] { "src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.d.ts" },

@@ -45,6 +45,43 @@ internal static class Phase7PackageCompilerTests
         await Program.AssertCompiledPackageLoadsInJintAsync(package).ConfigureAwait(false);
     }
 
+    public static async Task DiscoversEntrypointExportsFromLocalImports()
+    {
+        using TemporaryDirectory temporary = new();
+        PackageFixture fixture = await PackageFixture.CreateAsync(temporary.Path).ConfigureAwait(false);
+        ScriptCompileResult result = await new TypeScriptCompiler().CompileAsync(
+            fixture.Request("import { activate } from './internal.js';\nexport { activate };")).ConfigureAwait(false);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        ExportedScriptFunction activate = result.Package!.ExportedFunctions.Single();
+        Assert.Equal("activate", activate.ExportName);
+        Assert.Equal("src/index.ts", activate.FunctionRef.ModulePath);
+        Assert.Equal("src/internal.ts", activate.SourceLocation.SourceFile);
+    }
+
+    public static async Task PreservesProjectConfiguredTypeLibraries()
+    {
+        using TemporaryDirectory temporary = new();
+        PackageFixture fixture = await PackageFixture.CreateAsync(temporary.Path).ConfigureAwait(false);
+        string globalTypes = Path.Combine(fixture.PackageRoot, "node_modules", "@types", "fixture-globals");
+        Directory.CreateDirectory(globalTypes);
+        await File.WriteAllTextAsync(Path.Combine(globalTypes, "index.d.ts"), "declare const fixtureGlobal: string;").ConfigureAwait(false);
+        await File.WriteAllTextAsync(Path.Combine(fixture.PackageRoot, "tsconfig.json"), """
+            {
+              "extends": "../.nexmud/tsconfig.base.json",
+              "compilerOptions": { "lib": ["ES2022", "DOM"], "types": ["fixture-globals"] },
+              "include": ["**/*.ts", "**/*.js"],
+              "exclude": ["node_modules", "dist", ".nexmud"]
+            }
+            """).ConfigureAwait(false);
+
+        ScriptCompileResult result = await new TypeScriptCompiler().CompileAsync(
+            fixture.Request("export function activate(): string { return `${document.title}:${fixtureGlobal}`; }"))
+            .ConfigureAwait(false);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+    }
+
     public static async Task RejectsNodeBuiltins()
     {
         using TemporaryDirectory temporary = new();

@@ -121,29 +121,53 @@ internal static class TypeScriptDeclarationExportReader
             string declarationPath = Path.Combine(outputRoot, declarationRelative.Replace('/', Path.DirectorySeparatorChar));
             if (File.Exists(declarationPath))
             {
-                foreach (string line in File.ReadLines(declarationPath))
+                string[] declarations = File.ReadAllLines(declarationPath);
+                Dictionary<string, (string Specifier, string Imported)> imports = new(StringComparer.Ordinal);
+                foreach (string declaration in declarations)
                 {
-                    if (!TryParseReExport(line, out string specifier, out bool star, out var names)) continue;
-                    string? targetPath = ResolveRelativeModulePath(modulePath, specifier, sourceByPath);
-                    if (targetPath is null) continue;
-                    Dictionary<string, ExportedScriptFunction> targetExports = ReadModule(targetPath);
-                    if (star)
+                    if (!TryParseNamedImport(declaration, out string specifier, out var bindings)) continue;
+                    foreach ((string imported, string local) in bindings)
+                        imports.TryAdd(local, (specifier, imported));
+                }
+
+                foreach (string declaration in declarations)
+                {
+                    if (TryParseReExport(declaration, out string specifier, out bool star, out var names))
                     {
-                        foreach ((string name, ExportedScriptFunction item) in targetExports)
-                            exports.TryAdd(name, item);
+                        string? targetPath = ResolveRelativeModulePath(modulePath, specifier, sourceByPath);
+                        if (targetPath is null) continue;
+                        Dictionary<string, ExportedScriptFunction> targetExports = ReadModule(targetPath);
+                        if (star)
+                        {
+                            foreach ((string name, ExportedScriptFunction item) in targetExports)
+                                exports.TryAdd(name, item);
+                            continue;
+                        }
+
+                        foreach ((string importedName, string exportedName) in names)
+                        {
+                            if (!targetExports.TryGetValue(importedName, out ExportedScriptFunction? item)) continue;
+                            exports.TryAdd(exportedName, RenameExport(packageId, modulePath, exportedName, item));
+                        }
                         continue;
                     }
 
-                    foreach ((string importedName, string exportedName) in names)
+                    if (!TryParseLocalExport(declaration, out var localExports)) continue;
+                    foreach ((string localName, string exportedName) in localExports)
                     {
-                        if (!targetExports.TryGetValue(importedName, out ExportedScriptFunction? item)) continue;
-                        exports.TryAdd(exportedName, item with
+                        ExportedScriptFunction? item = null;
+                        if (imports.TryGetValue(localName, out var import))
                         {
-                            FunctionRef = new ScriptFunctionRef(packageId.Value, modulePath, exportedName),
-                            DisplayName = exportedName,
-                            ModulePath = modulePath,
-                            ExportName = exportedName
-                        });
+                            string? targetPath = ResolveRelativeModulePath(modulePath, import.Specifier, sourceByPath);
+                            if (targetPath is null || !ReadModule(targetPath).TryGetValue(import.Imported, out item))
+                                continue;
+                        }
+                        else if (!exports.TryGetValue(localName, out item))
+                        {
+                            continue;
+                        }
+
+                        exports.TryAdd(exportedName, RenameExport(packageId, modulePath, exportedName, item));
                     }
                 }
             }
@@ -161,6 +185,85 @@ internal static class TypeScriptDeclarationExportReader
             })
             .OrderBy(item => item.ExportName, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static ExportedScriptFunction RenameExport(
+        ScriptModuleId packageId,
+        string modulePath,
+        string exportedName,
+        ExportedScriptFunction item) =>
+        item with
+        {
+            FunctionRef = new ScriptFunctionRef(packageId.Value, modulePath, exportedName),
+            DisplayName = exportedName,
+            ModulePath = modulePath,
+            ExportName = exportedName
+        };
+
+    private static bool TryParseNamedImport(
+        string declaration,
+        out string specifier,
+        out IReadOnlyList<(string Imported, string Local)> bindings)
+    {
+        specifier = string.Empty;
+        bindings = Array.Empty<(string, string)>();
+        string text = declaration.Trim().TrimEnd(';').TrimEnd();
+        if (!text.StartsWith("import ", StringComparison.Ordinal)) return false;
+        int fromIndex = text.LastIndexOf(" from ", StringComparison.Ordinal);
+        if (fromIndex < 0) return false;
+
+        string moduleSpecifier = text[(fromIndex + 6)..].Trim();
+        if (moduleSpecifier.Length < 2 ||
+            (moduleSpecifier[0] != '\'' && moduleSpecifier[0] != '"') ||
+            moduleSpecifier[^1] != moduleSpecifier[0])
+        {
+            return false;
+        }
+
+        string clause = text["import ".Length..fromIndex].Trim();
+        if (clause.StartsWith("type ", StringComparison.Ordinal))
+            clause = clause["type ".Length..].Trim();
+        int open = clause.IndexOf('{');
+        int close = clause.IndexOf('}', open + 1);
+        if (open < 0 || close < 0) return false;
+
+        List<(string Imported, string Local)> parsed = [];
+        foreach (string binding in clause[(open + 1)..close].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (binding.StartsWith("type ", StringComparison.Ordinal)) continue;
+            string[] parts = binding.Split(" as ", 2, StringSplitOptions.TrimEntries);
+            string imported = parts[0];
+            string local = parts.Length == 1 ? imported : parts[1];
+            if (imported.Length > 0 && local.Length > 0)
+                parsed.Add((imported, local));
+        }
+
+        if (parsed.Count == 0) return false;
+        specifier = moduleSpecifier[1..^1];
+        bindings = parsed;
+        return true;
+    }
+
+    private static bool TryParseLocalExport(
+        string declaration,
+        out IReadOnlyList<(string Local, string Exported)> names)
+    {
+        names = Array.Empty<(string, string)>();
+        string clause = declaration.Trim().TrimEnd(';').TrimEnd();
+        if (!clause.StartsWith("export {", StringComparison.Ordinal) ||
+            !clause.EndsWith('}') || clause.Contains(" from ", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        List<(string Local, string Exported)> parsed = [];
+        foreach (string name in clause["export {".Length..^1].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            string[] parts = name.Split(" as ", 2, StringSplitOptions.TrimEntries);
+            parsed.Add((parts[0], parts.Length == 1 ? parts[0] : parts[1]));
+        }
+        names = parsed;
+        return parsed.Count > 0;
     }
 
     private static bool TryParseReExport(
