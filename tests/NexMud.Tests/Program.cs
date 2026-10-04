@@ -90,6 +90,18 @@ public static class Program
         await RunAsync("package compiler rejects Node built-in imports", Phase7PackageCompilerTests.RejectsNodeBuiltins);
         await RunAsync("package dependency source policy covers optional and peer dependencies", Phase7PackageCompilerTests.DependencySourcesAreValidatedAcrossManifestSections);
         await RunAsync("package compile cache includes dependency graph", Phase7PackageCompilerTests.CacheKeyIncludesDependencyGraph);
+        await RunAsync("Phase 8 discovers package tests", Phase8ScriptTestServiceTests.DiscoversSupportedPackageTests);
+        await RunAsync("Phase 8 ignores linked test directories", Phase8ScriptTestServiceTests.IgnoresLinkedTestDirectories);
+        await RunAsync("Phase 8 runs controlled Vitest and maps locations", Phase8ScriptTestServiceTests.RunsBundledVitestAndMapsAssertionLocations);
+        await RunAsync("Phase 8 runs real Vitest with an offline API shim", Phase8ScriptTestServiceTests.RunsRealBundledVitestAgainstOfflineApiShim);
+        await RunAsync("Phase 8 escapes selected test names", Phase8ScriptTestServiceTests.AppliesSelectedTestNamesAsEscapedVitestArguments);
+        await RunAsync("Phase 8 rejects oversized Vitest reports", Phase8ScriptTestServiceTests.RejectsOversizedVitestReport);
+        await RunAsync("Phase 8 reports malformed Vitest reports", Phase8ScriptTestServiceTests.ReportsMalformedVitestReport);
+        await RunAsync("Phase 8 propagates cancellation", Phase8ScriptTestServiceTests.PropagatesTestCancellation);
+        await RunAsync("Phase 8 sandbox profile escapes paths and limits roots", Phase8ScriptTestServiceTests.SandboxProfileQuotesPathsAndAllowsOnlyRequestedRoots);
+        await RunAsync("Phase 8 fails closed when OS sandbox is unavailable", Phase8ScriptTestServiceTests.SandboxProviderFailsClosedWhenUnavailable);
+        await RunAsync("Phase 8 macOS sandbox denies network and outside filesystem", Phase8ScriptTestServiceTests.MacOsSandboxDeniesNetworkAndOutsideFilesystem);
+        await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
         await RunAsync("scripting vertical slice routes semantic vitals event through central command dispatch", ScriptingVerticalSliceRoutesVitalsToCommand);
         await RunAsync("scripting vertical slice isolates permission denial", ScriptingVerticalSliceDeniesMissingCommandPermission);
         await RunAsync("scripting unload discards late async host completion", ScriptingUnloadDiscardsLateHostCompletion);
@@ -646,6 +658,16 @@ public static class Program
             {
                 Environment.SetEnvironmentVariable(parentOnly, null);
             }
+        });
+
+        await RunAsync("tool process runner caps retained output while draining streams", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            ToolProcessResult result = await new ToolProcessRunner().RunAsync(new ToolProcessRequest(
+                executable, [.. prefix, "--tool-process-output"], AppContext.BaseDirectory,
+                OutputCharacterLimit: 128));
+            Assert.Equal(128, result.Output.Length);
+            Assert.True(result.OutputTruncated);
         });
 
         await RunAsync("tool process runner cancellation terminates child process", async () =>
@@ -8454,6 +8476,13 @@ public static class Program
         if (args[0] == "--tool-process-wait")
             return WaitForToolProcessCancellationProbeAsync();
 
+        if (args[0] == "--tool-process-output")
+        {
+            Console.Out.Write(new string('o', 10_000));
+            Console.Error.Write(new string('e', 10_000));
+            return Task.FromResult(0);
+        }
+
         return Task.FromResult(2);
     }
 
@@ -8496,7 +8525,7 @@ public static class Program
             JsonSerializer.Serialize(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
     }
 
-    private static class Assert
+    internal static class Assert
     {
         public static void Equal<T>(T expected, T actual, string? message = null)
         {

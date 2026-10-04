@@ -105,6 +105,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
             Events,
             () => ActiveConnectionProfile.Id,
             packageManager: ScriptPackages);
+        ScriptTests = new ScriptTestService();
         Navigator = new AutoMoveService(
             _routeControlEvents,
             State,
@@ -167,6 +168,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
     public IScriptMapper ScriptMapper { get; }
     public ClientScriptPlatform Scripting { get; }
     public ScriptWorkspaceService ScriptWorkspace { get; }
+    public ScriptTestService ScriptTests { get; }
     public IScriptPackageManager ScriptPackages { get; }
     public AvendarGameAdapter Avendar { get; }
     public JevDecisionCoordinator JevCoordinator { get; }

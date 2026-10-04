@@ -858,6 +858,8 @@ public sealed partial class ScriptWorkspaceService
 
     private static string GetScriptsRoot(string profileId) => Path.Combine(GetProfileRoot(profileId), "scripts");
 
+    internal static string ResolvePackageRoot(string profileId, string packageId) => GetPackageRoot(profileId, packageId);
+
     private static string GetPackageRoot(string profileId, string packageId)
     {
         string normalizedPackageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));

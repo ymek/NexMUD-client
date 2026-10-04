@@ -18,7 +18,7 @@ namespace NexMud.Gui.AutomationStudio;
 /// Automation Studio workbench: Explorer | tabbed document area | contextual Inspector, with a
 /// collapsible bottom panel. Every Automation definition and script source opens as a document tab.
 /// </summary>
-internal sealed class AutomationStudioWindow : Window
+internal sealed partial class AutomationStudioWindow : Window
 {
     private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFolder, SourceFile }
     private sealed record StudioNode(
@@ -202,7 +202,7 @@ internal sealed class AutomationStudioWindow : Window
             ItemsSource = new object[]
             {
                 BottomTab("Problems", _problems), BottomTab("Console", _console), BottomTab("Runtime", _runtimePanel),
-                BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
+                BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel), BuildTestsTab()
             }
         };
         _bottom.SelectionChanged += (_, _) =>
@@ -590,6 +590,8 @@ internal sealed class AutomationStudioWindow : Window
         _languageDiagnostics.Clear();
         _pendingLanguageDiagnostics.Clear();
         RefreshLanguageProblems();
+        CancelTests("Profile changed.");
+        ResetTestsPanel("Select a package to discover tests.");
         _session.SwitchProfile(selectedProfile.Id);
         await _typescript.SwitchProfileAsync(selectedProfile.Id, _cts.Token).ConfigureAwait(true);
         _activePackage = null;
@@ -1678,6 +1680,11 @@ internal sealed class AutomationStudioWindow : Window
 
     private async Task SelectPackageAsync(string packageId)
     {
+        if (_activePackage?.Definition.PackageId != packageId)
+        {
+            CancelTests("Package changed.");
+            ResetTestsPanel("Package changed. Discover tests.");
+        }
         _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true)
             ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
     }
@@ -1896,7 +1903,7 @@ internal sealed class AutomationStudioWindow : Window
         if (_languageProblemRows.Count > 0 && _bottomCollapsed) ToggleBottom();
     }
 
-    private async Task SaveScriptAsync(string uri)
+    private async Task SaveScriptAsync(string uri, bool build = true)
     {
         if (_documents.Find(uri) is not { IsScript: true } document) return;
         StudioTextModelState? state = _textModels.Find(uri);
@@ -1922,7 +1929,7 @@ internal sealed class AutomationStudioWindow : Window
         }
 
         string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
-        await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build: true, _cts.Token).ConfigureAwait(true);
+        await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build, _cts.Token).ConfigureAwait(true);
         try
         {
             await _typescript.SaveDocumentAsync(document.ProfileId!, uri, content, _cts.Token).ConfigureAwait(true);
@@ -2602,6 +2609,7 @@ internal sealed class AutomationStudioWindow : Window
             _workspaceWatcher.Dispose();
             _workspaceWatcher = null;
         }
+        CancelTests("Studio closed.");
         _cts.Cancel();
         if (_body.ColumnDefinitions.Count >= 4)
             _preferences.ExplorerWidth = _body.ColumnDefinitions[1].ActualWidth;
