@@ -1,31 +1,46 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Runtime;
+using NexMud.Scripting.Tooling;
 using NexMud.Scripting.TypeScript.Cache;
 using NexMud.Scripting.TypeScript.Declarations;
 
 namespace NexMud.Scripting.TypeScript.Compiler;
 
 /// <summary>
-/// Concrete TypeScript compiler boundary. The client does not embed Node or a JavaScript runtime;
-/// authoring builds invoke an installed TypeScript compiler and return engine-neutral JavaScript.
+/// Concrete TypeScript compiler boundary. Production authoring resolves only the NexMUD-owned
+/// Node/TypeScript toolchain; an explicit executable remains available for tests and development.
 /// </summary>
 public sealed partial class TypeScriptCompiler : IScriptCompiler
 {
-    private readonly string _executable;
+    private readonly string? _explicitExecutable;
+    private readonly IToolchainLocator? _toolchainLocator;
+    private readonly IToolProcessRunner _processRunner;
     private readonly IScriptCompileCache _cache;
     private readonly ConcurrentDictionary<string, IReadOnlyList<ExportedScriptFunction>> _exportCache = new(StringComparer.Ordinal);
-    private string _compilerIdentity = "typescript-external";
+    private string _compilerIdentity = "typescript-unresolved";
     private readonly SemaphoreSlim _identityGate = new(1, 1);
 
-    public TypeScriptCompiler(string executable = "tsc", IScriptCompileCache? cache = null)
+    public TypeScriptCompiler(string? executable = null, IScriptCompileCache? cache = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(executable);
-        _executable = executable;
+        if (executable is not null) ArgumentException.ThrowIfNullOrWhiteSpace(executable);
+        _explicitExecutable = executable;
+        _toolchainLocator = executable is null ? new ToolchainLocator() : null;
+        _processRunner = new ToolProcessRunner();
+        _cache = cache ?? new InMemoryScriptCompileCache();
+    }
+
+    public TypeScriptCompiler(
+        IToolchainLocator toolchainLocator,
+        IToolProcessRunner processRunner,
+        IScriptCompileCache? cache = null)
+    {
+        _toolchainLocator = toolchainLocator ?? throw new ArgumentNullException(nameof(toolchainLocator));
+        _processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
         _cache = cache ?? new InMemoryScriptCompileCache();
     }
 
@@ -56,13 +71,17 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         try
         {
             compilerIdentity = await ResolveCompilerIdentityAsync(cancellationToken).ConfigureAwait(false);
+            if (request.PackageContext is not null)
+            {
+                IToolchainLocator locator = _toolchainLocator
+                    ?? throw new ToolchainUnavailableException("Bundled esbuild toolchain locator is unavailable.");
+                ToolchainComponentLocation esbuild = locator.ResolveRequired(ToolchainComponentNames.Esbuild);
+                compilerIdentity = $"{compilerIdentity}+esbuild-{esbuild.Version}";
+            }
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
         {
-            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
-                ScriptDiagnosticSeverity.Error,
-                "NEXTS0005",
-                $"TypeScript compiler executable '{_executable}' was not found."));
+            return ToolchainUnavailableResult(exception);
         }
 
         string cacheKey = ScriptCompileCacheKey.Compute(request, compilerIdentity, ScriptApiVersion.Current);
@@ -71,6 +90,9 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         {
             return new ScriptCompileResult(true, cached, Array.Empty<ScriptCompilerDiagnostic>(), cachedExports);
         }
+
+        if (request.PackageContext is not null)
+            return await CompilePackageAsync(request, compilerIdentity, cacheKey, cancellationToken).ConfigureAwait(false);
 
         string root = Path.Combine(Path.GetTempPath(), $"nexmud-ts-{Guid.NewGuid():N}");
         string sourceRoot = Path.Combine(root, "src");
@@ -100,7 +122,10 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
                 Encoding.UTF8,
                 cancellationToken).ConfigureAwait(false);
 
-            ProcessResult process = await RunAsync(_executable, $"--pretty false --project \"{configPath}\"", root, cancellationToken)
+            ToolProcessResult process = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", configPath],
+                    root,
+                    cancellationToken)
                 .ConfigureAwait(false);
             IReadOnlyList<ScriptCompilerDiagnostic> diagnostics = ParseDiagnostics(process.Output, root, sourceRoot);
             if (process.ExitCode != 0)
@@ -158,12 +183,9 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
             _exportCache[cacheKey] = exports;
             return new ScriptCompileResult(true, package, diagnostics, exports);
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
         {
-            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
-                ScriptDiagnosticSeverity.Error,
-                "NEXTS0005",
-                $"TypeScript compiler executable '{_executable}' was not found."));
+            return ToolchainUnavailableResult(exception);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -180,6 +202,311 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         {
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    private async Task<ScriptCompileResult> CompilePackageAsync(
+        ScriptCompileRequest request,
+        string compilerIdentity,
+        string cacheKey,
+        CancellationToken cancellationToken)
+    {
+        ScriptCompilePackageContext context = request.PackageContext!;
+        if (!File.Exists(context.ProjectConfigPath))
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0007",
+                $"Package TypeScript configuration was not found: {context.ProjectConfigPath}"));
+        if (!request.Sources.Any(source => source.Path.Equals(request.Manifest.Entrypoint, StringComparison.Ordinal)))
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0007",
+                $"Package entrypoint '{request.Manifest.Entrypoint}' is not present in the source set."));
+
+        string root = Path.Combine(context.PackageRoot, ".nexmud", "build", Guid.NewGuid().ToString("N"));
+        string sourceRoot = Path.Combine(root, "src");
+        string declarationRoot = Path.Combine(root, "types");
+        string bundleRoot = Path.Combine(root, "bundle");
+        try
+        {
+            Directory.CreateDirectory(sourceRoot);
+            Directory.CreateDirectory(declarationRoot);
+            Directory.CreateDirectory(bundleRoot);
+            foreach (ScriptSourceFile source in request.Sources)
+            {
+                string path = Path.Combine(sourceRoot, source.Path.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, source.Content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            }
+
+            string typecheckConfig = Path.Combine(root, "tsconfig.typecheck.json");
+            await File.WriteAllTextAsync(
+                typecheckConfig,
+                BuildPackageConfig(context.ProjectConfigPath, request.EffectiveOptions, sourceRoot, declarationRoot, emitDeclarations: false),
+                Encoding.UTF8,
+                cancellationToken).ConfigureAwait(false);
+            ToolProcessResult typecheck = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", typecheckConfig], root, cancellationToken)
+                .ConfigureAwait(false);
+            IReadOnlyList<ScriptCompilerDiagnostic> diagnostics = ParseDiagnostics(typecheck.Output, root, sourceRoot);
+            if (typecheck.ExitCode != 0)
+            {
+                if (diagnostics.Count == 0)
+                    diagnostics = [new ScriptCompilerDiagnostic(
+                        ScriptDiagnosticSeverity.Error,
+                        "NEXTS0004",
+                        string.IsNullOrWhiteSpace(typecheck.Output) ? "TypeScript project typecheck failed." : typecheck.Output.Trim())];
+                return new ScriptCompileResult(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
+            }
+
+            string declarationConfig = Path.Combine(root, "tsconfig.declarations.json");
+            await File.WriteAllTextAsync(
+                declarationConfig,
+                BuildPackageConfig(context.ProjectConfigPath, request.EffectiveOptions, sourceRoot, declarationRoot, emitDeclarations: true),
+                Encoding.UTF8,
+                cancellationToken).ConfigureAwait(false);
+            ToolProcessResult declarationBuild = await RunCompilerAsync(
+                    ["--pretty", "false", "--project", declarationConfig], root, cancellationToken)
+                .ConfigureAwait(false);
+            diagnostics = diagnostics.Concat(ParseDiagnostics(declarationBuild.Output, root, sourceRoot)).ToArray();
+            if (declarationBuild.ExitCode != 0)
+            {
+                if (!diagnostics.Any(diagnostic => diagnostic.Severity == ScriptDiagnosticSeverity.Error))
+                    diagnostics = diagnostics.Append(new ScriptCompilerDiagnostic(
+                        ScriptDiagnosticSeverity.Error,
+                        "NEXTS0004",
+                        string.IsNullOrWhiteSpace(declarationBuild.Output) ? "TypeScript declaration generation failed." : declarationBuild.Output.Trim())).ToArray();
+                return new ScriptCompileResult(false, null, diagnostics, Array.Empty<ExportedScriptFunction>());
+            }
+
+            string compiledEntrypoint = (Path.ChangeExtension(request.Manifest.Entrypoint, ".js")
+                ?? throw new InvalidOperationException("Unable to derive compiled entrypoint.")).Replace('\\', '/');
+            string bundlePath = Path.Combine(bundleRoot, compiledEntrypoint.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(bundlePath)!);
+            string metafilePath = Path.Combine(root, "esbuild-meta.json");
+            string entrypointPath = Path.Combine(sourceRoot, request.Manifest.Entrypoint.Replace('/', Path.DirectorySeparatorChar));
+            ToolProcessResult bundle = await RunEsbuildAsync(
+                [
+                    "--bundle",
+                    "--format=esm",
+                    "--platform=neutral",
+                    $"--target={request.EffectiveOptions.EcmaScriptTarget.ToLowerInvariant()}",
+                    "--external:@nexmud/api",
+                    "--external:node:*",
+                    "--sourcemap=external",
+                    $"--metafile={metafilePath}",
+                    $"--outfile={bundlePath}",
+                    entrypointPath
+                ],
+                root,
+                cancellationToken).ConfigureAwait(false);
+            if (bundle.ExitCode != 0)
+            {
+                string message = string.IsNullOrWhiteSpace(bundle.Output) ? "esbuild could not bundle the package entrypoint." : bundle.Output.Trim();
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0008",
+                    message));
+            }
+
+            ScriptCompilerDiagnostic? incompatibleImport = FindIncompatibleExternalImport(metafilePath);
+            if (incompatibleImport is not null)
+                return ScriptCompileResult.Failed(incompatibleImport);
+            if (!File.Exists(bundlePath))
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0008",
+                    "esbuild completed without producing the package entrypoint bundle."));
+
+            string? sourceMap = null;
+            string mapPath = bundlePath + ".map";
+            if (request.EffectiveOptions.EmitSourceMaps && File.Exists(mapPath))
+            {
+                string rawSourceMap = await File.ReadAllTextAsync(mapPath, cancellationToken).ConfigureAwait(false);
+                sourceMap = NormalizePackageSourceMap(rawSourceMap, mapPath, sourceRoot, context.PackageRoot);
+            }
+            IReadOnlyList<ExportedScriptFunction> exports = TypeScriptDeclarationExportReader.Discover(
+                request.Manifest.Id,
+                request.Sources,
+                declarationRoot,
+                request.Manifest.Entrypoint);
+            ScriptManifest compiledManifest = new(
+                request.Manifest.Id,
+                request.Manifest.Name,
+                request.Manifest.Version,
+                request.Manifest.ApiVersion,
+                compiledEntrypoint,
+                request.Manifest.Permissions,
+                request.Manifest.OwnerKind,
+                request.Manifest.RuntimeProfile);
+            CompiledScriptPackage package = new(
+                compiledManifest,
+                [new CompiledScriptModule(
+                    compiledEntrypoint,
+                    await File.ReadAllTextAsync(bundlePath, cancellationToken).ConfigureAwait(false),
+                    sourceMap,
+                    request.Manifest.Entrypoint)],
+                compilerIdentity,
+                cacheKey,
+                exports);
+            _cache.Put(package);
+            _exportCache[cacheKey] = exports;
+            return new ScriptCompileResult(true, package, diagnostics, exports);
+        }
+        catch (Exception exception) when (IsToolchainUnavailable(exception))
+        {
+            return ToolchainUnavailableResult(exception);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0006",
+                $"Package build boundary failed: {exception.Message}"));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static string NormalizePackageSourceMap(
+        string sourceMap,
+        string mapPath,
+        string sourceRoot,
+        string packageRoot)
+    {
+        JsonObject map = JsonNode.Parse(sourceMap)?.AsObject()
+            ?? throw new JsonException("esbuild returned an invalid source map.");
+        if (map["sources"] is not JsonArray sources)
+            return sourceMap;
+
+        string mapDirectory = Path.GetDirectoryName(mapPath)!;
+        string mapSourceRoot = map["sourceRoot"]?.GetValue<string>() ?? string.Empty;
+        string sourceBase = string.IsNullOrWhiteSpace(mapSourceRoot)
+            ? mapDirectory
+            : Path.GetFullPath(Path.Combine(mapDirectory, mapSourceRoot));
+        for (int index = 0; index < sources.Count; index++)
+        {
+            string? source = sources[index]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(source)) continue;
+            string absoluteSource = Path.GetFullPath(Path.IsPathRooted(source)
+                ? source
+                : Path.Combine(sourceBase, source));
+            string? relativeSource = TryGetRelativePath(sourceRoot, absoluteSource)
+                ?? TryGetRelativePath(packageRoot, absoluteSource);
+            if (relativeSource is null)
+                throw new InvalidOperationException("esbuild source map references a file outside the package build roots.");
+            sources[index] = relativeSource.Replace('\\', '/');
+        }
+
+        map["sourceRoot"] = string.Empty;
+        return map.ToJsonString();
+    }
+
+    private static string? TryGetRelativePath(string root, string path)
+    {
+        string relative = Path.GetRelativePath(ResolvePhysicalPath(root), ResolvePhysicalPath(path));
+        return relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            ? null
+            : relative;
+    }
+
+    private static string ResolvePhysicalPath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string current = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidOperationException("A source-map path must be absolute.");
+        foreach (string segment in fullPath[current.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            FileSystemInfo entry = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : new FileInfo(current);
+            current = entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? current;
+        }
+        return Path.GetFullPath(current);
+    }
+
+    private static string BuildPackageConfig(
+        string projectConfigPath,
+        ScriptCompilerOptions options,
+        string sourceRoot,
+        string outputRoot,
+        bool emitDeclarations)
+    {
+        var config = new
+        {
+            extends = projectConfigPath,
+            compilerOptions = new Dictionary<string, object?>
+            {
+                ["target"] = options.EcmaScriptTarget,
+                ["module"] = "ESNext",
+                ["moduleResolution"] = "Bundler",
+                ["strict"] = options.Strict,
+                ["allowJs"] = true,
+                ["checkJs"] = true,
+                ["sourceMap"] = false,
+                ["declaration"] = emitDeclarations,
+                ["emitDeclarationOnly"] = emitDeclarations,
+                ["declarationMap"] = false,
+                ["noEmit"] = !emitDeclarations,
+                ["noEmitOnError"] = true,
+                ["skipLibCheck"] = true,
+                ["rootDir"] = sourceRoot,
+                ["outDir"] = outputRoot,
+                ["resolveJsonModule"] = true
+            },
+            include = new[] { "src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.d.ts" },
+            exclude = new[] { "node_modules", "dist", ".nexmud", "**/*.test.*", "**/*.spec.*" }
+        };
+        return JsonSerializer.Serialize(config);
+    }
+
+    private async Task<ToolProcessResult> RunEsbuildAsync(
+        IReadOnlyList<string> arguments,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        IToolchainLocator locator = _toolchainLocator
+            ?? throw new ToolchainUnavailableException("Bundled esbuild toolchain locator is unavailable.");
+        ToolchainComponentLocation node = locator.ResolveRequired(ToolchainComponentNames.Node);
+        ToolchainComponentLocation esbuild = locator.ResolveRequired(ToolchainComponentNames.Esbuild);
+        return await _processRunner.RunAsync(
+            new ToolProcessRequest(
+                node.FullPath,
+                [esbuild.FullPath, .. arguments],
+                workingDirectory,
+                [Path.GetDirectoryName(node.FullPath)!]),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static ScriptCompilerDiagnostic? FindIncompatibleExternalImport(string metafilePath)
+    {
+        using JsonDocument metafile = JsonDocument.Parse(File.ReadAllText(metafilePath));
+        if (!metafile.RootElement.TryGetProperty("outputs", out JsonElement outputs)) return null;
+        foreach (JsonProperty output in outputs.EnumerateObject())
+        {
+            if (!output.Value.TryGetProperty("imports", out JsonElement imports)) continue;
+            foreach (JsonElement import in imports.EnumerateArray())
+            {
+                if (!import.TryGetProperty("external", out JsonElement external) || !external.GetBoolean()) continue;
+                string path = import.TryGetProperty("path", out JsonElement pathElement)
+                    ? pathElement.GetString() ?? string.Empty
+                    : string.Empty;
+                if (path.Equals("@nexmud/api", StringComparison.Ordinal)) continue;
+                string message = path.StartsWith("node:", StringComparison.Ordinal)
+                    ? $"Node built-in '{path}' is not supported by the NexMUD runtime."
+                    : $"External import '{path}' is not supported by the NexMUD runtime.";
+                return new ScriptCompilerDiagnostic(ScriptDiagnosticSeverity.Error, "NEXTS0009", message);
+            }
+        }
+        return null;
     }
 
     private static string BuildConfig(ScriptCompilerOptions options, string sourceRoot, string outputRoot)
@@ -217,15 +544,22 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
 
     private async Task<string> ResolveCompilerIdentityAsync(CancellationToken cancellationToken)
     {
-        if (!string.Equals(_compilerIdentity, "typescript-external", StringComparison.Ordinal)) return _compilerIdentity;
+        if (!string.Equals(_compilerIdentity, "typescript-unresolved", StringComparison.Ordinal)) return _compilerIdentity;
         await _identityGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!string.Equals(_compilerIdentity, "typescript-external", StringComparison.Ordinal)) return _compilerIdentity;
-            ProcessResult result = await RunAsync(_executable, "--version", Environment.CurrentDirectory, cancellationToken)
+            if (!string.Equals(_compilerIdentity, "typescript-unresolved", StringComparison.Ordinal)) return _compilerIdentity;
+            ToolProcessResult result = await RunCompilerAsync(
+                    ["--version"],
+                    Environment.CurrentDirectory,
+                    cancellationToken)
                 .ConfigureAwait(false);
             string version = result.Output.Trim();
-            if (result.ExitCode == 0 && version.Length > 0) _compilerIdentity = $"typescript-{version}";
+            if (result.ExitCode == 0 && version.Length > 0)
+            {
+                string source = _explicitExecutable is null ? "bundled" : "external";
+                _compilerIdentity = $"typescript-{source}-{version}";
+            }
             return _compilerIdentity;
         }
         finally
@@ -234,25 +568,60 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
         }
     }
 
-    private static async Task<ProcessResult> RunAsync(
-        string executable,
-        string arguments,
+    private Task<ToolProcessResult> RunCompilerAsync(
+        IReadOnlyList<string> arguments,
         string workingDirectory,
         CancellationToken cancellationToken)
     {
-        ProcessStartInfo startInfo = new(executable, arguments)
+        if (_explicitExecutable is not null)
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Unable to start TypeScript compiler.");
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        return new ProcessResult(process.ExitCode, (await stdout.ConfigureAwait(false)) + (await stderr.ConfigureAwait(false)));
+            return _processRunner.RunAsync(
+                new ToolProcessRequest(
+                    _explicitExecutable,
+                    arguments,
+                    workingDirectory,
+                    ResolveExternalPathEntries(_explicitExecutable)),
+                cancellationToken);
+        }
+
+        IToolchainLocator locator = _toolchainLocator
+            ?? throw new ToolchainUnavailableException("Bundled TypeScript toolchain locator is unavailable.");
+        ToolchainComponentLocation node = locator.ResolveRequired(ToolchainComponentNames.Node);
+        ToolchainComponentLocation typeScript = locator.ResolveRequired(ToolchainComponentNames.TypeScript);
+        List<string> invocationArguments = [typeScript.FullPath, .. arguments];
+        return _processRunner.RunAsync(
+            new ToolProcessRequest(
+                node.FullPath,
+                invocationArguments,
+                workingDirectory,
+                [Path.GetDirectoryName(node.FullPath)!]),
+            cancellationToken);
+    }
+
+    private ScriptCompileResult ToolchainUnavailableResult(Exception exception) =>
+        ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+            ScriptDiagnosticSeverity.Error,
+            "NEXTS0005",
+            _explicitExecutable is null
+                ? $"Bundled TypeScript toolchain is unavailable: {exception.Message}"
+                : $"TypeScript compiler executable '{_explicitExecutable}' was not found."));
+
+    private static bool IsToolchainUnavailable(Exception exception) =>
+        exception is ToolchainUnavailableException
+            or FileNotFoundException
+            or DirectoryNotFoundException
+            or System.ComponentModel.Win32Exception;
+
+    private static IReadOnlyList<string> ResolveExternalPathEntries(string executable)
+    {
+        if (Path.IsPathRooted(executable))
+        {
+            string? directory = Path.GetDirectoryName(executable);
+            return string.IsNullOrWhiteSpace(directory) ? [] : [directory];
+        }
+
+        return (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static IReadOnlyList<ScriptCompilerDiagnostic> ParseDiagnostics(string output, string root, string sourceRoot)
@@ -284,5 +653,4 @@ public sealed partial class TypeScriptCompiler : IScriptCompiler
     [GeneratedRegex(@"^(?<file>.+)\((?<line>\d+),(?<column>\d+)\): (?<severity>error|warning) (?<code>TS\d+): (?<message>.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticPattern();
 
-    private sealed record ProcessResult(int ExitCode, string Output);
 }

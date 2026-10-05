@@ -22,6 +22,7 @@ namespace NexMud.Client.Scripting;
 public sealed class ClientScriptPlatform : IAsyncDisposable
 {
     private readonly ClientScriptEventBridge _eventBridge;
+    private readonly ScriptRuntimeProfileRegistry _runtimeProfiles = new();
     private readonly bool _ownsSupervisor;
     private readonly bool _ownsEventHub;
 
@@ -49,7 +50,7 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
         Runtime = new ManagedScriptRuntime(Supervisor);
         JavaScriptRuntime = new JintScriptRuntime(
             Supervisor,
-            diagnostics: new ClientScriptDiagnosticsSink(EventSink));
+            diagnostics: new ClientScriptDiagnosticsSink(EventSink, _runtimeProfiles.Resolve));
         Functions = new ClientScriptFunctionInvoker(
             JavaScriptRuntime,
             activeProfileId ?? (() => "default"));
@@ -71,6 +72,17 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
     public IScriptMapper Mapper { get; }
     public IScriptCodex Codex { get; }
     public IEventSink EventSink { get; }
+
+    public string? RegisterRuntimeProfile(ScriptModuleId moduleId, string profileId) =>
+        _runtimeProfiles.Register(moduleId, profileId);
+
+    public string? ResolveRuntimeProfile(string moduleId) => _runtimeProfiles.Resolve(moduleId);
+
+    public void UnregisterRuntimeProfile(ScriptModuleId moduleId, string profileId) =>
+        _runtimeProfiles.Unregister(moduleId, profileId);
+
+    public void RestoreRuntimeProfile(ScriptModuleId moduleId, string expectedProfileId, string? previousProfileId) =>
+        _runtimeProfiles.Restore(moduleId, expectedProfileId, previousProfileId);
 
     private void HandleTaskFaulted(ScriptTaskFault fault)
     {

@@ -34,6 +34,7 @@ public sealed class AutoMoveService
     private readonly IScriptMapper _mapper;
     private readonly MapperNavigationAuthority _authority;
     private readonly IScriptScheduler _scheduler;
+    private readonly Func<string> _activeProfileId;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private long _routeSignalSequence;
 
@@ -49,7 +50,8 @@ public sealed class AutoMoveService
         ClientScriptPlatform platform,
         IScriptMapper mapper,
         MapperNavigationAuthority authority,
-        IScriptScheduler scheduler)
+        IScriptScheduler scheduler,
+        Func<string>? activeProfileId = null)
     {
         _events = events;
         _state = state;
@@ -60,6 +62,7 @@ public sealed class AutoMoveService
         _mapper = mapper;
         _authority = authority;
         _scheduler = scheduler;
+        _activeProfileId = activeProfileId ?? (() => "default");
         _authority.SetManualMovementHandler(PauseForManualMovementAsync);
     }
 
@@ -247,6 +250,7 @@ public sealed class AutoMoveService
         try
         {
             await _platform.JavaScriptRuntime.UnloadAsync(MapperRouteScriptCompiler.ModuleId, cancellationToken).ConfigureAwait(false);
+            _platform.UnregisterRuntimeProfile(MapperRouteScriptCompiler.ModuleId, execution.ProfileId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -308,6 +312,7 @@ public sealed class AutoMoveService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationRoomId);
+        string profileId = _activeProfileId();
         MapperPreferences settings = _settings();
         if (!settings.Enabled || !settings.AutoMoveEnabled)
         {
@@ -348,7 +353,8 @@ public sealed class AutoMoveService
                 singleStep,
                 settings.AutoMoveMaximumReplans,
                 control,
-                (update, token) => ApplyRouteUpdateByIdAsync(executionId, update, token));
+                (update, token) => ApplyRouteUpdateByIdAsync(executionId, update, token),
+                profileId);
             _execution = execution;
         }
         finally
@@ -423,6 +429,8 @@ public sealed class AutoMoveService
             package.Manifest.Name,
             mapperOverride: routeMapper);
 
+        string? previousProfileId = previous?.ProfileId;
+        _platform.RegisterRuntimeProfile(MapperRouteScriptCompiler.ModuleId, profileId);
         try
         {
             bool loaded = _platform.JavaScriptRuntime.Snapshot().Any(snapshot => snapshot.Id.Equals(MapperRouteScriptCompiler.ModuleId));
@@ -451,6 +459,10 @@ public sealed class AutoMoveService
         }
         catch (Exception exception)
         {
+            if (previousProfileId is not null)
+                _platform.RegisterRuntimeProfile(MapperRouteScriptCompiler.ModuleId, previousProfileId);
+            else
+                _platform.UnregisterRuntimeProfile(MapperRouteScriptCompiler.ModuleId, profileId);
             execution.Control.Abort();
             _authority.Release(execution.ExecutionId);
             await ApplyRouteUpdateAsync(execution, new MapperRouteRuntimeUpdate(

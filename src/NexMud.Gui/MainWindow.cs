@@ -83,9 +83,9 @@ public sealed class MainWindow : Window
     private readonly NexMudRuntime _runtime;
     private readonly MapperWorkspace _mapperWorkspace;
     private readonly CodexWorkspace _codexWorkspace;
-    private readonly AutomationWorkspace _automationWorkspace;
     private readonly ScriptingWorkspace _scriptingWorkspace;
     private AutomationStudioWindow? _automationStudioWindow;
+    private bool _returnToStudioAfterSettings;
     private readonly GameplayHudPanel _gameplayHudPanel = new();
     private readonly CharacterHudPanel _characterHudPanel;
     private readonly CharacterInventoryWorkspace _characterWorkspace;
@@ -191,11 +191,6 @@ public sealed class MainWindow : Window
             RouteToCodexLocationAsync,
             SubmitCommandAsync,
             _cts.Token);
-        _automationWorkspace = new AutomationWorkspace(runtime, () =>
-        {
-            ShowTool(ToolView.Scripting);
-            return Task.CompletedTask;
-        });
         _scriptingWorkspace = new ScriptingWorkspace(runtime);
         _characterHudPanel = new CharacterHudPanel(ResolveItemInspection);
         _characterWorkspace = new CharacterInventoryWorkspace(ResolveItemInspection, SubmitCommandAsync);
@@ -509,7 +504,7 @@ public sealed class MainWindow : Window
 
     private void ShowAutomationStudio()
     {
-        if (_automationStudioWindow is { } existing)
+        if (_automationStudioWindow is { IsVisible: true } existing)
         {
             if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
             existing.Show();
@@ -518,10 +513,27 @@ public sealed class MainWindow : Window
             return;
         }
 
+        _automationStudioWindow = null;
         AutomationStudioWindow studio = new(_runtime);
-        studio.Closed += (_, _) => _automationStudioWindow = null;
+        studio.StudioSettingsRequested += ShowStudioSettingsAsync;
+        studio.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_automationStudioWindow, studio))
+                _automationStudioWindow = null;
+        };
         _automationStudioWindow = studio;
         studio.Show(this);
+    }
+
+    private async Task ShowStudioSettingsAsync()
+    {
+        if (_automationStudioWindow is { } studio)
+        {
+            _returnToStudioAfterSettings = true;
+            studio.Hide();
+        }
+        Activate();
+        await ShowSettingsAsync().ConfigureAwait(true);
     }
 
     private static Button UtilityButton(string label, string accessibleLabel)
@@ -1199,10 +1211,25 @@ public sealed class MainWindow : Window
                     if (Enum.TryParse(binding.Command, true, out ToolView view)) ShowTool(view);
                     break;
                 case KeybindingActionKind.RunAutomation:
-                    if (string.IsNullOrWhiteSpace(binding.Command) ||
-                        !await _runtime.Automation.RunWorkflowAsync(binding.Command, _cts.Token).ConfigureAwait(true))
+                {
+                    string reference = binding.Command ?? string.Empty;
+                    IReadOnlyList<AutomationWorkflow> workflows = _runtime.Settings.Workflows ?? [];
+                    AutomationWorkflow? workflow = workflows.FirstOrDefault(candidate =>
+                        candidate.Id?.Equals(reference, StringComparison.OrdinalIgnoreCase) == true);
+                    if (workflow is null)
+                    {
+                        AutomationWorkflow[] nameMatches = workflows
+                            .Where(candidate => candidate.Name.Equals(reference, StringComparison.OrdinalIgnoreCase))
+                            .Take(2)
+                            .ToArray();
+                        if (nameMatches.Length == 1) workflow = nameMatches[0];
+                    }
+
+                    if (workflow is null || string.IsNullOrWhiteSpace(workflow.Id) ||
+                        !await _runtime.Automation.RunWorkflowAsync(workflow.Id, _cts.Token).ConfigureAwait(true))
                         throw new InvalidOperationException($"Automation '{binding.Command}' is not available to run.");
                     break;
+                }
             }
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
@@ -1791,6 +1818,15 @@ public sealed class MainWindow : Window
             RenderState(_snapshot);
             ShowClientMessage("Settings saved.");
         }
+        if (_returnToStudioAfterSettings && _automationStudioWindow is { } studio)
+        {
+            _returnToStudioAfterSettings = false;
+            studio.Show();
+            studio.Activate();
+            studio.Focus();
+            return;
+        }
+        _returnToStudioAfterSettings = false;
         _command.Focus();
     }
 
@@ -1962,13 +1998,6 @@ public sealed class MainWindow : Window
                                 ShowClientMessage("Auto-move: destination reached.");
                             }
                         });
-                        break;
-                    case AutomationKeybindingInvoked _:
-                    case AutomationRuleMatched _:
-                    case AutomationVariableChanged _:
-                    case AutomationWorkflowStateChanged _:
-                    case ScriptLogEmitted { ModuleId: "automation.profile" }:
-                        _automationWorkspace.HandleEvent(envelope.Payload, envelope.Timestamp);
                         break;
                     case ScriptRuntimeTaskFaulted fault:
                         Dispatcher.UIThread.Post(() => ShowClientMessage(
@@ -2514,11 +2543,7 @@ public sealed class MainWindow : Window
         {
             host.Content = BuildDynamicToolContent(active);
         }
-        if (active == ToolView.Automation)
-        {
-            _automationWorkspace.RefreshSnapshot();
-        }
-        else if (active == ToolView.Scripting)
+        if (active == ToolView.Scripting)
         {
             _scriptingWorkspace.Refresh();
         }
@@ -4248,6 +4273,12 @@ public sealed class MainWindow : Window
 
     private void ShowTool(ToolView requestedView)
     {
+        if (requestedView == ToolView.Automation)
+        {
+            ShowAutomationStudio();
+            return;
+        }
+
         ToolView view = NormalizeToolView(requestedView);
         if (view == ToolView.Context)
         {
@@ -4281,10 +4312,6 @@ public sealed class MainWindow : Window
             case ToolView.Knowledge:
                 _workspaceHost.Content = _codexWorkspace;
                 _codexWorkspace.Activate();
-                break;
-            case ToolView.Automation:
-                _workspaceHost.Content = _automationWorkspace;
-                _automationWorkspace.Activate();
                 break;
             case ToolView.Scripting:
                 _scriptingWorkspace.Refresh();
@@ -4326,9 +4353,6 @@ public sealed class MainWindow : Window
             case ToolView.Knowledge:
                 _codexWorkspace.Deactivate();
                 break;
-            case ToolView.Automation:
-                _automationWorkspace.Deactivate();
-                break;
         }
     }
 
@@ -4365,11 +4389,6 @@ public sealed class MainWindow : Window
                 _worldColumn.Width = new GridLength(50, GridUnitType.Star);
                 _workspaceColumn.MinWidth = 500;
                 _workspaceColumn.Width = new GridLength(50, GridUnitType.Star);
-                break;
-            case ToolView.Automation:
-                _worldColumn.Width = new GridLength(47, GridUnitType.Star);
-                _workspaceColumn.MinWidth = 500;
-                _workspaceColumn.Width = new GridLength(53, GridUnitType.Star);
                 break;
             case ToolView.Scripting:
                 _worldColumn.Width = new GridLength(44, GridUnitType.Star);

@@ -99,7 +99,13 @@ public sealed class NexMudRuntime : IAsyncDisposable
             commands: ScriptCommands,
             activeProfileId: () => ActiveConnectionProfile.Id,
             applicationCancellation: _cts.Token);
-        ScriptWorkspace = new ScriptWorkspaceService(Scripting, Events, () => ActiveConnectionProfile.Id);
+        ScriptPackages = new ScriptPackageManager();
+        ScriptWorkspace = new ScriptWorkspaceService(
+            Scripting,
+            Events,
+            () => ActiveConnectionProfile.Id,
+            packageManager: ScriptPackages);
+        ScriptTests = new ScriptTestService();
         Navigator = new AutoMoveService(
             _routeControlEvents,
             State,
@@ -109,7 +115,8 @@ public sealed class NexMudRuntime : IAsyncDisposable
             Scripting,
             ScriptMapper,
             NavigationAuthority,
-            ScriptScheduler);
+            ScriptScheduler,
+            activeProfileId: () => ActiveConnectionProfile.Id);
         _automationEvents = Events.SubscribeLossless();
         AutomationCompiler = new AutomationRuntimeCompiler(Scripting, State, ScriptScheduler);
         Automation = new ClientAutomationService(
@@ -162,6 +169,8 @@ public sealed class NexMudRuntime : IAsyncDisposable
     public IScriptMapper ScriptMapper { get; }
     public ClientScriptPlatform Scripting { get; }
     public ScriptWorkspaceService ScriptWorkspace { get; }
+    public ScriptTestService ScriptTests { get; }
+    public IScriptPackageManager ScriptPackages { get; }
     public AvendarGameAdapter Avendar { get; }
     public JevDecisionCoordinator JevCoordinator { get; }
     public ClientAutomationService Automation { get; }
@@ -345,7 +354,7 @@ public sealed class NexMudRuntime : IAsyncDisposable
                 Mtts: protocols.Mtts != ProtocolPolicy.Disabled,
                 Eor: protocols.Eor != ProtocolPolicy.Disabled),
             ClientName: "NexMUD",
-            ClientVersion: "0.31.0");
+            ClientVersion: "0.32.0");
     }
 
     public MudConnectionOptions CreateConnectionOptions(string? host, int? port, bool? useTls)

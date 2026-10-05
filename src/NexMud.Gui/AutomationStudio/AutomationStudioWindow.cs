@@ -9,41 +9,99 @@ using NexMud.Client.Automation;
 using NexMud.Client.Runtime;
 using NexMud.Client.Scripting;
 using NexMud.Client.Settings;
+using NexMud.Contracts.Events;
 using NexMud.Scripting.Compilation;
 using NexMud.Scripting.Runtime;
 
 namespace NexMud.Gui.AutomationStudio;
 
 /// <summary>
-/// Automation Studio workbench: Explorer | tabbed document area | contextual Inspector, with a
-/// collapsible bottom panel. Every Automation definition and script source opens as a document tab.
+/// Automation Studio workbench: Explorer and tabbed documents above a collapsible diagnostics panel.
+/// Every automation definition and script source opens as a document tab.
 /// </summary>
-internal sealed class AutomationStudioWindow : Window
+internal sealed partial class AutomationStudioWindow : Window
 {
-    private enum NodeKind { Category, Entry, Scripts, Package, SourceFile }
-    private sealed record StudioNode(NodeKind Kind, string Label, StudioDocumentKind? DocKind = null, int Index = -1, string? PackageId = null, string? Path = null);
+    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFolder, SourceFile, RuntimeSection }
+    private sealed record StudioNode(
+        NodeKind Kind,
+        string Label,
+        StudioDocumentKind? DocKind = null,
+        int Index = -1,
+        string? AutomationId = null,
+        string? FolderId = null,
+        string? PackageId = null,
+        string? Path = null,
+        RuntimeSection? RuntimeSection = null);
 
     private const int MaximumEventRows = 500;
     private readonly NexMudRuntime _runtime;
     private readonly ScriptWorkspaceService _workspace;
+    private readonly StudioSessionController _session;
+    private readonly StudioProfileTransitionGate _profileTransitions = new();
+    private readonly StudioDocumentSessionStore _profileDocumentSessions = new();
+    private readonly StudioTypeScriptLanguageHost _typescript;
+    private readonly AutomationOrganizationStore _organizationStore = new();
+    private AutomationOrganizationCatalog _organization = AutomationOrganizationCatalog.Empty;
     private readonly AutomationReferenceIndex _referencesIndex = new();
     private readonly StudioDocumentSet _documents = new();
+    private readonly StudioTextModelRegistry _textModels = new();
+    private readonly HashSet<string> _ignoredMonacoChanges = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MonacoSelectionChanged> _scriptSelections = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, StudioLanguageDiagnostics> _pendingLanguageDiagnostics = new(StringComparer.Ordinal);
+    private readonly StudioDiagnosticsHub _diagnostics = new();
+    private Button? _languageServerRestartButton;
     private readonly StudioUiPreferences _preferences = StudioUiPreferences.Load();
     private readonly Dictionary<string, AutomationDocumentEditor> _editors = new(StringComparer.Ordinal);
     private readonly Dictionary<TreeViewItem, StudioNode> _nodes = [];
-    private readonly ComboBox _profile = new() { MinWidth = 210 };
-    private readonly TextBox _filter = UiTheme.FieldBox();
+    private readonly ComboBox _profile = new() { MinWidth = 160, MaxWidth = 160 };
+    private readonly TextBox _filter = new()
+    {
+        Background = StudioShellChrome.Input,
+        Foreground = StudioShellChrome.Foreground,
+        BorderBrush = StudioShellChrome.Border,
+        CornerRadius = new CornerRadius(5),
+        MinHeight = 34,
+        Padding = new Thickness(8, 4),
+        FontSize = 13
+    };
     private readonly TreeView _navigator = new();
+    private readonly Border _activityRail = new()
+    {
+        Width = 108,
+        Background = StudioShellChrome.Rail,
+        BorderBrush = StudioShellChrome.Border,
+        BorderThickness = new Thickness(0, 0, 1, 0)
+    };
+    private readonly TextBlock _explorerTitle = new()
+    {
+        Foreground = StudioShellChrome.Foreground,
+        FontWeight = FontWeight.SemiBold,
+        FontSize = 18,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+    private sealed record FolderChoice(string? FolderId, string Label);
+    private sealed record ScriptFolderChoice(string Path, string Label);
+
+    private Button _newButton = new();
+    private Button _refreshScriptsButton = new();
+    private Button _organizeButton = new();
+    private Control _scriptActions = new StackPanel();
+    private StudioActivity _activity;
+    private StudioDocumentKind? _automationCategoryPage;
+    private StudioDocumentKind? _automationWizardKind;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
-    private readonly StackPanel _inspector = new() { Spacing = 8, Margin = new Thickness(12) };
     private readonly StackPanel _problems = new() { Spacing = 3 };
+    private readonly StackPanel _diagnosticsPanel = new() { Spacing = 3 };
+    private readonly StackPanel _buildPanel = new() { Spacing = 3 };
     private readonly StackPanel _console = new() { Spacing = 2 };
     private readonly StackPanel _runtimePanel = new() { Spacing = 3 };
     private readonly StackPanel _eventsPanel = new() { Spacing = 2 };
     private readonly StackPanel _referencesPanel = new() { Spacing = 3 };
     private readonly TextBlock _buildState = new() { Text = "Build —", Foreground = UiTheme.Muted };
     private readonly TextBlock _runtimeState = new() { Text = "Runtime —", Foreground = UiTheme.Muted };
+    private readonly Border _connectionIndicator = new() { Width = 10, Height = 10, CornerRadius = new CornerRadius(5) };
+    private readonly TextBlock _connectionStatus = new() { Foreground = StudioShellChrome.Foreground };
     private readonly Queue<string> _events = new();
     private readonly CancellationTokenSource _cts = new();
     private Grid _root = new();
@@ -51,40 +109,68 @@ internal sealed class AutomationStudioWindow : Window
     private TabControl _bottom = new();
     private Button _bottomToggle = new();
     private readonly MonacoEditorHost _monaco = new();
+    private ScriptWorkspaceWatcher? _workspaceWatcher;
     private readonly TextBlock _breadcrumb = new() { Foreground = UiTheme.Muted, FontSize = 12, Margin = new Thickness(14, 5), TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Border _externalConflictBar = new() { IsVisible = false };
+    private readonly TextBlock _externalConflictText = new() { Foreground = UiTheme.Text, TextWrapping = TextWrapping.Wrap };
+    private Button _externalConflictReload = new();
     private readonly TextBlock _statusLeft = new() { Foreground = UiTheme.Muted, FontSize = 12 };
     private readonly TextBlock _statusCursor = new() { Foreground = UiTheme.Muted, FontSize = 12 };
     private Border _breadcrumbBar = new();
     private Border _explorerFrame = new();
-    private Border _inspectorFrame = new();
     private GridSplitter _leftSplit = new();
-    private GridSplitter _rightSplit = new();
     private IReadOnlyList<ScriptPackageSnapshot> _packages = [];
     private ScriptPackageSnapshot? _activePackage;
     private bool _bottomCollapsed;
+    private bool _packageOperationRunning;
     private bool _refreshingProfiles;
     private bool _refreshingNavigator;
+    private long _navigatorRefreshGeneration;
+    private long _runtimeRefreshGeneration;
     private bool _closeApproved;
+    private bool _closeConfirmationPending;
+    private long _closeConfirmationGeneration;
+
+    internal event Func<string, Task>? GlobalSearchRequested;
+    internal event Func<Task>? StudioSettingsRequested;
 
     public AutomationStudioWindow(NexMudRuntime runtime)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _workspace = runtime.ScriptWorkspace;
+        _session = new StudioSessionController(runtime.ActiveConnectionProfile.Id);
+        _typescript = new StudioTypeScriptLanguageHost(_workspace.GetLanguageWorkspaceRoot);
+        _bottomCollapsed = _preferences.BottomCollapsed;
+        _activity = _preferences.ResolveActivity();
+        UpdateConnectionStatus(_runtime.Transport.IsConnected
+            ? ConnectionStatus.Connected
+            : ConnectionStatus.Disconnected);
 
         Title = "NexMUD Automation Studio";
-        Width = 1440;
-        Height = 900;
-        MinWidth = 1060;
+        Width = 1672;
+        Height = 913;
+        MinWidth = 1180;
         MinHeight = 700;
-        Background = UiTheme.Window;
-        FontFamily = UiTheme.Sans;
+        CanResize = true;
+        Background = StudioShellChrome.Canvas;
+        FontFamily = StudioShellChrome.Font;
         WireMonaco();
-        _filter.PlaceholderText = "Filter";
+        _filter.PlaceholderText = _activity == StudioActivity.Automations ? "Search automations…" : "Filter";
         _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
+        InitializeSearchUi();
         Content = BuildLayout();
+        if (_activity == StudioActivity.Runtime)
+        {
+            SetRuntimeNavigationItems();
+            RenderRuntimeDashboard();
+        }
+        else if (_activity == StudioActivity.Search) RenderSearchActivity();
 
-        _profile.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<ConnectionProfile>(
-            (item, _) => new TextBlock { Text = item?.Name ?? "" }, true);
+        _profile.Background = StudioShellChrome.Input;
+        _profile.Foreground = StudioShellChrome.Foreground;
+        _profile.BorderBrush = StudioShellChrome.Border;
+        _profile.MinHeight = 34;
+        _profile.DisplayMemberBinding = new Avalonia.Data.Binding(nameof(ConnectionProfile.Name));
         _profile.SelectionChanged += ProfileSelectionChanged;
         _navigator.SelectionChanged += NavigatorSelectionChanged;
         _workspace.WorkspaceChanged += WorkspaceChanged;
@@ -95,135 +181,423 @@ internal sealed class AutomationStudioWindow : Window
         Closed += WindowClosed;
     }
 
+    private string SourceDocumentUri(string packageId, string relativePath) =>
+        _workspace.GetSourceDocumentUri(SelectedProfileId, packageId, relativePath);
+
     private string SelectedProfileId =>
-        (_profile.SelectedItem as ConnectionProfile)?.Id ?? _runtime.ActiveConnectionProfile.Id;
+        _session.Current.ProfileId;
 
     // ───────────────────────────── Layout ─────────────────────────────
 
     private Control BuildLayout()
     {
-        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{_preferences.BottomHeight},Auto") };
-        _root.Children.Add(BuildToolbar());
+        double bottomHeight = _bottomCollapsed
+            ? StudioUiPreferences.CollapsedBottomHeight
+            : _preferences.BottomHeight;
+        _root = new Grid { RowDefinitions = new RowDefinitions($"Auto,*,5,{bottomHeight}") };
+        _root.Children.Add(BuildHeader());
 
         _body = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions($"{_preferences.ExplorerWidth},5,*,5,{_preferences.InspectorWidth}")
+            ColumnDefinitions = new ColumnDefinitions($"108,{_preferences.ExplorerWidth},5,*")
         };
         Grid.SetRow(_body, 1);
         _root.Children.Add(_body);
 
-        Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        _body.Children.Add(BuildActivityRail());
+
+        Grid explorer = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*"), Background = StudioShellChrome.Explorer };
+        _explorerTreeScroll.Content = _navigator;
         explorer.Children.Add(BuildExplorerHeader());
-        Grid.SetRow(_filter, 1);
         _filter.Margin = new Thickness(8, 0, 8, 6);
+        Grid.SetRow(_filter, 1);
         explorer.Children.Add(_filter);
-        ScrollViewer tree = new() { Content = _navigator };
-        Grid.SetRow(tree, 2);
-        explorer.Children.Add(tree);
+        Grid.SetRow(_explorerTreeScroll, 2);
+        explorer.Children.Add(_explorerTreeScroll);
         _explorerFrame = Frame("EXPLORER", explorer, withHeader: false);
+        _explorerFrame.Background = StudioShellChrome.Explorer;
+        _explorerFrame.BorderBrush = StudioShellChrome.Border;
+        Grid.SetColumn(_explorerFrame, 1);
         _body.Children.Add(_explorerFrame);
 
-        _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 1); _body.Children.Add(_leftSplit);
-        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        _leftSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_leftSplit, 2); _body.Children.Add(_leftSplit);
+        Grid documentArea = new() { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"), Background = StudioShellChrome.Canvas };
+        StackPanel tabStrip = new() { Orientation = Orientation.Horizontal, Spacing = 0 };
+        tabStrip.Children.Add(_searchTab);
+        tabStrip.Children.Add(_searchTabClose);
+        tabStrip.Children.Add(_tabs);
+        Button openDocument = new() { Content = "+", Width = 38, Background = Brushes.Transparent, Foreground = StudioShellChrome.Foreground, BorderThickness = new Thickness(0) };
+        Avalonia.Automation.AutomationProperties.SetName(openDocument, "Open a script document");
+        openDocument.Click += async (_, _) => await QuickOpenAsync().ConfigureAwait(true);
+        tabStrip.Children.Add(openDocument);
         documentArea.Children.Add(new Border
         {
-            MinHeight = 36, Background = UiTheme.Surface, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1),
-            Child = new ScrollViewer { Content = _tabs, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
+            MinHeight = 40, Background = StudioShellChrome.Card, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = new ScrollViewer { Content = tabStrip, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }
         });
-        _breadcrumbBar = new Border { Child = _breadcrumb, Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(0, 0, 0, 1) };
+        Grid breadcrumb = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Background = StudioShellChrome.Canvas };
+        breadcrumb.Children.Add(_breadcrumb);
+        breadcrumb.Children.Add(BuildScriptActions());
+        _breadcrumbBar = new Border { Child = breadcrumb, Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(0, 0, 0, 1) };
         Grid.SetRow(_breadcrumbBar, 1);
         documentArea.Children.Add(_breadcrumbBar);
-        // The Monaco WebView must stay attached to the visual tree for the window's lifetime;
-        // detaching a native WebView destroys its page and every open model.
+        Control conflictBar = BuildExternalConflictBar();
+        Grid.SetRow(conflictBar, 2);
+        documentArea.Children.Add(conflictBar);
+        // Keep the native WebView attached for the full window lifetime; detaching it destroys editor state.
         _monaco.MaxHeight = 0;
-        Grid surface = new() { Children = { _center, _monaco } };
-        Grid.SetRow(surface, 2);
+        Grid surface = new() { Background = StudioShellChrome.Canvas, Children = { _center, _monaco } };
+        Grid.SetRow(surface, 3);
         documentArea.Children.Add(surface);
-        Border centerFrame = new() { Background = UiTheme.Console, BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Child = documentArea };
-        Grid.SetColumn(centerFrame, 2); _body.Children.Add(centerFrame);
-        _rightSplit = Splitter(GridResizeDirection.Columns); Grid.SetColumn(_rightSplit, 3); _body.Children.Add(_rightSplit);
-        _inspectorFrame = Frame("DETAILS", new ScrollViewer { Content = _inspector }); Grid.SetColumn(_inspectorFrame, 4); _body.Children.Add(_inspectorFrame);
+        Grid footer = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Background = StudioShellChrome.Card, Margin = new Thickness(0) };
+        footer.Children.Add(_statusLeft);
+        _buildState.Margin = new Thickness(12, 4);
+        Grid.SetColumn(_buildState, 1);
+        footer.Children.Add(_buildState);
+        _statusCursor.Margin = new Thickness(12, 4);
+        Grid.SetColumn(_statusCursor, 2);
+        footer.Children.Add(_statusCursor);
+        Grid.SetRow(footer, 4);
+        documentArea.Children.Add(footer);
+        Border centerFrame = new() { Background = StudioShellChrome.Canvas, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), Child = documentArea };
+        Grid.SetColumn(centerFrame, 3); _body.Children.Add(centerFrame);
 
         GridSplitter horizontal = Splitter(GridResizeDirection.Rows); Grid.SetRow(horizontal, 2); _root.Children.Add(horizontal);
         _bottom = new TabControl
         {
+            Background = StudioShellChrome.Canvas,
+            Foreground = StudioShellChrome.Secondary,
+            FontSize = 12,
             ItemsSource = new object[]
             {
-                BottomTab("Problems", _problems), BottomTab("Console", _console), BottomTab("Runtime", _runtimePanel),
+                BottomTab("Output", _console), BottomTab("Problems", _problems), BuildTestsTab(),
+                BottomTab("Build", _buildPanel), BottomTab("Diagnostics", _diagnosticsPanel), BottomTab("Runtime", _runtimePanel),
                 BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
             }
         };
-        Grid.SetRow(_bottom, 3);
-        _root.Children.Add(_bottom);
-        Border status = new()
+        _bottom.SelectionChanged += (_, _) => RefreshEventsPanel();
+        _bottomToggle = new Button
         {
-            Background = UiTheme.Raised, Padding = new Thickness(12, 3),
-            Child = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 18,
-                Children = { _statusLeft }
-            }
+            Content = _bottomCollapsed ? "⌃" : "⌄",
+            Width = 34,
+            Height = 28,
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = StudioShellChrome.Canvas,
+            Foreground = StudioShellChrome.Foreground,
+            BorderThickness = new Thickness(0)
         };
-        Grid statusGrid = (Grid)status.Child;
-        Grid.SetColumn(_statusCursor, 1); statusGrid.Children.Add(_statusCursor);
-        Grid.SetColumn(_buildState, 2); statusGrid.Children.Add(_buildState);
-        Grid.SetColumn(_runtimeState, 3); statusGrid.Children.Add(_runtimeState);
-        Grid.SetRow(status, 4);
-        _root.Children.Add(status);
+        _bottomToggle.Click += (_, _) => ToggleBottom();
+        Grid bottom = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        bottom.Children.Add(_bottom);
+        Grid.SetColumn(_bottomToggle, 1);
+        bottom.Children.Add(_bottomToggle);
+        Grid.SetRow(bottom, 3);
+        _root.Children.Add(bottom);
         return _root;
+    }
+
+    private Control BuildActivityRail()
+    {
+        RenderActivityRail();
+        return _activityRail;
+    }
+
+    private void RenderActivityRail() =>
+        _activityRail.Child = StudioShellChrome.BuildActivityButtons(_activity, SetActivityAsync);
+
+    private async Task SetActivityAsync(StudioActivity activity)
+    {
+        if (_activity == activity) return;
+        _activity = activity;
+        _preferences.SetActivity(activity);
+        RenderActivityRail();
+        UpdateActivityChrome();
+        if (activity == StudioActivity.Runtime)
+        {
+            SetRuntimeNavigationItems();
+            RenderRuntimeDashboard();
+            return;
+        }
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        if (activity == StudioActivity.Search) RenderSearchActivity();
+        else RenderActive();
+    }
+
+    private void UpdateActivityChrome()
+    {
+        _explorerTitle.Text = StudioActivityModel.ExplorerTitle(_activity);
+        _filter.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows;
+        _filter.PlaceholderText = _activity switch
+        {
+            StudioActivity.Automations => "Search automations…",
+            StudioActivity.Scripts => "Search scripts…",
+            StudioActivity.Workflows => "Search workflows…",
+            _ => "Filter"
+        };
+        _newButton.Content = _activity switch
+        {
+            StudioActivity.Scripts => "+",
+            StudioActivity.Search => "+ New Search",
+            _ => "+ New"
+        };
+        _refreshScriptsButton.IsVisible = _activity == StudioActivity.Scripts;
+        _scriptActions.IsVisible = _activity == StudioActivity.Scripts;
+        _newButton.IsVisible = _activity is StudioActivity.Automations or StudioActivity.Scripts or StudioActivity.Workflows or StudioActivity.Search;
+        if (_activity == StudioActivity.Search) RefreshSearchSidebar();
+        else _explorerTreeScroll.Content = _navigator;
+        UpdateSearchTab();
+        UpdateOrganizeButton();
     }
 
     private Control BuildExplorerHeader()
     {
-        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(8, 6) };
-        header.Children.Add(new TextBlock { Text = "EXPLORER", Foreground = UiTheme.Accent, FontWeight = FontWeight.SemiBold, FontSize = NexTypography.Metadata, VerticalAlignment = VerticalAlignment.Center });
-        Button add = UiTheme.QuietButton("+ New");
-        add.Click += (_, _) =>
+        Grid header = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 5, Margin = new Thickness(10, 12) };
+        header.Children.Add(_explorerTitle);
+        _organizeButton = UiTheme.QuietButton("Move");
+        _organizeButton.Foreground = StudioShellChrome.Foreground;
+        _organizeButton.BorderBrush = StudioShellChrome.Border;
+        _organizeButton.IsVisible = false;
+        _organizeButton.Click += async (_, _) => await OrganizeSelectedAsync().ConfigureAwait(true);
+        Grid.SetColumn(_organizeButton, 1);
+        header.Children.Add(_organizeButton);
+
+        _refreshScriptsButton = UiTheme.QuietButton("↻");
+        _refreshScriptsButton.Width = 34;
+        _refreshScriptsButton.Foreground = StudioShellChrome.Foreground;
+        _refreshScriptsButton.BorderBrush = StudioShellChrome.Border;
+        Avalonia.Automation.AutomationProperties.SetName(_refreshScriptsButton, "Refresh scripts");
+        ToolTip.SetTip(_refreshScriptsButton, "Refresh scripts");
+        _refreshScriptsButton.Click += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
+        Grid.SetColumn(_refreshScriptsButton, 2);
+        header.Children.Add(_refreshScriptsButton);
+
+        _newButton = UiTheme.QuietButton("+ New");
+        _newButton.Foreground = StudioShellChrome.Foreground;
+        _newButton.BorderBrush = StudioShellChrome.Border;
+        _newButton.Click += async (_, _) =>
         {
+            if (_activity == StudioActivity.Scripts)
+            {
+                ShowNewScriptMenu();
+                return;
+            }
+            if (_activity == StudioActivity.Search)
+            {
+                BeginNewSearch();
+                return;
+            }
+
             ContextMenu menu = new();
-            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+            StudioDocumentKind[] kinds = StudioDocumentKinds.AutomationKinds
+                .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind))
+                .ToArray();
+            foreach (StudioDocumentKind kind in kinds)
             {
                 MenuItem item = new() { Header = kind.Label() };
                 StudioDocumentKind captured = kind;
                 item.Click += async (_, _) => await CreateAutomationAsync(captured).ConfigureAwait(true);
                 menu.Items.Add(item);
             }
-            menu.Open(add);
+            if (kinds.Length > 0) menu.Items.Add(new Separator());
+            foreach (StudioDocumentKind kind in kinds.Where(kind => kind != StudioDocumentKind.Workflow))
+            {
+                MenuItem folder = new() { Header = $"New {kind.CategoryLabel()} Folder…" };
+                StudioDocumentKind captured = kind;
+                folder.Click += async (_, _) => await CreateFolderAsync(captured).ConfigureAwait(true);
+                menu.Items.Add(folder);
+            }
+            menu.Open(_newButton);
         };
-        Grid.SetColumn(add, 1);
-        header.Children.Add(add);
+        Grid.SetColumn(_newButton, 3);
+        header.Children.Add(_newButton);
+        UpdateActivityChrome();
         return header;
     }
 
-    private Control BuildToolbar()
+    private void ShowNewScriptMenu()
     {
-        Grid grid = new() { ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"), ColumnSpacing = 10, Margin = new Thickness(10, 7) };
-        grid.Children.Add(new TextBlock
+        ContextMenu menu = new();
+        MenuItem package = new() { Header = "New Package…" };
+        package.Click += async (_, _) => await CreatePackageAsync().ConfigureAwait(true);
+        menu.Items.Add(package);
+
+        (string PackageId, string ParentPath)? location = SelectedScriptLocation();
+        if (location is not null)
         {
-            Text = "Automation Studio", Foreground = UiTheme.Text, FontSize = NexTypography.Display,
-            FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center
-        });
+            menu.Items.Add(new Separator());
+            MenuItem folder = new() { Header = "New Folder…" };
+            folder.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+            menu.Items.Add(folder);
+            menu.Items.Add(new Separator());
+            AddScriptFileMenuItem(menu, "New TypeScript File…", ".ts");
+            AddScriptFileMenuItem(menu, "New JavaScript File…", ".js");
+            AddScriptFileMenuItem(menu, "New JSON File…", ".json");
+        }
+        menu.Open(_newButton);
+    }
 
-        StackPanel profile = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
-        profile.Children.Add(new TextBlock { Text = "Profile", Foreground = UiTheme.Muted, VerticalAlignment = VerticalAlignment.Center });
-        profile.Children.Add(_profile);
-        Grid.SetColumn(profile, 1); grid.Children.Add(profile);
+    private void AddScriptFileMenuItem(ContextMenu menu, string label, string extension)
+    {
+        MenuItem item = new() { Header = label };
+        item.Click += async (_, _) => await CreateScriptFileAsync(extension).ConfigureAwait(true);
+        menu.Items.Add(item);
+    }
 
-        StackPanel commands = new() { Orientation = Orientation.Horizontal, Spacing = 5, HorizontalAlignment = HorizontalAlignment.Center };
-        commands.Children.Add(Button("Save", SaveActiveAsync));
-        commands.Children.Add(Button("Save All", SaveAllAsync));
-        commands.Children.Add(Button("New Package", CreatePackageAsync));
-        commands.Children.Add(Button("New TS", CreateTypeScriptFileAsync));
-        commands.Children.Add(Button("Build", BuildActivePackageAsync));
-        commands.Children.Add(Button("Run", RunFunctionAsync));
-        commands.Children.Add(Button("Search", SearchAsync));
-        _bottomToggle = Button("Panel ▾", () => { ToggleBottom(); return Task.CompletedTask; });
-        commands.Children.Add(_bottomToggle);
-        Grid.SetColumn(commands, 2); grid.Children.Add(commands);
+    private (string PackageId, string ParentPath)? SelectedScriptLocation()
+    {
+        if (_navigator.SelectedItem is TreeViewItem selected && _nodes.TryGetValue(selected, out StudioNode? node) &&
+            node.PackageId is { } packageId)
+        {
+            return node.Kind switch
+            {
+                NodeKind.Package => (packageId, string.Empty),
+                NodeKind.SourceFolder when node.Path is { } path => (packageId, path),
+                NodeKind.SourceFile when node.Path is { } path => (packageId, ScriptExplorerTree.ParentPath(path)),
+                _ => null
+            };
+        }
+        return _activePackage is null ? null : (_activePackage.Definition.PackageId, string.Empty);
+    }
 
-        Button palette = Button("Quick Open  ⌘P", QuickOpenAsync);
-        Grid.SetColumn(palette, 3); grid.Children.Add(palette);
-        return grid;
+    private Control BuildHeader()
+    {
+        StackPanel profile = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                new TextBlock { Text = "Profile:", Foreground = StudioShellChrome.Foreground, VerticalAlignment = VerticalAlignment.Center },
+                _profile
+            }
+        };
+        StackPanel connection = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                _connectionIndicator,
+                _connectionStatus
+            }
+        };
+        _connectionIndicator.VerticalAlignment = VerticalAlignment.Center;
+        _connectionStatus.VerticalAlignment = VerticalAlignment.Center;
+        return StudioShellChrome.BuildHeader(
+            profile,
+            connection,
+            RouteGlobalSearchAsync,
+            () => StudioSettingsRequested?.Invoke() ?? Task.CompletedTask);
+    }
+
+    private Control BuildScriptActions()
+    {
+        StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 3, 8, 3), VerticalAlignment = VerticalAlignment.Center };
+        _scriptActions = actions;
+        actions.IsVisible = _activity == StudioActivity.Scripts;
+        Button build = UiTheme.QuietButton("⚒  Build");
+        build.Foreground = StudioShellChrome.Foreground;
+        build.BorderBrush = StudioShellChrome.Border;
+        build.Click += async (_, _) => await BuildActivePackageAsync().ConfigureAwait(true);
+        Button test = UiTheme.QuietButton("▶  Test");
+        test.Foreground = StudioShellChrome.Foreground;
+        test.BorderBrush = StudioShellChrome.Border;
+        test.Click += async (_, _) =>
+        {
+            if (_activePackage is null) _testState.Text = "Select a script package first.";
+            else await RunTestsAsync([_activePackage.Definition.PackageId]).ConfigureAwait(true);
+        };
+        Button testOptions = UiTheme.QuietButton("⌄");
+        testOptions.Foreground = StudioShellChrome.Foreground;
+        testOptions.BorderBrush = StudioShellChrome.Border;
+        testOptions.Click += (_, _) =>
+        {
+            ContextMenu menu = new();
+            (string Label, Func<Task> Action)[] choices =
+            [
+                ("Run all packages", () => RunTestsAsync(_packages.Select(package => package.Definition.PackageId).ToArray())),
+                ("Run active file", () => _documents.Active is { IsScript: true, PackageId: { } packageId, Path: { } path }
+                    ? RunTestsAsync([packageId], new Dictionary<string, IReadOnlyList<string>> { [packageId] = [path] })
+                    : Task.CompletedTask),
+                ("Re-run failed", RerunFailedTestsAsync)
+            ];
+            foreach ((string label, Func<Task> action) in choices)
+            {
+                MenuItem item = new() { Header = label };
+                item.Click += async (_, _) => await action().ConfigureAwait(true);
+                menu.Items.Add(item);
+            }
+            menu.Open(testOptions);
+        };
+        actions.Children.Add(build);
+        actions.Children.Add(test);
+        actions.Children.Add(testOptions);
+        return actions;
+    }
+
+    private async Task RouteGlobalSearchAsync(string query)
+    {
+        await SetActivityAsync(StudioActivity.Search).ConfigureAwait(true);
+        _searchInput.Text = query;
+        await RunSearchAsync().ConfigureAwait(true);
+        if (GlobalSearchRequested is { } searchRequested)
+            await searchRequested(query).ConfigureAwait(true);
+    }
+
+    private void UpdateConnectionStatus(ConnectionStatus status)
+    {
+        _connectionStatus.Text = status.ToString();
+        _connectionIndicator.Background = status switch
+        {
+            ConnectionStatus.Connected => StudioShellChrome.Success,
+            ConnectionStatus.Connecting => StudioShellChrome.Connecting,
+            _ => StudioShellChrome.Secondary
+        };
+    }
+
+    private void ShowPackageOperationsMenu(Button anchor)
+    {
+        ContextMenu menu = new();
+        MenuItem restore = new() { Header = "Restore from Lockfile" };
+        restore.Click += async (_, _) => await RestorePackagesAsync().ConfigureAwait(true);
+        MenuItem install = new() { Header = "Install / Resolve" };
+        install.Click += async (_, _) => await InstallPackagesAsync().ConfigureAwait(true);
+        MenuItem update = new() { Header = "Update All" };
+        update.Click += async (_, _) => await UpdatePackagesAsync().ConfigureAwait(true);
+        MenuItem clean = new() { Header = "Clean Generated Artifacts" };
+        clean.Click += async (_, _) => await CleanPackagesAsync().ConfigureAwait(true);
+        menu.Items.Add(restore);
+        menu.Items.Add(install);
+        menu.Items.Add(update);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(clean);
+        menu.Open(anchor);
+    }
+
+    private Control BuildExternalConflictBar()
+    {
+        Button compare = Button("Compare", CompareExternalConflictAsync);
+        _externalConflictReload = Button("Reload from Disk", ReloadExternalConflictAsync);
+        Button keep = Button("Keep Editor Version", KeepExternalEditorVersionAsync);
+        StackPanel actions = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { compare, _externalConflictReload, keep }
+        };
+        Grid content = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        content.Children.Add(_externalConflictText);
+        Grid.SetColumn(actions, 1);
+        content.Children.Add(actions);
+        _externalConflictBar.Background = StudioShellChrome.Card;
+        _externalConflictBar.BorderBrush = StudioShellChrome.Border;
+        _externalConflictBar.BorderThickness = new Thickness(0, 0, 0, 1);
+        _externalConflictBar.Padding = new Thickness(12, 7);
+        _externalConflictBar.Child = content;
+        return _externalConflictBar;
     }
 
     private void TogglePane(Border frame, GridSplitter splitter, int column, double width)
@@ -242,8 +616,9 @@ internal sealed class AutomationStudioWindow : Window
         foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
             foreach (AutomationEntryInfo entry in collections.Entries(kind))
             {
-                StudioDocumentKind k = kind; int i = entry.Index;
-                items.Add(($"{kind.Label()}  ·  {entry.Name}", () => { OpenAutomation(k, i); return Task.CompletedTask; }));
+                StudioDocumentKind k = kind;
+                string automationId = _organization.IdFor(kind, entry.Index);
+                items.Add(($"{kind.Label()}  ·  {entry.Name}", () => { OpenAutomation(k, automationId); return Task.CompletedTask; }));
             }
         foreach (ScriptPackageSnapshot package in _packages)
             foreach (ScriptWorkspaceSourceFile file in await _workspace.ListSourceFilesAsync(SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true))
@@ -282,8 +657,8 @@ internal sealed class AutomationStudioWindow : Window
     {
         _bottomCollapsed = !_bottomCollapsed;
         _root.RowDefinitions[3].Height = new GridLength(_bottomCollapsed ? StudioUiPreferences.CollapsedBottomHeight : _preferences.BottomHeight);
-        _bottom.IsVisible = !_bottomCollapsed;
-        _bottomToggle.Content = _bottomCollapsed ? "Panel ▴" : "Panel ▾";
+        _bottomToggle.Content = _bottomCollapsed ? "⌃" : "⌄";
+        if (!_bottomCollapsed) RefreshEventsPanel();
     }
 
     private static Button Button(string label, Func<Task> action)
@@ -297,7 +672,7 @@ internal sealed class AutomationStudioWindow : Window
     {
         ResizeDirection = direction,
         ResizeBehavior = GridResizeBehavior.PreviousAndNext,
-        Background = UiTheme.Divider
+        Background = StudioShellChrome.Border
     };
 
     private static Border Frame(string title, Control content, bool withHeader = true)
@@ -314,23 +689,52 @@ internal sealed class AutomationStudioWindow : Window
             Grid.SetRow(content, 1); grid.Children.Add(content);
             child = grid;
         }
-        return new Border { BorderBrush = UiTheme.Divider, BorderThickness = new Thickness(1), Background = UiTheme.Surface, Child = child };
+        return new Border { BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), Background = StudioShellChrome.Explorer, Child = child };
     }
 
     private static TabItem BottomTab(string header, Control content) => new()
     {
-        Header = header,
-        Content = new ScrollViewer { Content = content, Padding = new Thickness(8) }
+        Header = new TextBlock
+        {
+            Text = header,
+            FontSize = 12,
+            Foreground = StudioShellChrome.Secondary,
+            VerticalAlignment = VerticalAlignment.Center
+        },
+        Content = new ScrollViewer { Content = content, Padding = new Thickness(8), Background = StudioShellChrome.Canvas }
     };
 
     // ───────────────────────────── Lifecycle ─────────────────────────────
 
     private async void WindowOpened(object? sender, EventArgs e)
     {
-        await RefreshProfilesAsync().ConfigureAwait(true);
-        await RefreshNavigatorAsync().ConfigureAwait(true);
-        RenderActive();
-        _ = Task.Run(() => ConsumeEventsAsync(_cts.Token), CancellationToken.None);
+        CancellationToken cancellationToken = _cts.Token;
+        try
+        {
+            await RefreshProfilesAsync().ConfigureAwait(true);
+            if (cancellationToken.IsCancellationRequested) return;
+            RestartWorkspaceWatcher();
+            if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+            {
+                SetRuntimeNavigationItems();
+                RenderRuntimeDashboard();
+                await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await RefreshNavigatorAsync().ConfigureAwait(true);
+                if (cancellationToken.IsCancellationRequested) return;
+                RenderActive();
+            }
+            if (cancellationToken.IsCancellationRequested) return;
+            _ = Task.Run(() => ConsumeEventsAsync(cancellationToken), CancellationToken.None);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+                AddProblem("Studio", $"Unable to initialize Automation Studio: {exception.Message}");
+        }
     }
 
     private async Task RefreshProfilesAsync()
@@ -339,7 +743,7 @@ internal sealed class AutomationStudioWindow : Window
         try
         {
             IReadOnlyList<ConnectionProfile> profiles = _runtime.ConnectionProfiles;
-            string selected = (_profile.SelectedItem as ConnectionProfile)?.Id ?? _runtime.ActiveConnectionProfile.Id;
+            string selected = _session.Current.ProfileId;
             _profile.ItemsSource = profiles;
             _profile.SelectedItem = profiles.FirstOrDefault(item => item.Id.Equals(selected, StringComparison.Ordinal))
                 ?? profiles.FirstOrDefault();
@@ -351,70 +755,680 @@ internal sealed class AutomationStudioWindow : Window
     private async void ProfileSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_refreshingProfiles) return;
-        if (_documents.Dirty.Any())
+        if (_profile.SelectedItem is not ConnectionProfile selectedProfile) return;
+        long generation = _profileTransitions.Request();
+        string targetProfileId = selectedProfile.Id;
+
+        try
         {
-            AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
-            await RefreshProfilesAsync().ConfigureAwait(true);
-            return;
+            if (!await _profileTransitions.EnterLatestAsync(generation, _cts.Token).ConfigureAwait(true)) return;
+            try
+            {
+                if (!_profileTransitions.IsCurrent(generation) ||
+                    targetProfileId.Equals(_session.Current.ProfileId, StringComparison.Ordinal)) return;
+                if (_documents.Dirty.Any())
+                {
+                    AddProblem("Warning", "Save or close dirty documents before changing profile scope.");
+                    await RefreshProfilesAsync().ConfigureAwait(true);
+                    return;
+                }
+
+                StudioSessionSnapshot previous = _session.Current;
+                _profileDocumentSessions.Capture(previous.ProfileId, _documents.Documents, _documents.Active?.Key);
+                await CloseSessionDocumentsAsync(previous.CancellationToken).ConfigureAwait(true);
+                if (!_profileTransitions.IsCurrent(generation))
+                {
+                    if (_session.IsCurrent(previous) && _profile.SelectedItem is ConnectionProfile latestProfile &&
+                        latestProfile.Id.Equals(previous.ProfileId, StringComparison.Ordinal) &&
+                        _profileDocumentSessions.TryGet(previous.ProfileId, out StudioDocumentSessionSnapshot snapshot))
+                    {
+                        await RestoreSessionDocumentsAsync(previous, snapshot.Documents, snapshot.ActiveDocumentKey).ConfigureAwait(true);
+                        _profileDocumentSessions.Remove(previous.ProfileId);
+                    }
+                    return;
+                }
+
+                _pendingLanguageDiagnostics.Clear();
+                RefreshProblems();
+                CancelTests("Profile changed.");
+                ResetTestsPanel("Select a package to discover tests.");
+                InvalidateSearchForProfileChange();
+                InvalidateRuntimeRefreshForProfileChange();
+                _session.SwitchProfile(targetProfileId);
+                _diagnostics.ResolveSourcesByPrefix(targetProfileId, "tests:");
+                Interlocked.Increment(ref _navigatorRefreshGeneration);
+                _refreshingNavigator = false;
+                _packages = [];
+                ClearRuntimeEvents();
+                _nodes.Clear();
+                _navigator.ItemsSource = Array.Empty<object>();
+                _activePackage = null;
+                RefreshProblems();
+                await RefreshRuntimePanelAsync().ConfigureAwait(true);
+                _diagnostics.ResolveSourcesByPrefix(previous.ProfileId, "tests:");
+                try
+                {
+                    await _typescript.SwitchProfileAsync(targetProfileId, _cts.Token).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    string message = $"Could not switch TypeScript language service to profile '{targetProfileId}': {exception.Message}";
+                    _diagnostics.ReplaceSource(targetProfileId, "typescript-service",
+                        [new StudioDiagnostic(targetProfileId, "typescript-service", "switch", "Error", message)]);
+                    RefreshProblems();
+                    _pendingLanguageDiagnostics.Clear();
+                    _ = _monaco.SetLanguageServerAvailableAsync(false);
+                    ShowLanguageServerFailure(message);
+                }
+                RestartWorkspaceWatcher();
+                if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+                {
+                    SetRuntimeNavigationItems();
+                    RenderRuntimeDashboard();
+                    await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+                }
+                else
+                {
+                    await RefreshNavigatorAsync().ConfigureAwait(true);
+                }
+                if (_profileTransitions.IsCurrent(generation) &&
+                    _profileDocumentSessions.TryGet(targetProfileId, out StudioDocumentSessionSnapshot targetSnapshot))
+                {
+                    await RestoreSessionDocumentsAsync(_session.Current, targetSnapshot.Documents, targetSnapshot.ActiveDocumentKey).ConfigureAwait(true);
+                    if (_profileTransitions.IsCurrent(generation)) _profileDocumentSessions.Remove(targetProfileId);
+                }
+                if (_activity == StudioActivity.Search && !string.IsNullOrWhiteSpace(_searchInput.Text))
+                    await RunSearchAsync().ConfigureAwait(true);
+            }
+            finally
+            {
+                _profileTransitions.Exit();
+            }
         }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+    }
+
+    private async Task RestoreSessionDocumentsAsync(
+        StudioSessionSnapshot session,
+        IReadOnlyList<StudioDocument> documents,
+        string? activeDocumentKey)
+    {
+        foreach (StudioDocument document in documents)
+        {
+            if (!_session.IsCurrent(session)) return;
+            if (document.IsScript && document.PackageId is not null && document.Path is not null)
+            {
+                ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(
+                    session.ProfileId, document.PackageId, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                if (package is null)
+                {
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because package '{document.PackageId}' no longer exists.");
+                    continue;
+                }
+                try
+                {
+                    await OpenSourceAsync(session, document.PackageId, document.Path).ConfigureAwait(true);
+                }
+                catch (FileNotFoundException)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because its source file no longer exists.");
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    AddProblem("Session", $"Skipped restoring '{document.Title}' because its source directory no longer exists.");
+                }
+            }
+            else
+                _documents.OpenOrFocus(document);
+        }
+
+        if (activeDocumentKey is not null && _documents.Activate(activeDocumentKey))
+        {
+            StudioDocument? activeDocument = _documents.Find(activeDocumentKey);
+            if (activeDocument?.IsScript == true)
+            {
+                if (activeDocument.PackageId is not null)
+                    await SelectPackageAsync(session, activeDocument.PackageId).ConfigureAwait(true);
+                await _monaco.SetActiveDocumentAsync(activeDocumentKey, session.CancellationToken).ConfigureAwait(true);
+            }
+            else
+            {
+                RenderActive();
+            }
+        }
+    }
+
+    private async Task CloseSessionDocumentsAsync(CancellationToken cancellationToken)
+    {
+        foreach (StudioDocument document in _documents.Documents.Where(document => document.IsScript).ToArray())
+        {
+            try
+            {
+                await _monaco.CloseDocumentAsync(document.Key, cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
         CloseAllEditors();
         _documents.CloseAll();
-        _activePackage = null;
-        await RefreshNavigatorAsync().ConfigureAwait(true);
+        _textModels.Clear();
+        _ignoredMonacoChanges.Clear();
+        _scriptSelections.Clear();
+    }
+
+    private void RestartWorkspaceWatcher()
+    {
+        if (_workspaceWatcher is not null)
+        {
+            _workspaceWatcher.Changed -= WorkspaceExternalChanged;
+            _workspaceWatcher.Dispose();
+            _workspaceWatcher = null;
+        }
+        try
+        {
+            _workspaceWatcher = _workspace.WatchProfile(SelectedProfileId);
+            _workspaceWatcher.Changed += WorkspaceExternalChanged;
+        }
+        catch (Exception exception)
+        {
+            AddProblem("Scripts", $"Unable to watch the script workspace: {exception.Message}");
+        }
     }
 
     private void WorkspaceChanged(object? sender, EventArgs e)
     {
         if (_cts.IsCancellationRequested) return;
-        Dispatcher.UIThread.Post(async () => await RefreshNavigatorAsync().ConfigureAwait(true));
+        Dispatcher.UIThread.Post(async () =>
+        {
+            if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+            {
+                await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+                return;
+            }
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        });
+    }
+
+    private void WorkspaceExternalChanged(object? sender, ScriptWorkspaceExternalChangesEventArgs e)
+    {
+        if (_cts.IsCancellationRequested) return;
+        Dispatcher.UIThread.Post(async () =>
+        {
+            if (_cts.IsCancellationRequested ||
+                !e.ProfileId.Equals(SelectedProfileId, StringComparison.Ordinal)) return;
+            StudioSessionSnapshot snapshot = _session.Current;
+            if (!_session.IsCurrent(snapshot)) return;
+            try
+            {
+                await HandleExternalWorkspaceChangesAsync(e.Changes).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                AddProblem("Scripts", $"External file change handling failed: {exception.Message}");
+            }
+        });
+    }
+
+    private async Task HandleExternalWorkspaceChangesAsync(IReadOnlyList<ScriptWorkspaceExternalChange> changes)
+    {
+        foreach (ScriptWorkspaceExternalChange change in changes)
+        {
+            if (!change.ProfileId.Equals(SelectedProfileId, StringComparison.Ordinal)) continue;
+            switch (change.Kind)
+            {
+                case ScriptWorkspaceExternalChangeKind.Created:
+                case ScriptWorkspaceExternalChangeKind.Changed:
+                    await HandleExternalFileChangedAsync(change).ConfigureAwait(true);
+                    break;
+                case ScriptWorkspaceExternalChangeKind.Deleted:
+                    await HandleExternalPathDeletedAsync(change).ConfigureAwait(true);
+                    break;
+                case ScriptWorkspaceExternalChangeKind.Renamed:
+                    await HandleExternalPathRenamedAsync(change).ConfigureAwait(true);
+                    break;
+            }
+        }
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        RenderExternalConflict();
+    }
+
+    private async Task HandleExternalFileChangedAsync(ScriptWorkspaceExternalChange change)
+    {
+        if (!ScriptWorkspaceService.IsSupportedSourcePath(change.RelativePath)) return;
+        string uri = SourceDocumentUri(change.PackageId, change.RelativePath);
+        if (_documents.Find(uri) is not { IsScript: true } document) return;
+        (bool exists, string? diskContent) = await TryReadSourceAsync(change.PackageId, change.RelativePath).ConfigureAwait(true);
+        if (!exists || diskContent is null)
+        {
+            await HandleExternalPathDeletedAsync(change with { Kind = ScriptWorkspaceExternalChangeKind.Deleted }).ConfigureAwait(true);
+            return;
+        }
+        if (_textModels.MatchesBaseline(uri, diskContent)) return;
+
+        if (document.IsDirty)
+        {
+            if (_textModels.RecordConflict(uri, StudioExternalFileChangeKind.Modified, diskContent))
+                AddProblem("Scripts", $"{change.PackageId}/{change.RelativePath} changed on disk; unsaved editor changes were preserved.");
+            return;
+        }
+
+        _scriptSelections.TryGetValue(uri, out MonacoSelectionChanged? selection);
+        _ignoredMonacoChanges.Add(uri);
+        try
+        {
+            await _monaco.SetDocumentContentAsync(uri, diskContent, _cts.Token).ConfigureAwait(true);
+            if (selection is not null)
+                await _monaco.RevealLocationAsync(uri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+        }
+        catch
+        {
+            _ignoredMonacoChanges.Remove(uri);
+            throw;
+        }
+        _textModels.MarkSaved(uri, diskContent);
+        _documents.SetDirty(uri, false);
+        AddConsole($"Reloaded external change: {change.PackageId}/{change.RelativePath}");
+    }
+
+    private async Task HandleExternalPathDeletedAsync(ScriptWorkspaceExternalChange change)
+    {
+        if (string.IsNullOrWhiteSpace(change.RelativePath))
+        {
+            _diagnostics.ResolveSource(change.ProfileId, "tests:" + change.PackageId);
+            RefreshProblems();
+        }
+        StudioDocument[] affected = OpenScriptDocuments(change.PackageId, change.RelativePath).ToArray();
+        foreach (StudioDocument document in affected)
+        {
+            if (document.IsDirty)
+            {
+                if (_textModels.RecordConflict(document.Key, StudioExternalFileChangeKind.Deleted, null))
+                    AddProblem("Scripts", $"{document.PackageId}/{document.Path} was deleted on disk; the unsaved editor buffer was preserved.");
+                continue;
+            }
+
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+            _documents.Close(document.Key);
+            AddConsole($"Closed externally deleted file: {document.PackageId}/{document.Path}");
+        }
+    }
+
+    private async Task HandleExternalPathRenamedAsync(ScriptWorkspaceExternalChange change)
+    {
+        if (string.IsNullOrWhiteSpace(change.PreviousRelativePath)) return;
+        string sourcePath = change.PreviousRelativePath;
+        string destinationPath = change.RelativePath;
+        StudioDocument[] affected = OpenScriptDocuments(change.PackageId, sourcePath).ToArray();
+        bool hasDirty = affected.Any(document => document.IsDirty);
+        string? previousActiveKey = _documents.Active?.Key;
+        Dictionary<string, string> movedUris = new(StringComparer.Ordinal);
+
+        foreach (StudioDocument document in affected)
+        {
+            string newPath = ScriptExplorerTree.Rebase(document.Path!, sourcePath, destinationPath);
+            (bool exists, string? diskContent) = await TryReadSourceAsync(change.PackageId, newPath).ConfigureAwait(true);
+            if (document.IsDirty)
+            {
+                if (_textModels.RecordConflict(
+                        document.Key,
+                        StudioExternalFileChangeKind.Renamed,
+                        exists ? diskContent : null,
+                        newPath))
+                    AddProblem("Scripts", $"{document.PackageId}/{document.Path} moved on disk to {newPath}; the unsaved editor buffer was preserved.");
+                continue;
+            }
+
+            if (!exists) continue;
+            string newUri = SourceDocumentUri(change.PackageId, newPath);
+            movedUris[document.Key] = newUri;
+            _scriptSelections.TryGetValue(document.Key, out MonacoSelectionChanged? selection);
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+            _documents.Close(document.Key);
+            await OpenSourceAsync(change.PackageId, newPath).ConfigureAwait(true);
+            if (selection is not null)
+            {
+                _scriptSelections[newUri] = selection with { Uri = newUri };
+                await _monaco.RevealLocationAsync(newUri, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+            }
+            AddConsole($"Followed external move: {change.PackageId}/{document.Path} → {newPath}");
+        }
+
+        if (!hasDirty)
+            await RewriteExternalRenameReferencesAsync(change.PackageId, sourcePath, destinationPath).ConfigureAwait(true);
+
+        if (previousActiveKey is not null)
+        {
+            if (movedUris.TryGetValue(previousActiveKey, out string? movedActive)) _documents.Activate(movedActive);
+            else if (_documents.Find(previousActiveKey) is not null) _documents.Activate(previousActiveKey);
+        }
+    }
+
+    private IEnumerable<StudioDocument> OpenScriptDocuments(string packageId, string path)
+    {
+        foreach (StudioDocument document in _documents.Documents)
+        {
+            if (!document.IsScript || document.PackageId is null || document.Path is null) continue;
+            if (!document.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrWhiteSpace(path) || ScriptExplorerTree.IsSameOrDescendant(document.Path, path))
+                yield return document;
+        }
+    }
+
+    private async Task RewriteExternalRenameReferencesAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        string[] referencedPaths = _referencesIndex.Build(_runtime.Settings)
+            .Where(reference => reference.FunctionRef.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+                                ScriptExplorerTree.IsSameOrDescendant(reference.FunctionRef.ModulePath, sourcePath))
+            .Select(reference => reference.FunctionRef.ModulePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (referencedPaths.Length == 0) return;
+
+        ClientSettings rewritten = _runtime.Settings;
+        foreach (string oldPath in referencedPaths)
+        {
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            rewritten = _referencesIndex.RewriteModulePath(rewritten, packageId, oldPath, newPath);
+        }
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+    }
+
+    private async Task<(bool Exists, string? Content)> TryReadSourceAsync(string packageId, string relativePath)
+    {
+        try
+        {
+            return (true, await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true));
+        }
+        catch (FileNotFoundException)
+        {
+            return (false, null);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return (false, null);
+        }
     }
 
     // ───────────────────────────── Explorer ─────────────────────────────
 
     private async Task RefreshNavigatorAsync()
     {
-        _packages = await _workspace.ListPackagesAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
-        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
-        string? filter = _filter.Text;
+        string profileId = SelectedProfileId;
+        long generation = Interlocked.Increment(ref _navigatorRefreshGeneration);
         _refreshingNavigator = true;
         try
         {
+            IReadOnlyList<ScriptPackageSnapshot> packages = await _workspace.ListPackagesAsync(profileId, _cts.Token).ConfigureAwait(true);
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
+            AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+            AutomationOrganizationCatalog organization = await _organizationStore.LoadAndReconcileAsync(
+                profileId,
+                collections,
+                _cts.Token).ConfigureAwait(true);
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
+            HashSet<string> packageIds = packages
+                .Select(package => package.Definition.PackageId)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (string source in _diagnostics.Snapshot(profileId)
+                         .Select(diagnostic => diagnostic.Source)
+                         .Where(source => source.StartsWith("tests:", StringComparison.Ordinal))
+                         .Distinct(StringComparer.Ordinal))
+            {
+                if (!packageIds.Contains(source["tests:".Length..]))
+                    _diagnostics.ResolveSource(profileId, source);
+            }
+            _packages = packages;
+            _organization = organization;
+            RefreshProblems();
+            string? filter = _filter.Text;
             _nodes.Clear();
             List<object> roots = [];
-            foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds)
+
+            if (_activity is StudioActivity.Automations or StudioActivity.Workflows)
             {
-                IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
-                TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
-                category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
-                category.ItemsSource = entries
-                    .Where(entry => StudioFilter.Matches(entry.Name, filter))
-                    .Select(entry => Node(new StudioNode(NodeKind.Entry, $"{(entry.Enabled ? "●" : "○")} {entry.Name}", kind, entry.Index)))
-                    .ToArray();
-                roots.Add(category);
+                foreach (StudioDocumentKind kind in StudioDocumentKinds.AutomationKinds
+                             .Where(kind => StudioActivityModel.IncludesAutomationKind(_activity, kind)))
+                {
+                    IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
+                    TreeViewItem category = Node(new StudioNode(NodeKind.Category, $"{kind.CategoryLabel()} ({entries.Count})", kind));
+                    category.IsExpanded = !string.IsNullOrWhiteSpace(filter) || entries.Count > 0 && entries.Count <= 12;
+                    category.ItemsSource = BuildAutomationNodes(kind, entries, filter);
+                    roots.Add(category);
+                }
+            }
+            else if (StudioActivityModel.ShowsScriptPackages(_activity))
+            {
+                foreach (ScriptPackageSnapshot package in packages)
+                {
+                    TreeViewItem item = Node(new StudioNode(NodeKind.Package,
+                        $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
+                    ContextMenu packageMenu = new();
+                    MenuItem packageToggle = new() { Header = package.Definition.Enabled ? "Disable Package" : "Enable Package" };
+                    packageToggle.Click += async (_, _) => await TogglePackageAsync(package.Definition.PackageId).ConfigureAwait(true);
+                    packageMenu.Items.Add(packageToggle);
+                    item.ContextMenu = packageMenu;
+                    IReadOnlyList<ScriptWorkspaceEntry> entries = await _workspace.ListEntriesAsync(
+                        profileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+                    if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
+                    item.IsExpanded = true;
+                    item.ItemsSource = BuildScriptNodes(
+                        package.Definition.PackageId,
+                        entries,
+                        filter,
+                        package.HasNodeModulesDirectory);
+                    roots.Add(item);
+                }
+            }
+            else if (_activity == StudioActivity.Runtime)
+            {
+                roots.AddRange(BuildRuntimeNavigationItems());
             }
 
-            TreeViewItem scripts = Node(new StudioNode(NodeKind.Scripts, "SCRIPTS"));
-            scripts.IsExpanded = true;
-            List<TreeViewItem> packageItems = [];
-            foreach (ScriptPackageSnapshot package in _packages)
-            {
-                TreeViewItem item = Node(new StudioNode(NodeKind.Package,
-                    $"{(package.Definition.Enabled ? "●" : "○")} {package.Definition.Name}", PackageId: package.Definition.PackageId));
-                IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
-                    SelectedProfileId, package.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-                item.ItemsSource = files
-                    .Where(file => StudioFilter.Matches(file.RelativePath, filter))
-                    .Select(file => Node(new StudioNode(NodeKind.SourceFile, file.RelativePath, PackageId: package.Definition.PackageId, Path: file.RelativePath)))
-                    .ToArray();
-                packageItems.Add(item);
-            }
-            scripts.ItemsSource = packageItems;
-            roots.Add(scripts);
+            if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
             _navigator.ItemsSource = roots;
+            await RefreshRuntimePanelAsync().ConfigureAwait(true);
+            if (IsCurrentNavigatorRefresh(profileId, generation)) RefreshReferencePanel();
         }
-        finally { _refreshingNavigator = false; }
-        await RefreshRuntimePanelAsync().ConfigureAwait(true);
-        RefreshReferencePanel();
+        finally
+        {
+            if (generation == Volatile.Read(ref _navigatorRefreshGeneration))
+                _refreshingNavigator = false;
+        }
+    }
+
+    private void SetRuntimeNavigationItems()
+    {
+        _nodes.Clear();
+        _navigator.ItemsSource = BuildRuntimeNavigationItems();
+    }
+
+    private List<TreeViewItem> BuildRuntimeNavigationItems() =>
+    [
+        Node(new StudioNode(NodeKind.RuntimeSection, "Package Status", RuntimeSection: RuntimeSection.PackageStatus)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Active Runtime", RuntimeSection: RuntimeSection.ActiveRuntime)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Diagnostics", RuntimeSection: RuntimeSection.Diagnostics)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Recent Faults", RuntimeSection: RuntimeSection.RecentFaults)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Events", RuntimeSection: RuntimeSection.Events))
+    ];
+
+    private bool IsCurrentNavigatorRefresh(string profileId, long generation) =>
+        generation == Volatile.Read(ref _navigatorRefreshGeneration) &&
+        string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal);
+
+
+    private IReadOnlyList<TreeViewItem> BuildScriptNodes(
+        string packageId,
+        IReadOnlyList<ScriptWorkspaceEntry> entries,
+        string? filter,
+        bool hasNodeModulesDirectory) =>
+        ScriptExplorerTree.Build(entries, filter, hasNodeModulesDirectory)
+            .Select(entry => ScriptExplorerNode(packageId, entry))
+            .ToArray();
+
+    private TreeViewItem ScriptExplorerNode(string packageId, ScriptExplorerEntry entry)
+    {
+        if (entry.IsIgnored)
+        {
+            return new TreeViewItem
+            {
+                Header = new TextBlock
+                {
+                    Text = $"{entry.Name} (ignored)",
+                    Foreground = StudioShellChrome.Secondary,
+                    FontSize = 12
+                },
+                IsEnabled = false,
+                Opacity = 0.72
+            };
+        }
+
+        TreeViewItem node = Node(new StudioNode(
+            entry.IsFolder ? NodeKind.SourceFolder : NodeKind.SourceFile,
+            entry.IsFolder ? $"▸ {entry.Name}" : entry.Name,
+            PackageId: packageId,
+            Path: entry.RelativePath));
+        if (entry.IsFolder)
+        {
+            node.ItemsSource = entry.Children.Select(child => ScriptExplorerNode(packageId, child)).ToArray();
+            node.IsExpanded = !string.IsNullOrWhiteSpace(_filter.Text);
+        }
+        return node;
+    }
+
+    private IReadOnlyList<TreeViewItem> BuildAutomationNodes(
+        StudioDocumentKind kind,
+        IReadOnlyList<AutomationEntryInfo> entries,
+        string? filter)
+    {
+        Dictionary<int, AutomationEntryInfo> byIndex = entries.ToDictionary(entry => entry.Index);
+        List<TreeViewItem> nodes = [];
+        if (kind == StudioDocumentKind.Workflow)
+        {
+            Dictionary<int, AutomationOrganizationItem> itemByIndex = _organization.ItemsFor(kind)
+                .ToDictionary(item => item.SourceIndex);
+            IGrouping<string, (AutomationWorkflow Workflow, int Index)>[] groups = (_runtime.Settings.Workflows ?? [])
+                .Select((workflow, index) => (Workflow: workflow, Index: index))
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.Workflow.Group) ? "Default" : item.Workflow.Group.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            foreach (IGrouping<string, (AutomationWorkflow Workflow, int Index)> group in groups)
+            {
+                bool groupMatches = StudioFilter.Matches(group.Key, filter);
+                (AutomationWorkflow Workflow, int Index)[] members = group
+                    .Where(item => groupMatches || StudioFilter.Matches(item.Workflow.Name, filter))
+                    .ToArray();
+                if (members.Length == 0) continue;
+                TreeViewItem groupNode = Node(new StudioNode(NodeKind.Folder, $"▸ {group.Key} ({group.Count()})", kind));
+                groupNode.IsExpanded = !string.IsNullOrWhiteSpace(filter) || group.Count() <= 12;
+                groupNode.ItemsSource = members
+                    .Where(item => byIndex.ContainsKey(item.Index) && itemByIndex.ContainsKey(item.Index))
+                    .Select(item => AutomationEntryNode(kind, byIndex[item.Index], itemByIndex[item.Index]))
+                    .ToArray();
+                nodes.Add(groupNode);
+            }
+            return nodes;
+        }
+        foreach (AutomationOrganizationFolder folder in _organization.FoldersFor(kind))
+        {
+            TreeViewItem? folderNode = BuildFolderNode(folder, byIndex, filter);
+            if (folderNode is not null) nodes.Add(folderNode);
+        }
+        foreach (AutomationOrganizationItem item in _organization.ItemsFor(kind))
+        {
+            if (!byIndex.TryGetValue(item.SourceIndex, out AutomationEntryInfo? entry) ||
+                !StudioFilter.Matches(entry.Name, filter)) continue;
+            nodes.Add(AutomationEntryNode(kind, entry, item));
+        }
+        return nodes;
+    }
+
+    private TreeViewItem? BuildFolderNode(
+        AutomationOrganizationFolder folder,
+        IReadOnlyDictionary<int, AutomationEntryInfo> entries,
+        string? filter)
+    {
+        bool folderMatches = StudioFilter.Matches(folder.Name, filter);
+        string? childFilter = folderMatches ? null : filter;
+        List<TreeViewItem> children = [];
+        foreach (AutomationOrganizationFolder child in _organization.FoldersFor(folder.Kind, folder.Id))
+        {
+            TreeViewItem? childNode = BuildFolderNode(child, entries, childFilter);
+            if (childNode is not null) children.Add(childNode);
+        }
+        foreach (AutomationOrganizationItem item in _organization.ItemsFor(folder.Kind, folder.Id))
+        {
+            if (!entries.TryGetValue(item.SourceIndex, out AutomationEntryInfo? entry) ||
+                !StudioFilter.Matches(entry.Name, childFilter)) continue;
+            children.Add(AutomationEntryNode(folder.Kind, entry, item));
+        }
+        if (!folderMatches && !string.IsNullOrWhiteSpace(filter) && children.Count == 0) return null;
+
+        TreeViewItem node = Node(new StudioNode(
+            NodeKind.Folder,
+            $"▸ {folder.Name}",
+            folder.Kind,
+            FolderId: folder.Id));
+        node.IsExpanded = !string.IsNullOrWhiteSpace(filter);
+        node.ItemsSource = children;
+        return node;
+    }
+
+    private TreeViewItem AutomationEntryNode(
+        StudioDocumentKind kind,
+        AutomationEntryInfo entry,
+        AutomationOrganizationItem item)
+    {
+        TreeViewItem node = Node(new StudioNode(
+            NodeKind.Entry,
+            $"{(entry.Enabled ? "●" : "○")} {entry.Name}",
+            kind,
+            entry.Index,
+            item.Id,
+            item.FolderId));
+        ContextMenu menu = new();
+        MenuItem toggle = new() { Header = entry.Enabled ? "Disable" : "Enable" };
+        toggle.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await ToggleAutomationAsync(document).ConfigureAwait(true);
+        };
+        MenuItem duplicate = new() { Header = "Duplicate" };
+        duplicate.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await DuplicateAutomationAsync(document).ConfigureAwait(true);
+        };
+        MenuItem delete = new() { Header = "Delete…" };
+        delete.Click += async (_, _) =>
+        {
+            OpenAutomation(kind, item.Id);
+            if (_documents.Active is { } document)
+                await DeleteAutomationAsync(document).ConfigureAwait(true);
+        };
+        menu.Items.Add(toggle);
+        menu.Items.Add(duplicate);
+        menu.Items.Add(delete);
+        node.ContextMenu = menu;
+        return node;
     }
 
     private TreeViewItem Node(StudioNode node)
@@ -427,27 +1441,559 @@ internal sealed class AutomationStudioWindow : Window
     private async void NavigatorSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_refreshingNavigator) return;
-        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node)) return;
+        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node))
+        {
+            UpdateOrganizeButton();
+            return;
+        }
+        UpdateOrganizeButton(node);
         try
         {
             switch (node.Kind)
             {
-                case NodeKind.Entry when node.DocKind is { } kind:
-                    OpenAutomation(kind, node.Index);
+                case NodeKind.Entry when node.DocKind is { } kind && node.AutomationId is { } automationId:
+                    OpenAutomation(kind, automationId);
+                    RenderActive();
+                    break;
+                case NodeKind.Folder:
+                    item.IsExpanded = !item.IsExpanded;
                     break;
                 case NodeKind.Package when node.PackageId is { } packageId:
                     await SelectPackageAsync(packageId).ConfigureAwait(true);
                     RenderActive();
                     break;
+                case NodeKind.SourceFolder:
+                    item.IsExpanded = !item.IsExpanded;
+                    break;
                 case NodeKind.SourceFile when node.PackageId is { } package && node.Path is { } path:
                     await OpenSourceAsync(package, path).ConfigureAwait(true);
                     break;
-                case NodeKind.Category or NodeKind.Scripts:
+                case NodeKind.RuntimeSection when node.RuntimeSection is { } section:
+                    _runtimeSection = section;
+                    RenderRuntimeDashboard();
+                    break;
+                case NodeKind.Category when node.DocKind is { } category:
+                    item.IsExpanded = !item.IsExpanded;
+                    _automationCategoryPage = category;
+                    _automationWizardKind = null;
+                    RenderActive();
+                    break;
+                case NodeKind.Scripts:
                     item.IsExpanded = !item.IsExpanded;
                     break;
             }
         }
         catch (Exception exception) { AddProblem("Error", exception.Message); }
+    }
+
+    private void UpdateOrganizeButton(StudioNode? node = null)
+    {
+        node ??= _navigator.SelectedItem is TreeViewItem selected && _nodes.TryGetValue(selected, out StudioNode? found)
+            ? found
+            : null;
+        bool automationNode = node?.Kind is NodeKind.Entry or NodeKind.Folder &&
+                              !(node.DocKind == StudioDocumentKind.Workflow && _activity == StudioActivity.Workflows);
+        bool scriptNode = _activity == StudioActivity.Scripts &&
+                          node?.Kind is NodeKind.Package or NodeKind.SourceFolder or NodeKind.SourceFile;
+        _organizeButton.IsVisible = automationNode || scriptNode;
+        _organizeButton.Content = node?.Kind switch
+        {
+            NodeKind.Folder or NodeKind.SourceFolder => "Folder…",
+            NodeKind.Package => "Package…",
+            NodeKind.SourceFile => "File…",
+            _ => "Move"
+        };
+    }
+
+    private async Task OrganizeSelectedAsync()
+    {
+        if (_navigator.SelectedItem is not TreeViewItem item || !_nodes.TryGetValue(item, out StudioNode? node)) return;
+        if (node.Kind == NodeKind.Entry)
+        {
+            await MoveAutomationAsync(node).ConfigureAwait(true);
+            return;
+        }
+        if (node.Kind == NodeKind.Package)
+        {
+            ShowScriptPackageMenu(node);
+            return;
+        }
+        if (node.Kind == NodeKind.SourceFolder)
+        {
+            ShowScriptFolderMenu(node);
+            return;
+        }
+        if (node.Kind == NodeKind.SourceFile)
+        {
+            ShowScriptFileMenu(node);
+            return;
+        }
+        if (node.Kind != NodeKind.Folder || node.DocKind is not { } kind || node.FolderId is not { } folderId) return;
+
+        ContextMenu menu = new();
+        MenuItem child = new() { Header = "New Subfolder…" };
+        child.Click += async (_, _) => await CreateFolderAsync(kind, folderId).ConfigureAwait(true);
+        MenuItem rename = new() { Header = "Rename…" };
+        rename.Click += async (_, _) => await RenameFolderAsync(folderId).ConfigureAwait(true);
+        MenuItem delete = new() { Header = "Delete Empty Folder…" };
+        delete.Click += async (_, _) => await DeleteFolderAsync(folderId).ConfigureAwait(true);
+        menu.Items.Add(child);
+        menu.Items.Add(rename);
+        menu.Items.Add(delete);
+        menu.Open(_organizeButton);
+    }
+
+    private void ShowScriptPackageMenu(StudioNode node)
+    {
+        ContextMenu menu = new();
+        MenuItem folder = new() { Header = "New Folder…" };
+        folder.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
+        menu.Items.Add(folder);
+        menu.Items.Add(reveal);
+        if (node.PackageId is { } packageId)
+        {
+            menu.Items.Add(new Separator());
+            MenuItem update = new() { Header = "Update Dependencies" };
+            update.Click += async (_, _) => await UpdatePackagesAsync(packageId).ConfigureAwait(true);
+            MenuItem clean = new() { Header = "Clean Generated Artifacts" };
+            clean.Click += async (_, _) => await CleanPackagesAsync(packageId).ConfigureAwait(true);
+            menu.Items.Add(update);
+            menu.Items.Add(clean);
+        }
+        menu.Open(_organizeButton);
+    }
+
+    private void ShowScriptFolderMenu(StudioNode node)
+    {
+        ContextMenu menu = new();
+        MenuItem child = new() { Header = "New Subfolder…" };
+        child.Click += async (_, _) => await CreateScriptFolderAsync().ConfigureAwait(true);
+        MenuItem move = new() { Header = "Move Folder…" };
+        move.Click += async (_, _) => await MoveScriptFolderAsync(node).ConfigureAwait(true);
+        MenuItem rename = new() { Header = "Rename…" };
+        rename.Click += async (_, _) => await RenameScriptFolderAsync(node).ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
+        MenuItem delete = new() { Header = "Delete Folder…" };
+        delete.Click += async (_, _) => await DeleteScriptFolderAsync(node).ConfigureAwait(true);
+        menu.Items.Add(child);
+        menu.Items.Add(move);
+        menu.Items.Add(rename);
+        menu.Items.Add(reveal);
+        menu.Items.Add(delete);
+        menu.Open(_organizeButton);
+    }
+
+    private void ShowScriptFileMenu(StudioNode node)
+    {
+        ContextMenu menu = new();
+        MenuItem move = new() { Header = "Move…" };
+        move.Click += async (_, _) => await MoveScriptFileAsync(node).ConfigureAwait(true);
+        MenuItem rename = new() { Header = "Rename…" };
+        rename.Click += async (_, _) => await RenameScriptFileAsync(node).ConfigureAwait(true);
+        MenuItem duplicate = new() { Header = "Duplicate…" };
+        duplicate.Click += async (_, _) => await DuplicateScriptFileAsync(node).ConfigureAwait(true);
+        MenuItem reveal = new() { Header = "Reveal in File Manager" };
+        reveal.Click += async (_, _) => await RevealScriptPathAsync(node).ConfigureAwait(true);
+        MenuItem delete = new() { Header = "Delete…" };
+        delete.Click += async (_, _) => await DeleteScriptFileAsync(node).ConfigureAwait(true);
+        menu.Items.Add(move);
+        menu.Items.Add(rename);
+        menu.Items.Add(duplicate);
+        menu.Items.Add(reveal);
+        menu.Items.Add(delete);
+        menu.Open(_organizeButton);
+    }
+
+    private async Task RenameScriptFileAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        string? newName = await PromptAsync("Rename Script File", "File name", System.IO.Path.GetFileName(sourcePath)).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(newName)) return;
+        try
+        {
+            string destinationPath = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), newName.Trim());
+            if (!ScriptWorkspaceService.IsSupportedSourcePath(destinationPath))
+                throw new InvalidOperationException("Script files must use .ts, .js, .d.ts, or .json.");
+            await RelocateScriptFileAsync(packageId, sourcePath, destinationPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task MoveScriptFileAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        ScriptFolderChoice? folder = await ChooseScriptFolderAsync(
+            packageId,
+            "Move Script File",
+            ScriptExplorerTree.ParentPath(sourcePath)).ConfigureAwait(true);
+        if (folder is null) return;
+        try
+        {
+            string destinationPath = ScriptExplorerTree.Combine(folder.Path, System.IO.Path.GetFileName(sourcePath));
+            await RelocateScriptFileAsync(packageId, sourcePath, destinationPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RelocateScriptFileAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        if (destinationPath.Equals(sourcePath, StringComparison.Ordinal)) return;
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null &&
+            sourcePath.Equals(_activePackage.Definition.Entrypoint, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The package entrypoint cannot be moved until package metadata editing is available.");
+
+        string sourceUri = SourceDocumentUri(packageId, sourcePath);
+        StudioDocument? open = _documents.Find(sourceUri);
+        if (open?.IsDirty == true)
+            throw new InvalidOperationException("Save or close the dirty file before moving it.");
+
+        bool reopen = open is not null;
+        string? previousActiveKey = _documents.Active?.Key;
+        if (open is not null)
+        {
+            await _monaco.CloseDocumentAsync(sourceUri, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(sourceUri);
+            _ignoredMonacoChanges.Remove(sourceUri);
+            _documents.Close(sourceUri);
+        }
+        await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
+
+        ClientSettings rewritten = _referencesIndex.RewriteModulePath(
+            _runtime.Settings,
+            packageId,
+            sourcePath,
+            destinationPath);
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        if (reopen)
+        {
+            await OpenSourceAsync(packageId, destinationPath).ConfigureAwait(true);
+            if (previousActiveKey is not null && previousActiveKey != sourceUri)
+                _documents.Activate(previousActiveKey);
+        }
+    }
+
+    private async Task DuplicateScriptFileAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        string fileName = System.IO.Path.GetFileName(sourcePath);
+        string extension = System.IO.Path.GetExtension(fileName);
+        string stem = fileName[..^extension.Length];
+        string suggested = $"{stem}-copy{extension}";
+        string? newName = await PromptAsync("Duplicate Script File", "New file name", suggested).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(newName)) return;
+        try
+        {
+            string destinationPath = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), newName.Trim());
+            if (!ScriptWorkspaceService.IsSupportedSourcePath(destinationPath))
+                throw new InvalidOperationException("Script files must use .ts, .js, .d.ts, or .json.");
+            await _workspace.DuplicateFileAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            await OpenSourceAsync(packageId, destinationPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task DeleteScriptFileAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } path) return;
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null && path.Equals(_activePackage.Definition.Entrypoint, StringComparison.OrdinalIgnoreCase))
+        {
+            AddProblem("Scripts", "The package entrypoint cannot be deleted.");
+            return;
+        }
+
+        string uri = SourceDocumentUri(packageId, path);
+        StudioDocument? open = _documents.Find(uri);
+        if (open?.IsDirty == true)
+        {
+            AddProblem("Scripts", "Save or close the dirty file before deleting it.");
+            return;
+        }
+        int referenceCount = _referencesIndex.Build(_runtime.Settings).Count(reference =>
+            reference.FunctionRef.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+            reference.FunctionRef.ModulePath.Equals(path, StringComparison.Ordinal));
+        string referenceWarning = referenceCount == 0
+            ? string.Empty
+            : $" {referenceCount} Automation reference(s) will become unresolved.";
+        if (await ConfirmAsync("Delete Script File", $"Delete \"{path}\"?{referenceWarning}", "Delete").ConfigureAwait(true) != true) return;
+
+        try
+        {
+            if (open is not null)
+            {
+                await _monaco.CloseDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
+                _textModels.Remove(uri);
+                _ignoredMonacoChanges.Remove(uri);
+                _documents.Close(uri);
+            }
+            await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task CreateScriptFolderAsync()
+    {
+        (string PackageId, string ParentPath)? location = SelectedScriptLocation();
+        if (location is null) { AddProblem("Scripts", "Select a script package or folder first."); return; }
+        string? name = await PromptAsync("New Script Folder", "Folder name", "folder").ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            string path = ScriptExplorerTree.Combine(location.Value.ParentPath, name.Trim());
+            await _workspace.CreateFolderAsync(SelectedProfileId, location.Value.PackageId, path, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RenameScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        string? name = await PromptAsync("Rename Script Folder", "Folder name", System.IO.Path.GetFileName(sourcePath)).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            string destination = ScriptExplorerTree.Combine(ScriptExplorerTree.ParentPath(sourcePath), name.Trim());
+            await RelocateScriptFolderAsync(packageId, sourcePath, destination).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task MoveScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } sourcePath) return;
+        ScriptFolderChoice? folder = await ChooseScriptFolderAsync(
+            packageId,
+            "Move Script Folder",
+            ScriptExplorerTree.ParentPath(sourcePath),
+            sourcePath).ConfigureAwait(true);
+        if (folder is null) return;
+        try
+        {
+            string destination = ScriptExplorerTree.Combine(folder.Path, System.IO.Path.GetFileName(sourcePath));
+            await RelocateScriptFolderAsync(packageId, sourcePath, destination).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task RelocateScriptFolderAsync(string packageId, string sourcePath, string destinationPath)
+    {
+        if (destinationPath.Equals(sourcePath, StringComparison.Ordinal)) return;
+        if (ScriptExplorerTree.IsSameOrDescendant(destinationPath, sourcePath))
+            throw new InvalidOperationException("A script folder cannot be moved into itself.");
+
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null &&
+            ScriptExplorerTree.IsSameOrDescendant(_activePackage.Definition.Entrypoint, sourcePath))
+            throw new InvalidOperationException("A folder containing the package entrypoint cannot be moved until package metadata editing is available.");
+
+        IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        string[] affected = files
+            .Select(file => file.RelativePath)
+            .Where(path => ScriptExplorerTree.IsSameOrDescendant(path, sourcePath))
+            .ToArray();
+        StudioDocument[] open = affected
+            .Select(path => _documents.Find(SourceDocumentUri(packageId, path)))
+            .Where(document => document is not null)
+            .Cast<StudioDocument>()
+            .ToArray();
+        if (open.Any(document => document.IsDirty))
+            throw new InvalidOperationException("Save or close dirty files in the folder before moving it.");
+
+        string? previousActiveKey = _documents.Active?.Key;
+        Dictionary<string, string> movedUris = new(StringComparer.Ordinal);
+        foreach (StudioDocument document in open)
+        {
+            string oldPath = document.Path!;
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            movedUris[document.Key] = SourceDocumentUri(packageId, newPath);
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+            _documents.Close(document.Key);
+        }
+
+        await _workspace.RenamePathAsync(SelectedProfileId, packageId, sourcePath, destinationPath, _cts.Token).ConfigureAwait(true);
+        ClientSettings rewritten = _runtime.Settings;
+        foreach (string oldPath in affected)
+        {
+            string newPath = ScriptExplorerTree.Rebase(oldPath, sourcePath, destinationPath);
+            rewritten = _referencesIndex.RewriteModulePath(rewritten, packageId, oldPath, newPath);
+        }
+        await AutomationCollections.From(rewritten).SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
+        foreach (StudioDocument document in open)
+        {
+            string newPath = ScriptExplorerTree.Rebase(document.Path!, sourcePath, destinationPath);
+            await OpenSourceAsync(packageId, newPath).ConfigureAwait(true);
+        }
+        if (previousActiveKey is not null)
+        {
+            if (movedUris.TryGetValue(previousActiveKey, out string? movedActive)) _documents.Activate(movedActive);
+            else _documents.Activate(previousActiveKey);
+        }
+    }
+
+    private async Task DeleteScriptFolderAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId || node.Path is not { } path) return;
+        await SelectPackageAsync(packageId).ConfigureAwait(true);
+        if (_activePackage is not null && ScriptExplorerTree.IsSameOrDescendant(_activePackage.Definition.Entrypoint, path))
+        {
+            AddProblem("Scripts", "A folder containing the package entrypoint cannot be deleted.");
+            return;
+        }
+
+        IReadOnlyList<ScriptWorkspaceSourceFile> files = await _workspace.ListSourceFilesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        string[] affected = files.Select(file => file.RelativePath)
+            .Where(file => ScriptExplorerTree.IsSameOrDescendant(file, path))
+            .ToArray();
+        StudioDocument[] open = affected
+            .Select(file => _documents.Find(SourceDocumentUri(packageId, file)))
+            .Where(document => document is not null)
+            .Cast<StudioDocument>()
+            .ToArray();
+        if (open.Any(document => document.IsDirty))
+        {
+            AddProblem("Scripts", "Save or close dirty files in the folder before deleting it.");
+            return;
+        }
+        int referenceCount = _referencesIndex.Build(_runtime.Settings).Count(reference =>
+            reference.FunctionRef.PackageId.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+            affected.Contains(reference.FunctionRef.ModulePath, StringComparer.Ordinal));
+        string warning = referenceCount == 0 ? string.Empty : $" {referenceCount} Automation reference(s) will become unresolved.";
+        if (await ConfirmAsync("Delete Script Folder", $"Delete \"{path}\" and all of its contents?{warning}", "Delete").ConfigureAwait(true) != true) return;
+
+        try
+        {
+            foreach (StudioDocument document in open)
+            {
+                await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+                _textModels.Remove(document.Key);
+                _ignoredMonacoChanges.Remove(document.Key);
+                _documents.Close(document.Key);
+            }
+            await _workspace.DeletePathAsync(SelectedProfileId, packageId, path, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task<ScriptFolderChoice?> ChooseScriptFolderAsync(
+        string packageId,
+        string title,
+        string currentPath,
+        string? excludedRoot = null)
+    {
+        IReadOnlyList<ScriptWorkspaceEntry> entries = await _workspace.ListEntriesAsync(
+            SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true);
+        List<ScriptFolderChoice> choices = [new ScriptFolderChoice(string.Empty, "/")];
+        choices.AddRange(entries
+            .Where(entry => entry.IsDirectory)
+            .Where(entry => excludedRoot is null || !ScriptExplorerTree.IsSameOrDescendant(entry.RelativePath, excludedRoot))
+            .Select(entry => new ScriptFolderChoice(entry.RelativePath, entry.RelativePath))
+            .OrderBy(choice => choice.Path, StringComparer.OrdinalIgnoreCase));
+        ScriptFolderChoice? initial = choices.FirstOrDefault(choice => choice.Path.Equals(currentPath, StringComparison.OrdinalIgnoreCase));
+        return await ChooseAsync(title, choices, choice => choice.Label, initial).ConfigureAwait(true);
+    }
+
+    private async Task RevealScriptPathAsync(StudioNode node)
+    {
+        if (node.PackageId is not { } packageId) return;
+        try
+        {
+            await _workspace.RevealInFileManagerAsync(
+                SelectedProfileId,
+                packageId,
+                node.Path,
+                _cts.Token).ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Scripts", exception.Message); }
+    }
+
+    private async Task CreateFolderAsync(StudioDocumentKind kind, string? parentFolderId = null)
+    {
+        string? name = await PromptAsync("New Folder", "Folder name", "New folder").ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            _organization = _organization.AddFolder(kind, name, parentFolderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task RenameFolderAsync(string folderId)
+    {
+        AutomationOrganizationFolder? folder = _organization.Folder(folderId);
+        if (folder is null) return;
+        string? name = await PromptAsync("Rename Folder", "Folder name", folder.Name).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            _organization = _organization.RenameFolder(folderId, name);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task DeleteFolderAsync(string folderId)
+    {
+        AutomationOrganizationFolder? folder = _organization.Folder(folderId);
+        if (folder is null) return;
+        if (await ConfirmAsync("Delete Folder", $"Delete empty folder \"{folder.Name}\"?", "Delete").ConfigureAwait(true) != true) return;
+        try
+        {
+            _organization = _organization.DeleteEmptyFolder(folderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private async Task MoveAutomationAsync(StudioNode node)
+    {
+        if (node.DocKind is not { } kind || node.AutomationId is not { } automationId) return;
+        List<FolderChoice> choices = [new FolderChoice(null, $"{kind.CategoryLabel()} root")];
+        choices.AddRange(_organization.Folders
+            .Where(folder => folder.Kind == kind)
+            .OrderBy(folder => folder.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(folder => new FolderChoice(folder.Id, FolderPath(folder))));
+        FolderChoice? current = choices.FirstOrDefault(choice => choice.FolderId == node.FolderId) ?? choices[0];
+        FolderChoice? selected = await ChooseAsync("Move Automation", choices, choice => choice.Label, current).ConfigureAwait(true);
+        if (selected is null || selected.FolderId == node.FolderId) return;
+        try
+        {
+            _organization = _organization.MoveItem(kind, automationId, selected.FolderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) { AddProblem("Automation", exception.Message); }
+    }
+
+    private string FolderPath(AutomationOrganizationFolder folder)
+    {
+        List<string> names = [folder.Name];
+        string? parentId = folder.ParentFolderId;
+        HashSet<string> visited = [folder.Id];
+        while (parentId is not null && visited.Add(parentId) && _organization.Folder(parentId) is { } parent)
+        {
+            names.Add(parent.Name);
+            parentId = parent.ParentFolderId;
+        }
+        names.Reverse();
+        return string.Join(" / ", names);
     }
 
     // ───────────────────────────── Automation documents ─────────────────────────────
@@ -456,15 +2002,33 @@ internal sealed class AutomationStudioWindow : Window
         _runtime,
         OpenDefinitionAsync,
         ChooseFunctionAsync,
-        reference => _packages.SelectMany(package => package.Exports).FirstOrDefault(export => export.FunctionRef == reference));
+        reference => _packages.SelectMany(package => package.Exports).FirstOrDefault(export => export.FunctionRef == reference),
+        (kind, automationId) => _organization.SourceIndexFor(kind, automationId),
+        (kind, automationId) => RunAutomationDocumentActionAsync(kind, automationId, DuplicateAutomationAsync),
+        (kind, automationId) => RunAutomationDocumentActionAsync(kind, automationId, DeleteAutomationAsync));
 
-    private void OpenAutomation(StudioDocumentKind kind, int index)
+    private Task RunAutomationDocumentActionAsync(
+        StudioDocumentKind kind,
+        string automationId,
+        Func<StudioDocument, Task> action)
     {
-        string key = StudioDocument.AutomationKey(kind, index);
+        OpenAutomation(kind, automationId);
+        return _documents.Active is { } document ? action(document) : Task.CompletedTask;
+    }
+
+    private void OpenAutomation(StudioDocumentKind kind, string automationId)
+    {
+        if (_organization.SourceIndexFor(kind, automationId) is null)
+        {
+            AddProblem("Automation", $"{kind.Label()} '{automationId}' no longer exists.");
+            return;
+        }
+
+        string key = StudioDocument.AutomationKey(SelectedProfileId, kind, automationId);
         if (!_editors.ContainsKey(key))
         {
-            AutomationDocumentEditor? editor = AutomationDocumentEditor.Create(kind, index, EditorServices());
-            if (editor is null) { AddProblem("Automation", $"{kind.Label()} #{index} no longer exists."); return; }
+            AutomationDocumentEditor? editor = AutomationDocumentEditor.Create(kind, automationId, EditorServices());
+            if (editor is null) { AddProblem("Automation", $"{kind.Label()} '{automationId}' no longer exists."); return; }
             editor.Changed += () => _documents.SetDirty(key, true);
             editor.Saved += title =>
             {
@@ -476,81 +2040,168 @@ internal sealed class AutomationStudioWindow : Window
         }
         _documents.OpenOrFocus(new StudioDocument(key, kind, _editors[key].Title)
         {
-            Index = index,
+            AutomationId = automationId,
+            ProfileId = SelectedProfileId,
             Breadcrumb = ["Automation", kind.CategoryLabel(), _editors[key].Title]
         });
     }
 
-    private async Task CreateAutomationAsync(StudioDocumentKind kind)
+    private Task CreateAutomationAsync(StudioDocumentKind kind)
+    {
+        _automationCategoryPage = kind;
+        _automationWizardKind = kind;
+        RenderActive();
+        return Task.CompletedTask;
+    }
+
+    private Control AutomationCategoryPage(StudioDocumentKind kind)
+    {
+        StackPanel page = new() { Spacing = 16, Margin = new Thickness(28), MaxWidth = 1000 };
+        page.Children.Add(new TextBlock { Text = kind.CategoryLabel(), FontSize = 26, FontWeight = FontWeight.SemiBold, Foreground = UiTheme.Text });
+        page.Children.Add(new TextBlock { Text = "Manage your automations or create a new one.", Foreground = UiTheme.Muted });
+        page.Children.Add(Button($"+ New {kind.Label()}", () => CreateAutomationAsync(kind)));
+        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+        IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
+        if (entries.Count == 0)
+            page.Children.Add(new TextBlock { Text = $"No {kind.CategoryLabel().ToLowerInvariant()} yet.", Foreground = UiTheme.Muted, Margin = new Thickness(0, 12) });
+        foreach (AutomationEntryInfo entry in entries)
+        {
+            string automationId = _organization.IdFor(kind, entry.Index);
+            Grid row = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 8, Margin = new Thickness(0, 3) };
+            StackPanel identity = new() { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+            identity.Children.Add(new TextBlock { Text = entry.Enabled ? "● Enabled" : "○ Disabled", Foreground = entry.Enabled ? UiTheme.Accent : UiTheme.Muted, MinWidth = 90 });
+            identity.Children.Add(new TextBlock { Text = entry.Name, Foreground = UiTheme.Text, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(identity);
+            row.Children.Add(Button(entry.Enabled ? "Disable" : "Enable", () => ToggleCategoryAutomationAsync(kind, automationId)));
+            Grid.SetColumn(row.Children[^1], 1);
+            row.Children.Add(Button("Edit", () => { _automationCategoryPage = null; OpenAutomation(kind, automationId); RenderActive(); return Task.CompletedTask; }));
+            Grid.SetColumn(row.Children[^1], 2);
+            row.Children.Add(Button("Delete", () => RunCategoryActionAsync(kind, automationId, DeleteAutomationAsync)));
+            Grid.SetColumn(row.Children[^1], 3);
+            page.Children.Add(new Border { Padding = new Thickness(12), Background = StudioShellChrome.Card, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = row });
+        }
+        return new ScrollViewer { Content = page, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+    }
+
+    private async Task RunCategoryActionAsync(StudioDocumentKind kind, string automationId, Func<StudioDocument, Task> action)
+    {
+        OpenAutomation(kind, automationId);
+        if (_documents.Active is { } document) await action(document).ConfigureAwait(true);
+        _automationCategoryPage = kind;
+        RenderActive();
+    }
+
+    private async Task ToggleCategoryAutomationAsync(StudioDocumentKind kind, string automationId)
+    {
+        string key = StudioDocument.AutomationKey(SelectedProfileId, kind, automationId);
+        OpenAutomation(kind, automationId);
+        if (_documents.Active is not { } document || !string.Equals(document.Key, key, StringComparison.Ordinal)) return;
+
+        if (document.IsDirty)
+        {
+            if (!await ResolveDirtyAutomationAsync(document, "toggling").ConfigureAwait(true))
+            {
+                _automationCategoryPage = kind;
+                RenderActive();
+                return;
+            }
+            if (!string.Equals(_documents.Active?.Key, key, StringComparison.Ordinal))
+                OpenAutomation(kind, automationId);
+        }
+
+        if (_documents.Active is { } active && string.Equals(active.Key, key, StringComparison.Ordinal))
+            await ToggleAutomationAsync(active).ConfigureAwait(true);
+        _automationCategoryPage = kind;
+        RenderActive();
+    }
+
+    private Control AutomationWizardPage(StudioDocumentKind kind)
+    {
+        NewItemTemplate template = NewItemTemplate.All.First(item => item.Kind == kind);
+        StackPanel page = new() { Spacing = 12, Margin = new Thickness(28), MaxWidth = 760 };
+        page.Children.Add(new TextBlock { Text = $"New {template.Title}", FontSize = 26, FontWeight = FontWeight.SemiBold, Foreground = UiTheme.Text });
+        page.Children.Add(new TextBlock { Text = template.Description, Foreground = UiTheme.Muted, TextWrapping = TextWrapping.Wrap });
+        page.Children.Add(new TextBlock { Text = $"Example: {template.Example}", Foreground = UiTheme.Faint, FontFamily = UiTheme.Mono, FontSize = 12 });
+        List<TextBox> fields = [];
+        foreach (NewItemField field in template.Fields)
+        {
+            TextBox input = UiTheme.FieldBox();
+            input.Text = field.Default;
+            input.MinHeight = 34;
+            fields.Add(input);
+            page.Children.Add(new StackPanel { Spacing = 4, Children = { new TextBlock { Text = $"{field.Label} — {field.Hint}", Foreground = UiTheme.Muted, FontSize = 12 }, input } });
+        }
+        TextBlock error = new() { Foreground = UiTheme.Danger, IsVisible = false };
+        page.Children.Add(error);
+        StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+        buttons.Children.Add(Button("Cancel", () => { _automationWizardKind = null; RenderActive(); return Task.CompletedTask; }));
+        buttons.Children.Add(Button("Create", async () =>
+        {
+            string[] values = fields.Select(field => field.Text?.Trim() ?? "").ToArray();
+            if (NewItemRequest.Validate(template, values) is { } validationError)
+            {
+                error.Text = validationError;
+                error.IsVisible = true;
+                return;
+            }
+            await SaveAutomationFromWizardAsync(kind, values).ConfigureAwait(true);
+        }));
+        page.Children.Add(buttons);
+        return new ScrollViewer { Content = page, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+    }
+
+    private async Task SaveAutomationFromWizardAsync(StudioDocumentKind kind, IReadOnlyList<string> values)
     {
         try
         {
-            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).AddNew(kind);
-            (string firstLabel, string secondLabel) = kind switch
-            {
-                StudioDocumentKind.Alias => ("Alias name (what you type)", "Expands to"),
-                StudioDocumentKind.Trigger => ("Text pattern to match", "Command to send"),
-                StudioDocumentKind.SemanticTrigger => ("Name", "Event (e.g. RoomChanged)"),
-                StudioDocumentKind.Keybinding => ("Gesture (e.g. Cmd+1)", "Command to send"),
-                StudioDocumentKind.Timer => ("Name", "Command to send"),
-                StudioDocumentKind.StateRule => ("Name", "State expression (e.g. hp.percent < 30)"),
-                _ => ("Name", "First step (e.g. send look)")
-            };
-            string? first = await PromptAsync($"New {kind.Label()}", firstLabel, (string?)collections.NameOf(kind, index) ?? "").ConfigureAwait(true);
-            if (string.IsNullOrWhiteSpace(first)) return;
-            string? second = await PromptAsync($"New {kind.Label()}", secondLabel, "").ConfigureAwait(true);
-            if (second is null) return;
-            first = first.Trim();
-            second = second.Trim();
-            object? seeded = collections.Get(kind, index) switch
-            {
-                CommandAlias v => v with { Name = first, Expansion = second.Length > 0 ? second : v.Expansion },
-                TriggerRule v => v with { Pattern = first, Command = second.Length > 0 ? second : v.Command },
-                SemanticTriggerRule v => v with { Name = first, EventName = second.Length > 0 ? second : v.EventName },
-                CommandKeyBinding v => v with { Gesture = first, Name = first, Command = second.Length > 0 ? second : v.Command },
-                CommandTimer v => v with { Name = first, Command = second.Length > 0 ? second : v.Command },
-                GameRule v => v with { Name = first, Condition = second.Length > 0 ? second : v.Condition },
-                AutomationWorkflow v => v with { Name = first, Steps = second.Length > 0 ? second : v.Steps },
-                _ => null
-            };
-            if (seeded is not null) collections = collections.Replace(kind, index, seeded);
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).AddFrom(kind, values);
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            _organization = _organization.RegisterAdded(kind, index);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            string automationId = _organization.IdFor(kind, index);
+            _automationWizardKind = null;
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            OpenAutomation(kind, index);
+            OpenAutomation(kind, automationId);
         }
         catch (Exception exception) { AddProblem("Automation", exception.Message); }
     }
 
     private async Task DuplicateAutomationAsync(StudioDocument document)
     {
+        if (!await ResolveDirtyAutomationAsync(document, "duplicating").ConfigureAwait(true)) return;
         try
         {
-            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).Duplicate(document.Kind, document.Index);
+            if (document.AutomationId is null) return;
+            int sourceIndex = _organization.SourceIndexFor(document.Kind, document.AutomationId) ?? -1;
+            if (sourceIndex < 0) return;
+            string? folderId = _organization.FolderIdFor(document.Kind, document.AutomationId);
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).Duplicate(document.Kind, sourceIndex);
             if (index < 0) return;
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
+            _organization = _organization.RegisterAdded(document.Kind, index, folderId);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            string automationId = _organization.IdFor(document.Kind, index);
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            OpenAutomation(document.Kind, index);
+            OpenAutomation(document.Kind, automationId);
         }
         catch (Exception exception) { AddProblem("Automation", exception.Message); }
     }
 
     private async Task DeleteAutomationAsync(StudioDocument document)
     {
-        if (_documents.Documents.Any(d => d.Kind == document.Kind && d.Key != document.Key && d.IsDirty))
-        {
-            AddProblem("Automation", $"Save or close other dirty {document.Kind.CategoryLabel()} before deleting: indexes will shift.");
-            return;
-        }
-        if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete \"{document.Title}\"? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
+        if (!await ResolveDirtyAutomationAsync(document, "deleting").ConfigureAwait(true)) return;
+        if (await ConfirmAsync($"Delete {document.Kind.Label()}", $"Delete '{document.Title}'? This cannot be undone.", "Delete").ConfigureAwait(true) != true) return;
         try
         {
-            AutomationCollections collections = AutomationCollections.From(_runtime.Settings).Remove(document.Kind, document.Index);
+            if (document.AutomationId is null) return;
+            int sourceIndex = _organization.SourceIndexFor(document.Kind, document.AutomationId) ?? -1;
+            if (sourceIndex < 0) return;
+            AutomationCollections collections = AutomationCollections.From(_runtime.Settings).Remove(document.Kind, sourceIndex);
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
-            foreach (StudioDocument open in _documents.Documents.Where(d => d.Kind == document.Kind).ToArray())
-            {
-                _editors.Remove(open.Key);
-                _documents.Close(open.Key);
-            }
+            _organization = _organization.RegisterRemoved(document.Kind, sourceIndex);
+            await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
+            _editors.Remove(document.Key);
+            _documents.Close(document.Key);
             await RefreshNavigatorAsync().ConfigureAwait(true);
         }
         catch (Exception exception) { AddProblem("Automation", exception.Message); }
@@ -567,60 +2218,320 @@ internal sealed class AutomationStudioWindow : Window
 
     // ───────────────────────────── Script documents ─────────────────────────────
 
-    private async Task SelectPackageAsync(string packageId)
+    private Task SelectPackageAsync(string packageId) => SelectPackageAsync(_session.Current, packageId);
+
+    private async Task SelectPackageAsync(StudioSessionSnapshot session, string packageId)
     {
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, packageId, _cts.Token).ConfigureAwait(true)
-            ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
+        if (!_session.IsCurrent(session)) return;
+        string? previousPackageId = _activePackage?.Definition.PackageId;
+        if (!string.Equals(previousPackageId, packageId, StringComparison.Ordinal))
+        {
+            CancelTests("Package changed.");
+            ResetTestsPanel("Package changed. Discover tests.");
+            if (previousPackageId is not null)
+            {
+                _diagnostics.ResolveSource(session.ProfileId, "tests:" + previousPackageId);
+                RefreshProblems();
+            }
+        }
+        ScriptPackageSnapshot? package;
+        try
+        {
+            package = await _workspace.GetPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { return; }
+        if (!_session.IsCurrent(session)) return;
+        _activePackage = package ?? throw new InvalidOperationException($"Script package '{packageId}' no longer exists.");
     }
 
-    private async Task OpenSourceAsync(string packageId, string relativePath)
+    private Task OpenSourceAsync(string packageId, string relativePath) =>
+        OpenSourceAsync(_session.Current, packageId, relativePath);
+
+    private async Task OpenSourceAsync(StudioSessionSnapshot session, string packageId, string relativePath)
     {
-        await SelectPackageAsync(packageId).ConfigureAwait(true);
-        string uri = MonacoEditorHost.CreateDocumentUri(SelectedProfileId, packageId, relativePath);
-        MonacoEditorHost monaco = _monaco;
-        ShowMonaco(true);
-        // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
-        monaco.IsVisible = true;
-        _center.Content = null;
-        if (_documents.Find(uri) is null)
+        try
         {
-            string content = await _workspace.ReadSourceAsync(SelectedProfileId, packageId, relativePath, _cts.Token).ConfigureAwait(true);
-            await monaco.OpenDocumentAsync(SelectedProfileId, packageId, relativePath, content, cancellationToken: _cts.Token).ConfigureAwait(true);
+            await SelectPackageAsync(session, packageId).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            string profileId = session.ProfileId;
+            string uri = SourceDocumentUri(packageId, relativePath);
+            MonacoEditorHost monaco = _monaco;
+            ShowMonaco(true);
+            // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
+            _center.Content = null;
+            if (_documents.Find(uri) is null)
+            {
+                string content = await _workspace.ReadSourceAsync(profileId, packageId, relativePath, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                try
+                {
+                    await _typescript.OpenDocumentAsync(profileId, uri, relativePath, 1, content, session.CancellationToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (!_session.IsCurrent(session)) { return; }
+                catch (Exception exception)
+                {
+                    if (!_session.IsCurrent(session)) return;
+                    _ = _monaco.SetLanguageServerAvailableAsync(false);
+                    ShowLanguageServerFailure(exception.Message);
+                }
+                if (!_session.IsCurrent(session)) return;
+                await monaco.OpenDocumentAsync(profileId, packageId, relativePath, content, cancellationToken: session.CancellationToken, documentUri: uri).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                _textModels.Track(uri, profileId, packageId, relativePath, content);
+            }
+            else if (_textModels.Find(uri) is null)
+            {
+                string content = await _workspace.ReadSourceAsync(profileId, packageId, relativePath, session.CancellationToken).ConfigureAwait(true);
+                if (!_session.IsCurrent(session)) return;
+                _textModels.Track(uri, profileId, packageId, relativePath, content);
+            }
+            _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
+            {
+                ProfileId = profileId,
+                PackageId = packageId,
+                Path = relativePath,
+                Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
+            });
+            if (!_session.IsCurrent(session)) return;
+            await monaco.SetActiveDocumentAsync(uri, session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            if (_pendingLanguageDiagnostics.Remove(uri, out StudioLanguageDiagnostics? pending))
+                await ApplyLanguageDiagnosticsAsync(pending).ConfigureAwait(true);
         }
-        _documents.OpenOrFocus(new StudioDocument(uri, StudioDocumentKind.Script, System.IO.Path.GetFileName(relativePath))
-        {
-            ProfileId = SelectedProfileId,
-            PackageId = packageId,
-            Path = relativePath,
-            Breadcrumb = ["Scripts", _activePackage?.Definition.Name ?? packageId, relativePath]
-        });
-        await monaco.SetActiveDocumentAsync(uri, _cts.Token).ConfigureAwait(true);
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
     }
 
     private void WireMonaco()
     {
-        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() => _documents.SetDirty(change.Uri, true));
+        _monaco.DocumentClosed += async uri =>
+        {
+            string profileId = _documents.Find(uri)?.ProfileId ?? SelectedProfileId;
+            _diagnostics.ResolveSource(profileId, "typescript:" + uri);
+            _pendingLanguageDiagnostics.Remove(uri);
+            RefreshLanguageProblems();
+            await CloseLanguageDocumentAsync(profileId, uri).ConfigureAwait(false);
+        };
+        _monaco.DocumentChanged += change => Dispatcher.UIThread.Post(() =>
+        {
+            if (_ignoredMonacoChanges.Remove(change.Uri)) return;
+            _documents.SetDirty(change.Uri, true);
+            _ = ForwardLanguageChangeAsync(change);
+        });
         _monaco.SaveRequested += request => Dispatcher.UIThread.Post(async () =>
         {
             if (request.All) await SaveAllAsync().ConfigureAwait(true);
             else if (request.Uri is { Length: > 0 }) await SaveScriptAsync(request.Uri).ConfigureAwait(true);
         });
         _monaco.SelectionChanged += selection => Dispatcher.UIThread.Post(() =>
-            _statusCursor.Text = $"Ln {selection.EndLine}, Col {selection.EndColumn}");
+        {
+            _scriptSelections[selection.Uri] = selection;
+            _statusCursor.Text = $"Ln {selection.EndLine}, Col {selection.EndColumn}";
+        });
         _monaco.ActiveDocumentChanged += uri => Dispatcher.UIThread.Post(() =>
         {
             if (_documents.Find(uri) is not null && _documents.Active?.Key != uri) _documents.Activate(uri);
         });
         _monaco.EditorReady += () => Dispatcher.UIThread.Post(RenderActive);
         _monaco.EditorFailed += failure => AddProblem("Editor", failure.Message);
+        _monaco.LanguageServerRequest += (method, parameters, cancellationToken) =>
+        {
+            string profileId = parameters.ValueKind == JsonValueKind.Object &&
+                               parameters.TryGetProperty("textDocument", out JsonElement textDocument) &&
+                               textDocument.ValueKind == JsonValueKind.Object &&
+                               textDocument.TryGetProperty("uri", out JsonElement uriElement) &&
+                               uriElement.ValueKind == JsonValueKind.String &&
+                               _documents.Find(uriElement.GetString() ?? string.Empty) is { ProfileId: { } documentProfile }
+                ? documentProfile
+                : SelectedProfileId;
+            return _typescript.RequestAsync(profileId, method, parameters, cancellationToken);
+        };
+        _monaco.LanguageServerRequestFailed += (method, error) => Dispatcher.UIThread.Post(() =>
+        {
+            AddConsole($"TypeScript language service request '{method}' failed ({error.Code}): {error.Message}");
+            if (!error.Unavailable) return;
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(error.Message);
+        });
+        _typescript.DiagnosticsPublished += diagnostics => Dispatcher.UIThread.Post(async () =>
+        {
+            if (!_typescript.IsCurrentProfile(diagnostics.ProfileId, diagnostics.Generation) ||
+                !_typescript.IsOpenDocument(diagnostics.ProfileId, diagnostics.Uri)) return;
+            if (_documents.Find(diagnostics.Uri) is not { IsScript: true } openDocument)
+            {
+                _pendingLanguageDiagnostics[diagnostics.Uri] = diagnostics;
+                return;
+            }
+            if (!string.Equals(openDocument.ProfileId, diagnostics.ProfileId, StringComparison.Ordinal)) return;
+            await ApplyLanguageDiagnosticsAsync(diagnostics).ConfigureAwait(true);
+        });
+        _typescript.OutputReceived += line => Dispatcher.UIThread.Post(() => AddConsole(line));
+        _typescript.SessionStarted += session => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_typescript.IsCurrentProfile(session.ProfileId, session.Generation) ||
+                !string.Equals(session.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            _diagnostics.ResolveSource(session.ProfileId, "typescript-service");
+            _diagnostics.ResolveSource(session.ProfileId, "studio:TypeScript");
+            RefreshProblems();
+            RemoveLanguageServerRestartButton();
+            _ = _monaco.SetLanguageServerAvailableAsync(true);
+        });
+        _typescript.FailureReceived += failure => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_typescript.IsCurrentProfile(failure.ProfileId, failure.Generation) ||
+                !string.Equals(failure.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            _diagnostics.ReplaceSource(failure.ProfileId, "typescript-service",
+                [new StudioDiagnostic(failure.ProfileId, "typescript-service", "failure", "Error", failure.Message)]);
+            _pendingLanguageDiagnostics.Clear();
+            RefreshProblems();
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(failure.Message);
+        });
     }
 
-    private async Task SaveScriptAsync(string uri)
+    private void ShowLanguageServerFailure(string message)
+    {
+        AddProblem("TypeScript", message);
+        if (_languageServerRestartButton is not null) return;
+        Button restart = new() { Content = "Restart TypeScript" };
+        restart.Click += async (_, _) => await RestartTypeScriptLanguageServiceAsync().ConfigureAwait(true);
+        _languageServerRestartButton = restart;
+        _problems.Children.Add(restart);
+    }
+
+    private void RemoveLanguageServerRestartButton()
+    {
+        if (_languageServerRestartButton is null) return;
+        _problems.Children.Remove(_languageServerRestartButton);
+        _languageServerRestartButton = null;
+    }
+
+    private async Task RestartTypeScriptLanguageServiceAsync()
+    {
+        Button? restart = _languageServerRestartButton;
+        if (restart is null) return;
+        restart.IsEnabled = false;
+        try
+        {
+            await _typescript.RestartAsync(SelectedProfileId, _cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            AddProblem("TypeScript", exception.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_languageServerRestartButton, restart)) restart.IsEnabled = true;
+        }
+    }
+
+    private async Task ApplyLanguageDiagnosticsAsync(StudioLanguageDiagnostics diagnostics)
+    {
+        string profileId = diagnostics.ProfileId;
+        long generation = diagnostics.Generation;
+        StudioDocument? document = _documents.Find(diagnostics.Uri);
+        if (!_typescript.IsCurrentProfile(profileId, generation) ||
+            !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal) ||
+            document is not null && !string.Equals(document.ProfileId, profileId, StringComparison.Ordinal)) return;
+        try
+        {
+            JsonElement values = diagnostics.Parameters.TryGetProperty("diagnostics", out JsonElement items)
+                ? items.Clone()
+                : JsonSerializer.SerializeToElement(Array.Empty<object>());
+            await _monaco.SetDiagnosticsAsync(diagnostics.Uri, values, _cts.Token).ConfigureAwait(true);
+            if (!_typescript.IsCurrentProfile(profileId, generation) ||
+                !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal) ||
+                document is not null && !ReferenceEquals(document, _documents.Find(diagnostics.Uri))) return;
+            string source = "typescript:" + diagnostics.Uri;
+            StudioDiagnostic[] issues = values.EnumerateArray().Select((item, index) =>
+            {
+                string message = item.TryGetProperty("message", out JsonElement text) ? text.GetString() ?? "TypeScript diagnostic" : "TypeScript diagnostic";
+                string severity = item.TryGetProperty("severity", out JsonElement severityValue) && severityValue.TryGetInt32(out int code)
+                    ? code switch { 1 => "Error", 2 => "Warning", 3 => "Info", 4 => "Hint", _ => "Error" }
+                    : "Error";
+                string diagnosticCode = item.TryGetProperty("code", out JsonElement codeValue) ? codeValue.ToString() : "";
+                int? line = item.TryGetProperty("range", out JsonElement range) && range.TryGetProperty("start", out JsonElement start) && start.TryGetProperty("line", out JsonElement lineValue) && lineValue.TryGetInt32(out int lineNumber) ? lineNumber + 1 : null;
+                int? column = item.TryGetProperty("range", out range) && range.TryGetProperty("start", out start) && start.TryGetProperty("character", out JsonElement columnValue) && columnValue.TryGetInt32(out int columnNumber) ? columnNumber + 1 : null;
+                return new StudioDiagnostic(profileId, source, $"{index}:{line}:{column}:{diagnosticCode}:{message}", severity, message, document?.PackageId, document?.Path, line, column);
+            }).ToArray();
+            _diagnostics.ReplaceSource(profileId, source, issues);
+            RefreshProblems();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) when (_typescript.IsCurrentProfile(profileId, generation) &&
+                                           string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal))
+        {
+            AddProblem("TypeScript", exception.Message);
+        }
+        catch (Exception) { }
+    }
+
+    private async Task CloseLanguageDocumentAsync(string profileId, string uri)
+    {
+        try { await _typescript.CloseDocumentAsync(profileId, uri, _cts.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) { Dispatcher.UIThread.Post(() => AddProblem("TypeScript", exception.Message)); }
+    }
+
+    private async Task ForwardLanguageChangeAsync(MonacoDocumentChanged change)
+    {
+        try
+        {
+            StudioDocument? document = _documents.Find(change.Uri);
+            if (document is not { IsScript: true } ||
+                !string.Equals(document.ProfileId, SelectedProfileId, StringComparison.Ordinal)) return;
+            string text = change.Text ?? await _monaco.RequestDocumentContentAsync(change.Uri, _cts.Token).ConfigureAwait(false);
+            await _typescript.ChangeDocumentAsync(document.ProfileId!, change.Uri, change.VersionId, text, _cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception exception) { Dispatcher.UIThread.Post(() => AddProblem("TypeScript", exception.Message)); }
+    }
+
+    private void RefreshLanguageProblems()
+    {
+        RefreshProblems();
+    }
+
+    private async Task SaveScriptAsync(string uri, bool build = true)
     {
         if (_documents.Find(uri) is not { IsScript: true } document) return;
+        StudioTextModelState? state = _textModels.Find(uri);
+        if (state?.Conflict is not null && !state.OverwriteApproved)
+        {
+            RenderExternalConflict();
+            AddProblem("Save", "Resolve the external file conflict before saving.");
+            return;
+        }
+        if (state is not null && !state.OverwriteApproved)
+        {
+            (bool exists, string? diskContent) = await TryReadSourceAsync(document.PackageId!, document.Path!).ConfigureAwait(true);
+            if (!_textModels.MatchesBaseline(uri, diskContent, exists))
+            {
+                _textModels.RecordConflict(
+                    uri,
+                    exists ? StudioExternalFileChangeKind.Modified : StudioExternalFileChangeKind.Deleted,
+                    diskContent);
+                RenderExternalConflict();
+                AddProblem("Save", "The file changed on disk after it was opened. Review the conflict before saving.");
+                return;
+            }
+        }
+
         string content = await _monaco.RequestDocumentContentAsync(uri, _cts.Token).ConfigureAwait(true);
-        await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build: true, _cts.Token).ConfigureAwait(true);
+        await _workspace.SaveSourceAsync(document.ProfileId!, document.PackageId!, document.Path!, content, build, _cts.Token).ConfigureAwait(true);
+        try
+        {
+            await _typescript.SaveDocumentAsync(document.ProfileId!, uri, content, _cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            _ = _monaco.SetLanguageServerAvailableAsync(false);
+            ShowLanguageServerFailure(exception.Message);
+        }
+        _textModels.MarkSaved(uri, content);
         _documents.SetDirty(uri, false);
+        RenderExternalConflict();
         ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(document.ProfileId!, document.PackageId!, _cts.Token).ConfigureAwait(true);
         if (package is not null)
         {
@@ -660,7 +2571,7 @@ internal sealed class AutomationStudioWindow : Window
         if (export is null) { AddProblem("Automation", "Function not found in the latest successful build. Build the package first."); return; }
         await OpenSourceAsync(function.PackageId, export.ModulePath).ConfigureAwait(true);
         await _monaco.RevealLocationAsync(
-                MonacoEditorHost.CreateDocumentUri(SelectedProfileId, function.PackageId, export.ModulePath),
+                SourceDocumentUri(function.PackageId, export.ModulePath),
                 export.SourceLocation.Line, export.SourceLocation.Column, _cts.Token).ConfigureAwait(true);
     }
 
@@ -674,36 +2585,144 @@ internal sealed class AutomationStudioWindow : Window
         return picked?.FunctionRef;
     }
 
+    private Task RestorePackagesAsync() =>
+        RunPackageOperationAsync("Restore", profileId => _runtime.ScriptPackages.RestoreAsync(profileId, _cts.Token));
+
+    private Task InstallPackagesAsync() =>
+        RunPackageOperationAsync("Install", profileId => _runtime.ScriptPackages.InstallAsync(profileId, _cts.Token));
+
+    private Task UpdatePackagesAsync(string? packageId = null) =>
+        RunPackageOperationAsync(
+            packageId is null ? "Update all" : $"Update {packageId}",
+            profileId => _runtime.ScriptPackages.UpdateAsync(profileId, packageId, _cts.Token));
+
+    private Task CleanPackagesAsync(string? packageId = null) =>
+        RunPackageOperationAsync(
+            packageId is null ? "Clean workspace" : $"Clean {packageId}",
+            profileId => _runtime.ScriptPackages.CleanAsync(profileId, packageId, _cts.Token));
+
+    private async Task RunPackageOperationAsync(
+        string label,
+        Func<string, Task<ScriptPackageOperationResult>> operation)
+    {
+        if (_packageOperationRunning)
+        {
+            AddProblem("Packages", "A package-manager operation is already running.");
+            return;
+        }
+
+        string profileId = SelectedProfileId;
+        _packageOperationRunning = true;
+        if (_bottomCollapsed) ToggleBottom();
+        if (_bottom.Items.Count > 1) _bottom.SelectedIndex = 1;
+        AddConsole($"{label} started…");
+        try
+        {
+            ScriptPackageOperationResult result = await operation(profileId).ConfigureAwait(true);
+            foreach (string line in result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                AddConsole(line);
+            foreach (string line in result.StandardError.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                AddConsole($"stderr: {line}");
+
+            string source = "package-operation:" + label;
+            if (!result.Success)
+            {
+                AddConsole($"{label} failed · {result.Code}: {result.Message}");
+                _diagnostics.ReplaceSource(profileId, source,
+                    [new StudioDiagnostic(profileId, source, "failure", "Error", $"{result.Code}: {result.Message}")]);
+                RefreshProblems();
+                return;
+            }
+
+            _diagnostics.ResolveSource(profileId, source);
+            RefreshProblems();
+            AddConsole($"{label} completed · {result.Message}");
+            if (string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal))
+                await RefreshNavigatorAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            AddConsole($"{label} failed · {exception.Message}");
+            string source = "package-operation:" + label;
+            _diagnostics.ReplaceSource(profileId, source,
+                [new StudioDiagnostic(profileId, source, "failure", "Error", exception.Message)]);
+            RefreshProblems();
+        }
+        finally
+        {
+            _packageOperationRunning = false;
+        }
+    }
+
     private async Task BuildActivePackageAsync()
     {
         if (_activePackage is null) { AddProblem("Build", "Select a script package first."); return; }
-        ScriptPackageBuildResult result = await _workspace.BuildPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        RenderBuildProblems(result);
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
-        RenderActive();
+        StudioSessionSnapshot session = _session.Current;
+        string packageId = _activePackage.Definition.PackageId;
+        ScriptPackageBuildResult result;
+        try
+        {
+            result = await _workspace.BuildPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (session.CancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        bool updateActiveStatus = _session.IsCurrent(session) && _activePackage?.Definition.PackageId == packageId;
+        RenderBuildProblems(result, session.ProfileId, updateActiveStatus);
+        if (!updateActiveStatus) return;
+        _activePackage = await _workspace.GetPackageAsync(session.ProfileId, packageId, session.CancellationToken).ConfigureAwait(true);
+        if (_session.IsCurrent(session) && _activePackage?.Definition.PackageId == packageId)
+            RenderActive();
     }
 
-    private void RenderBuildProblems(ScriptPackageSnapshot package) =>
-        _buildState.Text = package.BuildStatus switch
+    private void RenderBuildProblems(ScriptPackageSnapshot? package)
+    {
+        _buildState.Text = package?.BuildStatus switch
         {
             ScriptPackageBuildStatus.Succeeded => "Build ✓",
             ScriptPackageBuildStatus.Failed => "Build ✕",
             _ => "Build —"
         };
-
-    private void RenderBuildProblems(ScriptPackageBuildResult result)
-    {
-        _problems.Children.Clear();
-        foreach (ScriptCompilerDiagnostic diagnostic in result.Diagnostics)
-            AddProblem(diagnostic.Severity.ToString(), $"{diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Code} {diagnostic.Message}");
-        _buildState.Text = result.Success ? "Build ✓" : "Build ✕";
+        _runtimeState.Text = package is null ? "Runtime —" : $"Runtime {package.RuntimeStatus}";
+        _buildPanel.Children.Clear();
+        _buildPanel.Children.Add(Text(package is null ? "No package selected." : $"{package.Definition.Name} · {package.BuildStatus}"));
     }
 
-    private async Task TogglePackageAsync()
+    private void RenderBuildProblems(ScriptPackageBuildResult result, string profileId, bool updateActiveStatus = true)
     {
-        if (_activePackage is null) return;
-        await _workspace.SetEnabledAsync(SelectedProfileId, _activePackage.Definition.PackageId, !_activePackage.Definition.Enabled, _cts.Token).ConfigureAwait(true);
-        _activePackage = await _workspace.GetPackageAsync(SelectedProfileId, _activePackage.Definition.PackageId, _cts.Token).ConfigureAwait(true);
+        string source = "build:" + result.PackageId;
+        _diagnostics.ReplaceSource(profileId, source, result.Diagnostics.Select((diagnostic, index) =>
+            new StudioDiagnostic(profileId, source, $"{index}:{diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column}:{diagnostic.Code}",
+                diagnostic.Severity.ToString(), diagnostic.Message, result.PackageId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column)));
+        _buildPanel.Children.Clear();
+        _buildPanel.Children.Add(Text($"{result.PackageId} · {(result.Success ? "Build succeeded" : "Build failed")}"));
+        foreach (ScriptCompilerDiagnostic diagnostic in result.Diagnostics)
+        {
+            AddConsole($"Build {result.PackageId}: {diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Code} {diagnostic.Message}");
+            Button row = new() { Content = Text($"{diagnostic.Severity}: {diagnostic.SourceFile}:{diagnostic.Line}:{diagnostic.Column} {diagnostic.Message}"), HorizontalContentAlignment = HorizontalAlignment.Left };
+            row.Click += async (_, _) => await OpenDiagnosticAsync(new StudioDiagnostic(profileId, source, $"build:{diagnostic.Code}:{diagnostic.SourceFile}:{diagnostic.Line}", diagnostic.Severity.ToString(), diagnostic.Message, result.PackageId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column)).ConfigureAwait(true);
+            _buildPanel.Children.Add(row);
+        }
+        RefreshProblems();
+        if (updateActiveStatus && profileId == SelectedProfileId)
+            _buildState.Text = result.Success ? "Build ✓" : "Build ✕";
+    }
+
+    private async Task TogglePackageAsync(string packageId)
+    {
+        string profileId = SelectedProfileId;
+        ScriptPackageSnapshot? package = await _workspace.GetPackageAsync(profileId, packageId, _cts.Token).ConfigureAwait(true);
+        if (package is null) return;
+        await _workspace.SetEnabledAsync(profileId, packageId, !package.Definition.Enabled, _cts.Token).ConfigureAwait(true);
+        if (!string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal)) return;
+        if (_activePackage?.Definition.PackageId == packageId)
+            _activePackage = await _workspace.GetPackageAsync(profileId, packageId, _cts.Token).ConfigureAwait(true);
+        await RefreshNavigatorAsync().ConfigureAwait(true);
         RenderActive();
     }
 
@@ -730,20 +2749,50 @@ internal sealed class AutomationStudioWindow : Window
 
     private async Task CreatePackageAsync()
     {
+        StudioSessionSnapshot session = _session.Current;
         string? name = await PromptAsync("New Script Package", "Package name", "New package").ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(name)) return;
-        ScriptPackageDefinition created = await _workspace.CreatePackageAsync(SelectedProfileId, name, cancellationToken: _cts.Token).ConfigureAwait(true);
-        await OpenSourceAsync(created.PackageId, "main.ts").ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name) || !_session.IsCurrent(session)) return;
+        try
+        {
+            ScriptPackageDefinition created = await _workspace.CreatePackageAsync(
+                session.ProfileId, name, cancellationToken: session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            if (_session.IsCurrent(session))
+                await OpenSourceAsync(session, created.PackageId, created.Entrypoint).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Scripts", exception.Message);
+        }
     }
 
-    private async Task CreateTypeScriptFileAsync()
+    private async Task CreateScriptFileAsync(string extension)
     {
-        if (_activePackage is null) { AddProblem("New TS", "Select a script package first."); return; }
-        string? path = await PromptAsync("New TypeScript File", "Package-relative path", "module.ts").ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(path)) return;
-        if (!path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)) path += ".ts";
-        await _workspace.CreateFileAsync(SelectedProfileId, _activePackage.Definition.PackageId, path, cancellationToken: _cts.Token).ConfigureAwait(true);
-        await OpenSourceAsync(_activePackage.Definition.PackageId, path).ConfigureAwait(true);
+        StudioSessionSnapshot session = _session.Current;
+        (string PackageId, string ParentPath)? location = SelectedScriptLocation();
+        if (location is null) { AddProblem("Scripts", "Select a script package or folder first."); return; }
+        string defaultName = extension.Equals(".json", StringComparison.OrdinalIgnoreCase) ? "data.json" : $"module{extension}";
+        string? name = await PromptAsync("New Script File", "File name", defaultName).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(name) || !_session.IsCurrent(session)) return;
+        name = name.Trim();
+        if (!name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) name += extension;
+        try
+        {
+            string path = ScriptExplorerTree.Combine(location.Value.ParentPath, name);
+            await _workspace.CreateFileAsync(
+                session.ProfileId, location.Value.PackageId, path, cancellationToken: session.CancellationToken).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            if (_session.IsCurrent(session))
+                await OpenSourceAsync(session, location.Value.PackageId, path).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Scripts", exception.Message);
+        }
     }
 
     private async Task SearchAsync()
@@ -760,7 +2809,7 @@ internal sealed class AutomationStudioWindow : Window
             {
                 await OpenSourceAsync(result.PackageId, result.RelativePath).ConfigureAwait(true);
                 await _monaco.RevealLocationAsync(
-                        MonacoEditorHost.CreateDocumentUri(SelectedProfileId, result.PackageId, result.RelativePath),
+                        SourceDocumentUri(result.PackageId, result.RelativePath),
                         result.Line, result.Column, _cts.Token).ConfigureAwait(true);
             };
             _referencesPanel.Children.Add(row);
@@ -770,8 +2819,143 @@ internal sealed class AutomationStudioWindow : Window
 
     // ───────────────────────────── Document area rendering ─────────────────────────────
 
+    private void RenderExternalConflict()
+    {
+        StudioDocument? active = _documents.Active;
+        StudioExternalFileConflict? conflict = active is { IsScript: true }
+            ? _textModels.Find(active.Key)?.Conflict
+            : null;
+        _externalConflictBar.IsVisible = conflict is not null;
+        if (conflict is null) return;
+
+        _externalConflictText.Text = conflict.Kind switch
+        {
+            StudioExternalFileChangeKind.Modified => "File changed on disk. Unsaved editor changes were preserved.",
+            StudioExternalFileChangeKind.Deleted => "File was deleted on disk. Unsaved editor changes were preserved. Keep Editor Version will recreate this path on the next save.",
+            StudioExternalFileChangeKind.Renamed => $"File moved on disk to {conflict.NewPath}. Reload follows the disk move; Keep Editor Version preserves the old path for the next save.",
+            _ => "File changed on disk."
+        };
+        _externalConflictReload.IsVisible = conflict.Kind != StudioExternalFileChangeKind.Deleted;
+    }
+
+    private async Task CompareExternalConflictAsync()
+    {
+        if (_documents.Active is not { IsScript: true } active) return;
+        StudioExternalFileConflict? conflict = _textModels.Find(active.Key)?.Conflict;
+        if (conflict is null) return;
+
+        string editorContent = await _monaco.RequestDocumentContentAsync(active.Key, _cts.Token).ConfigureAwait(true);
+        TextBox editor = ComparisonTextBox(editorContent);
+        TextBox disk = ComparisonTextBox(conflict.DiskContent ?? "(file deleted on disk)");
+        Grid columns = new() { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 8 };
+        columns.Children.Add(ComparisonColumn("Editor version", editor));
+        Control diskColumn = ComparisonColumn(
+            conflict.Kind == StudioExternalFileChangeKind.Renamed && conflict.NewPath is not null
+                ? $"Disk version · {conflict.NewPath}"
+                : "Disk version",
+            disk);
+        Grid.SetColumn(diskColumn, 1);
+        columns.Children.Add(diskColumn);
+
+        Window dialog = Dialog("External File Change", 1080, 680);
+        Button close = new() { Content = "Close", MinWidth = 90, HorizontalAlignment = HorizontalAlignment.Right };
+        close.Click += (_, _) => dialog.Close();
+        Grid layout = new() { RowDefinitions = new RowDefinitions("*,Auto"), Margin = new Thickness(12), RowSpacing = 8 };
+        layout.Children.Add(columns);
+        Grid.SetRow(close, 1);
+        layout.Children.Add(close);
+        dialog.Content = layout;
+        await dialog.ShowDialog(this).ConfigureAwait(true);
+    }
+
+    private static Control ComparisonColumn(string label, Control content)
+    {
+        StackPanel column = new() { Spacing = 4 };
+        column.Children.Add(new TextBlock { Text = label, Foreground = UiTheme.Muted, FontSize = 12 });
+        column.Children.Add(content);
+        return column;
+    }
+
+    private static TextBox ComparisonTextBox(string content)
+    {
+        TextBox box = new()
+        {
+            Text = content,
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = UiTheme.Mono
+        };
+        ScrollViewer.SetHorizontalScrollBarVisibility(box, Avalonia.Controls.Primitives.ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(box, Avalonia.Controls.Primitives.ScrollBarVisibility.Auto);
+        return box;
+    }
+
+    private async Task ReloadExternalConflictAsync()
+    {
+        if (_documents.Active is not { IsScript: true } active) return;
+        StudioExternalFileConflict? conflict = _textModels.Find(active.Key)?.Conflict;
+        if (conflict is null || conflict.Kind == StudioExternalFileChangeKind.Deleted) return;
+
+        if (conflict.Kind == StudioExternalFileChangeKind.Renamed && conflict.NewPath is not null)
+        {
+            string oldPath = active.Path!;
+            string newPath = conflict.NewPath;
+            string newUri = SourceDocumentUri(active.PackageId!, newPath);
+            _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? movedSelection);
+            await _monaco.CloseDocumentAsync(active.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(active.Key);
+            _ignoredMonacoChanges.Remove(active.Key);
+            _documents.Close(active.Key);
+            await RewriteExternalRenameReferencesAsync(active.PackageId!, oldPath, newPath).ConfigureAwait(true);
+            await OpenSourceAsync(active.PackageId!, newPath).ConfigureAwait(true);
+            if (movedSelection is not null)
+            {
+                _scriptSelections[newUri] = movedSelection with { Uri = newUri };
+                await _monaco.RevealLocationAsync(newUri, movedSelection.EndLine, movedSelection.EndColumn, _cts.Token).ConfigureAwait(true);
+            }
+            AddConsole($"Reloaded external move: {active.PackageId}/{oldPath} → {newPath}");
+            return;
+        }
+
+        string content = conflict.DiskContent ?? string.Empty;
+        _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection);
+        _ignoredMonacoChanges.Add(active.Key);
+        try
+        {
+            await _monaco.SetDocumentContentAsync(active.Key, content, _cts.Token).ConfigureAwait(true);
+            if (selection is not null)
+                await _monaco.RevealLocationAsync(active.Key, selection.EndLine, selection.EndColumn, _cts.Token).ConfigureAwait(true);
+        }
+        catch
+        {
+            _ignoredMonacoChanges.Remove(active.Key);
+            throw;
+        }
+        _textModels.MarkSaved(active.Key, content);
+        _documents.SetDirty(active.Key, false);
+        RenderExternalConflict();
+        AddConsole($"Reloaded disk version: {active.PackageId}/{active.Path}");
+    }
+
+    private Task KeepExternalEditorVersionAsync()
+    {
+        if (_documents.Active is { IsScript: true } active)
+        {
+            _textModels.KeepEditorVersion(active.Key);
+            RenderExternalConflict();
+            AddConsole($"Keeping editor version for next save: {active.PackageId}/{active.Path}");
+        }
+        return Task.CompletedTask;
+    }
+
     private void DocumentsChanged()
     {
+        if (_documents.Active is not null)
+        {
+            _automationCategoryPage = null;
+            _automationWizardKind = null;
+        }
         RenderTabs();
         RenderActive();
     }
@@ -786,7 +2970,7 @@ internal sealed class AutomationStudioWindow : Window
             TextBlock label = new()
             {
                 Text = $"{(document.IsDirty ? "● " : "")}{document.Title}",
-                Foreground = active ? UiTheme.Text : UiTheme.Muted,
+                Foreground = active ? StudioShellChrome.Foreground : StudioShellChrome.Secondary,
                 VerticalAlignment = VerticalAlignment.Center,
                 MaxWidth = 220,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -794,7 +2978,7 @@ internal sealed class AutomationStudioWindow : Window
             Button close = new()
             {
                 Content = "×", Padding = new Thickness(4, 0), MinWidth = 22, Background = Brushes.Transparent,
-                Foreground = UiTheme.Muted, BorderThickness = new Thickness(0)
+                Foreground = StudioShellChrome.Secondary, BorderThickness = new Thickness(0)
             };
             Avalonia.Automation.AutomationProperties.SetName(close, $"Close {document.Title}");
             close.Click += async (_, _) => await CloseDocumentAsync(captured).ConfigureAwait(true);
@@ -803,8 +2987,8 @@ internal sealed class AutomationStudioWindow : Window
             {
                 Child = content,
                 Padding = new Thickness(12, 7, 6, 7),
-                Background = active ? UiTheme.Console : UiTheme.Surface,
-                BorderBrush = active ? UiTheme.Accent : UiTheme.Divider,
+                Background = active ? StudioShellChrome.Input : StudioShellChrome.Card,
+                BorderBrush = active ? StudioShellChrome.Blue : StudioShellChrome.Border,
                 BorderThickness = new Thickness(0, 0, 1, active ? 2 : 1),
                 Cursor = new Cursor(StandardCursorType.Hand)
             };
@@ -818,9 +3002,9 @@ internal sealed class AutomationStudioWindow : Window
         }
     }
 
-    private async Task CloseDocumentAsync(StudioDocument document)
+    private async Task CloseDocumentAsync(StudioDocument document, bool discardDirtyChanges = false)
     {
-        if (document.IsDirty)
+        if (document.IsDirty && !discardDirtyChanges)
         {
             string choice = await ConfirmDirtyAsync(document.Title).ConfigureAwait(true);
             if (choice == "cancel") return;
@@ -831,7 +3015,12 @@ internal sealed class AutomationStudioWindow : Window
                 if (document.IsDirty) return;
             }
         }
-        if (document.IsScript) await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+        if (document.IsScript)
+        {
+            await _monaco.CloseDocumentAsync(document.Key, _cts.Token).ConfigureAwait(true);
+            _textModels.Remove(document.Key);
+            _ignoredMonacoChanges.Remove(document.Key);
+        }
         else _editors.Remove(document.Key);
         _documents.Close(document.Key);
     }
@@ -839,50 +3028,75 @@ internal sealed class AutomationStudioWindow : Window
     private void CloseAllEditors() => _editors.Clear();
 
     /// <summary>
-    /// Shows or hides the native WebView by collapsing its height. Toggling IsVisible on a native
-    /// control left its bounds stale (it painted over the tab strip) and destroying it loses all models.
+    /// Keep the native WebView attached so its models survive, while changing visibility and bounds
+    /// together. IsVisible alone left stale native bounds that painted over the tab strip.
     /// </summary>
-    private bool _monacoStarted;
-
-    private void ShowMonaco(bool show)
+    internal static void ApplyMonacoVisibility(Control monaco, Control center, bool show)
     {
-        // WebKit will not boot a zero-size page: stay expanded until the editor reports ready.
-        if (show) _monacoStarted = true;
-        else if (_monacoStarted && !_monaco.IsReady) return;
-        _monaco.MaxHeight = show ? double.PositiveInfinity : 0;
-        _center.IsVisible = !show;
+        monaco.MaxHeight = show ? double.PositiveInfinity : 0;
+        monaco.IsVisible = show;
+        center.IsVisible = !show;
     }
+
+    private void ShowMonaco(bool show) => ApplyMonacoVisibility(_monaco, _center, show);
 
     private void RenderActive()
     {
+        if (_activity == StudioActivity.Runtime)
+        {
+            RenderRuntimeDashboard();
+            return;
+        }
+        if (_activity == StudioActivity.Search)
+        {
+            RenderSearchActivity();
+            return;
+        }
+
+        _breadcrumbBar.IsVisible = true;
         StudioDocument? active = _documents.Active;
-        _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
-        _breadcrumbBar.IsVisible = active is not null;
-        _statusLeft.Text = active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
+        RenderExternalConflict();
+        bool showingAutomationPage = _activity is StudioActivity.Automations or StudioActivity.Workflows &&
+                                     (_automationWizardKind is not null || _automationCategoryPage is not null);
+        _breadcrumb.Text = showingAutomationPage || active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
+        _breadcrumbBar.IsVisible = !showingAutomationPage && active is not null;
+        _statusLeft.Text = showingAutomationPage ? "Automation Studio" : active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
+        RenderBuildProblems(_activePackage);
+        if (_activity is StudioActivity.Automations or StudioActivity.Workflows && _automationWizardKind is { } wizardKind)
+        {
+            ShowMonaco(false);
+            _center.Content = AutomationWizardPage(wizardKind);
+            _statusCursor.Text = "";
+            return;
+        }
+        if (_activity is StudioActivity.Automations or StudioActivity.Workflows && _automationCategoryPage is { } categoryKind)
+        {
+            ShowMonaco(false);
+            _center.Content = AutomationCategoryPage(categoryKind);
+            _statusCursor.Text = "";
+            return;
+        }
         if (active is null)
         {
             ShowMonaco(false);
             _center.Content = EmptyState();
             _statusCursor.Text = "";
-            BuildEmptyInspector();
             return;
         }
         if (active.IsScript)
         {
             _center.Content = null;
+            _statusCursor.Text = _scriptSelections.TryGetValue(active.Key, out MonacoSelectionChanged? selection)
+                ? $"Ln {selection.EndLine}, Col {selection.EndColumn}"
+                : "Ln 1, Col 1";
             ShowMonaco(true);
             _ = _monaco.SetActiveDocumentAsync(active.Key, _cts.Token);
-            if (_activePackage is not null) BuildPackageInspector(_activePackage);
-            else BuildEmptyInspector();
             return;
         }
         ShowMonaco(false);
         _statusCursor.Text = "";
         if (_editors.TryGetValue(active.Key, out AutomationDocumentEditor? editor))
-        {
             _center.Content = editor.View;
-            BuildAutomationInspector(active, editor);
-        }
     }
 
     private Control EmptyState()
@@ -898,67 +3112,7 @@ internal sealed class AutomationStudioWindow : Window
         return panel;
     }
 
-    // ───────────────────────────── Inspector (context only) ─────────────────────────────
-
-    private void BuildEmptyInspector()
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading("Automation Studio"));
-        _inspector.Children.Add(Text($"Profile scope: {SelectedProfileId}"));
-        _inspector.Children.Add(Text(SelectedProfileId == _runtime.ActiveConnectionProfile.Id
-            ? "This is the active runtime profile."
-            : "Authoring only: another Connection Profile is currently active."));
-    }
-
-    private void BuildAutomationInspector(StudioDocument document, AutomationDocumentEditor editor)
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading(document.Title));
-        _inspector.Children.Add(Text($"{document.Kind.Label()} · {(editor.IsEnabled ? "Enabled" : "Disabled")}{(document.IsDirty ? " · Unsaved changes" : "")}"));
-        _inspector.Children.Add(Heading("Actions"));
-        _inspector.Children.Add(Button(editor.IsEnabled ? "Disable" : "Enable", () => ToggleAutomationAsync(document)));
-        _inspector.Children.Add(Button("Duplicate", () => DuplicateAutomationAsync(document)));
-        _inspector.Children.Add(Button("Delete…", () => DeleteAutomationAsync(document)));
-
-        AutomationFunctionReference[] uses = _referencesIndex.Build(_runtime.Settings)
-            .Where(reference => StudioDocumentKinds.FromSource(reference.SourceKind) == document.Kind
-                && StudioDocumentKinds.DefinitionIndex(reference.DefinitionId) == document.Index)
-            .ToArray();
-        _inspector.Children.Add(Heading("Script references"));
-        if (uses.Length == 0) _inspector.Children.Add(Text("None"));
-        foreach (AutomationFunctionReference use in uses)
-        {
-            ExportedScriptFunction? export = _packages.SelectMany(package => package.Exports).FirstOrDefault(item => item.FunctionRef == use.FunctionRef);
-            _inspector.Children.Add(Text($"{(export is null ? "✕" : "✓")} {use.FunctionRef.PackageId}/{use.FunctionRef.ModulePath}#{use.FunctionRef.ExportName}"));
-        }
-    }
-
-    private void BuildPackageInspector(ScriptPackageSnapshot package)
-    {
-        _inspector.Children.Clear();
-        _inspector.Children.Add(Heading(package.Definition.Name));
-        _inspector.Children.Add(Text($"PackageId: {package.Definition.PackageId}"));
-        _inspector.Children.Add(Text($"Enabled: {package.Definition.Enabled}"));
-        _inspector.Children.Add(Text($"Build: {package.BuildStatus}"));
-        _inspector.Children.Add(Text($"Runtime: {package.RuntimeStatus}"));
-        _inspector.Children.Add(Text($"Capabilities: {package.Definition.Capabilities}"));
-        _inspector.Children.Add(Button(package.Definition.Enabled ? "Disable Package" : "Enable Package", TogglePackageAsync));
-        _buildState.Text = package.BuildStatus == ScriptPackageBuildStatus.Succeeded ? "Build ✓" : package.BuildStatus == ScriptPackageBuildStatus.Failed ? "Build ✕" : "Build —";
-        _runtimeState.Text = $"Runtime {package.RuntimeStatus}";
-        if (!string.IsNullOrWhiteSpace(package.LastRuntimeFault)) _inspector.Children.Add(Text($"Fault: {package.LastRuntimeFault}"));
-        _inspector.Children.Add(Heading("Exports"));
-        if (package.Exports.Count == 0) _inspector.Children.Add(Text("No callable exports discovered."));
-        foreach (ExportedScriptFunction export in package.Exports)
-        {
-            Button open = UiTheme.QuietButton($"{export.ModulePath}#{export.ExportName}({string.Join(", ", export.Parameters.Select(parameter => parameter.Name))})");
-            open.HorizontalContentAlignment = HorizontalAlignment.Left;
-            ScriptFunctionRef reference = export.FunctionRef;
-            open.Click += async (_, _) => await OpenDefinitionAsync(reference).ConfigureAwait(true);
-            _inspector.Children.Add(open);
-            IReadOnlyList<AutomationFunctionReference> uses = _referencesIndex.FindUses(_runtime.Settings, export.FunctionRef);
-            if (uses.Count > 0) _inspector.Children.Add(Text($"Used by: {string.Join(", ", uses.Select(use => use.DefinitionName))}"));
-        }
-    }
+    // ───────────────────────────── Bottom panels ─────────────────────────────
 
     // ───────────────────────────── Bottom panels ─────────────────────────────
 
@@ -977,7 +3131,16 @@ internal sealed class AutomationStudioWindow : Window
     {
         _runtimePanel.Children.Clear();
         foreach (ScriptPackageSnapshot package in _packages)
+        {
+            string source = "runtime-fault:" + package.Definition.PackageId;
+            IEnumerable<StudioDiagnostic> fault = package.LastRuntimeFault is null ? [] :
+                [new StudioDiagnostic(SelectedProfileId, source, "last-runtime-fault", "Error", package.LastRuntimeFault, package.Definition.PackageId)];
+            _diagnostics.ReplaceSource(SelectedProfileId, source, fault);
             _runtimePanel.Children.Add(Text($"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus} · enabled={package.Definition.Enabled}"));
+        }
+        RefreshProblems();
+        foreach (StudioDiagnostic diagnostic in _diagnostics.Snapshot(SelectedProfileId).Where(item => item.Source.StartsWith("runtime:", StringComparison.Ordinal)))
+            _runtimePanel.Children.Add(Text($"{diagnostic.Severity}: {diagnostic.PackageId} {diagnostic.FilePath}{(diagnostic.Line is null ? "" : $":{diagnostic.Line}:{diagnostic.Column}")} {diagnostic.Message}"));
         await Task.CompletedTask;
     }
 
@@ -986,21 +3149,36 @@ internal sealed class AutomationStudioWindow : Window
         var reader = _runtime.Events.Subscribe(512);
         try
         {
-            await foreach (var envelope in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            await Dispatcher.UIThread.InvokeAsync(() => UpdateConnectionStatus(
+                _runtime.Transport.IsConnected ? ConnectionStatus.Connected : ConnectionStatus.Disconnected));
+            while (true)
             {
-                string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
-                lock (_events)
-                {
-                    _events.Enqueue(row);
-                    while (_events.Count > MaximumEventRows) _events.Dequeue();
-                }
+                EventEnvelope[] batch = await RuntimeEventBatchReader.ReadBatchAsync(
+                    reader, RuntimeEventBatchReader.MaximumBatchSize, cancellationToken).ConfigureAwait(false);
+                if (batch.Length == 0) break;
+
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    _eventsPanel.Children.Clear();
-                    string[] snapshot; lock (_events) snapshot = _events.ToArray();
-                    foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));
-                    if (envelope.Payload is ScriptLogEmitted log) AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
-                });
+                    foreach (EventEnvelope envelope in batch)
+                    {
+                        bool recorded = RecordRuntimeEvent(envelope);
+                        bool profileScoped = envelope.Payload is ScriptLogEmitted or ScriptRuntimeDiagnosticEmitted or
+                            ScriptPackageBuildChanged or ScriptPackageRuntimeChanged;
+                        if (recorded || !profileScoped)
+                        {
+                            string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
+                            lock (_events)
+                            {
+                                _events.Enqueue(row);
+                                while (_events.Count > MaximumEventRows) _events.Dequeue();
+                            }
+                        }
+                        if (recorded && envelope.Payload is ScriptLogEmitted log)
+                            AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
+                        if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
+                        if (envelope.Payload is ConnectionStateChanged connection) UpdateConnectionStatus(connection.Status);
+                    }
+                }, DispatcherPriority.Background);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -1012,13 +3190,88 @@ internal sealed class AutomationStudioWindow : Window
         while (_console.Children.Count > 500) _console.Children.RemoveAt(0);
     }
 
+    private void ApplyRuntimeDiagnostic(ScriptRuntimeDiagnosticEmitted diagnostic)
+    {
+        string? profileId = diagnostic.ProfileId;
+        if (string.IsNullOrWhiteSpace(profileId) ||
+            !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal)) return;
+        string source = $"runtime:{diagnostic.ScriptId}:{diagnostic.ScriptInstanceId}";
+        string key = diagnostic.InvocationId?.ToString() ?? diagnostic.OperationId?.ToString() ?? diagnostic.EventId?.ToString() ?? diagnostic.Kind;
+        if (diagnostic.Kind is "InvocationStarted" or "InvocationCompleted" or "ReloadCompleted" or "ScriptUnloaded")
+            _diagnostics.Resolve(profileId, source, key);
+        else if (diagnostic.Kind is "InvocationFaulted" or "PermissionDenied" or "Timeout" or "ResourceLimitExceeded" or "UncaughtException" or "QueueOverflow")
+        {
+            _diagnostics.Upsert(new StudioDiagnostic(profileId, source, key, "Error",
+                diagnostic.Message ?? diagnostic.Kind, diagnostic.ScriptId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column));
+            AddConsole($"Runtime [{diagnostic.ScriptId}] {diagnostic.Kind}: {diagnostic.Message}");
+        }
+        RequestRuntimeUiRefresh(diagnostics: true,
+            dashboard: _activity == StudioActivity.Runtime &&
+                _runtimeSection is RuntimeSection.Diagnostics or RuntimeSection.RecentFaults);
+    }
+
     private void AddProblem(string severity, string message)
     {
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(() => AddProblem(severity, message)); return; }
-        _problems.Children.Add(Text($"{severity}: {message}"));
-        while (_problems.Children.Count > 500) _problems.Children.RemoveAt(0);
+        string source = "studio:" + severity;
+        string level = severity.Equals("Warning", StringComparison.OrdinalIgnoreCase) ? "Warning"
+            : severity.Equals("Info", StringComparison.OrdinalIgnoreCase) ? "Info"
+            : severity.Equals("Hint", StringComparison.OrdinalIgnoreCase) ? "Hint" : "Error";
+        _diagnostics.Upsert(new StudioDiagnostic(SelectedProfileId, source, message, level, message));
+        RefreshProblems();
         if (_bottomCollapsed) ToggleBottom();
         if (_bottom.Items.Count > 0) _bottom.SelectedIndex = 0;
+    }
+
+    private void RefreshProblems()
+    {
+        _problems.Children.Clear();
+        _diagnosticsPanel.Children.Clear();
+        StudioDiagnostic[] items = _diagnostics.Snapshot(SelectedProfileId).ToArray();
+        foreach (StudioDiagnostic item in items)
+            _diagnosticsPanel.Children.Add(Text($"{item.Severity} · {item.Source} · {item.PackageId ?? item.FilePath ?? "Studio"}: {item.Message}"));
+        foreach (IGrouping<string, StudioDiagnostic> group in items.GroupBy(item => item.PackageId ?? item.FilePath ?? item.Source))
+        {
+            int errors = group.Count(item => item.Severity.Equals("Error", StringComparison.OrdinalIgnoreCase));
+            int warnings = group.Count(item => item.Severity.Equals("Warning", StringComparison.OrdinalIgnoreCase));
+            int info = group.Count() - errors - warnings;
+            _problems.Children.Add(Text($"{group.Key} · {errors} errors · {warnings} warnings · {info} info"));
+            foreach (StudioDiagnostic item in group)
+            {
+                string location = item.FilePath is null ? item.Source :
+                    $"{item.FilePath}{(item.Line is null ? "" : $":{item.Line}:{item.Column}")}";
+                Button row = new()
+                {
+                    Content = Text($"{item.Severity}: {location} {item.Message}"),
+                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                    Padding = new Thickness(4, 2),
+                    IsEnabled = item.PackageId is not null && item.FilePath is not null && item.Line is not null
+                };
+                row.Click += async (_, _) => await OpenDiagnosticAsync(item).ConfigureAwait(true);
+                _problems.Children.Add(row);
+            }
+        }
+        if (_languageServerRestartButton is not null) _problems.Children.Add(_languageServerRestartButton);
+    }
+
+    private async Task OpenDiagnosticAsync(StudioDiagnostic diagnostic)
+    {
+        StudioSessionSnapshot session = _session.Current;
+        if (diagnostic.ProfileId != session.ProfileId || diagnostic.PackageId is not { } packageId ||
+            diagnostic.FilePath is not { } filePath || diagnostic.Line is not { } line ||
+            !_packages.Any(package => package.Definition.PackageId == packageId)) return;
+        try
+        {
+            await OpenSourceAsync(session, packageId, filePath).ConfigureAwait(true);
+            if (!_session.IsCurrent(session)) return;
+            await _monaco.RevealLocationAsync(
+                SourceDocumentUri(packageId, filePath), line, diagnostic.Column, session.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (!_session.IsCurrent(session)) { }
+        catch (Exception exception)
+        {
+            if (_session.IsCurrent(session)) AddProblem("Open diagnostic", exception.Message);
+        }
     }
 
     // ───────────────────────────── Window events ─────────────────────────────
@@ -1034,8 +3287,7 @@ internal sealed class AutomationStudioWindow : Window
             else await SaveActiveAsync().ConfigureAwait(true);
         }
         else if (e.Key == Key.P) { e.Handled = true; await QuickOpenAsync().ConfigureAwait(true); }
-        else if (e.Key == Key.B && e.KeyModifiers.HasFlag(KeyModifiers.Alt)) { e.Handled = true; TogglePane(_inspectorFrame, _rightSplit, 4, _preferences.InspectorWidth); }
-        else if (e.Key == Key.B) { e.Handled = true; TogglePane(_explorerFrame, _leftSplit, 0, _preferences.ExplorerWidth); }
+        else if (e.Key == Key.B) { e.Handled = true; TogglePane(_explorerFrame, _leftSplit, 1, _preferences.ExplorerWidth); }
         else if (e.Key == Key.J) { e.Handled = true; ToggleBottom(); }
         else if (e.Key == Key.W && _documents.Active is { } active)
         {
@@ -1049,39 +3301,72 @@ internal sealed class AutomationStudioWindow : Window
         }
     }
 
-    private async void WindowClosing(object? sender, WindowClosingEventArgs e)
+    private void WindowClosing(object? sender, WindowClosingEventArgs e)
     {
         if (_closeApproved || !_documents.Dirty.Any()) return;
         e.Cancel = true;
-        string choice = await ConfirmDirtyAsync("all open documents").ConfigureAwait(true);
-        if (choice == "cancel") return;
-        if (choice == "save")
+        if (_closeConfirmationPending) return;
+        _closeConfirmationPending = true;
+        long generation = ++_closeConfirmationGeneration;
+        Dispatcher.UIThread.Post(() => ConfirmCloseAsync(generation));
+    }
+
+    private async void ConfirmCloseAsync(long generation)
+    {
+        try
         {
-            await SaveAllAsync().ConfigureAwait(true);
-            if (_documents.Dirty.Any()) return;
+            if (generation != _closeConfirmationGeneration || !IsVisible || _closeApproved) return;
+            string choice = await ConfirmDirtyAsync("all open documents").ConfigureAwait(true);
+            if (generation != _closeConfirmationGeneration || !IsVisible || _closeApproved || choice == "cancel") return;
+            if (choice == "save")
+            {
+                await SaveAllAsync().ConfigureAwait(true);
+                if (generation != _closeConfirmationGeneration || !IsVisible || _documents.Dirty.Any()) return;
+            }
+            _closeApproved = true;
+            Close();
         }
-        _closeApproved = true;
-        Close();
+        catch (Exception exception)
+        {
+            if (generation == _closeConfirmationGeneration && IsVisible)
+                AddProblem("Close", exception.Message);
+        }
+        finally
+        {
+            if (generation == _closeConfirmationGeneration) _closeConfirmationPending = false;
+        }
     }
 
     private void WindowClosed(object? sender, EventArgs e)
     {
+        _closeConfirmationGeneration++;
+        _closeConfirmationPending = false;
         _workspace.WorkspaceChanged -= WorkspaceChanged;
-        _cts.Cancel();
-        if (_body.ColumnDefinitions.Count >= 5)
+        if (_workspaceWatcher is not null)
         {
-            _preferences.ExplorerWidth = _body.ColumnDefinitions[0].ActualWidth;
-            _preferences.InspectorWidth = _body.ColumnDefinitions[4].ActualWidth;
+            _workspaceWatcher.Changed -= WorkspaceExternalChanged;
+            _workspaceWatcher.Dispose();
+            _workspaceWatcher = null;
         }
+        CancelTests("Studio closed.");
+        _searchCancellation?.Cancel();
+        _searchCancellation = null;
+        _cts.Cancel();
+        if (_body.ColumnDefinitions.Count >= 4)
+            _preferences.ExplorerWidth = _body.ColumnDefinitions[1].ActualWidth;
         if (!_bottomCollapsed) _preferences.BottomHeight = _root.RowDefinitions[3].ActualHeight;
+        _preferences.BottomCollapsed = _bottomCollapsed;
+        _preferences.SetActivity(_activity);
         _preferences.Save();
         _ = _monaco.DisposeAsync();
+        _ = _typescript.DisposeAsync();
+        _session.Dispose();
         _cts.Dispose();
     }
 
     // ───────────────────────────── Dialogs ─────────────────────────────
 
-    private async Task<string> ConfirmDirtyAsync(string what)
+    private async Task<string> ConfirmDirtyAsync(string what, string action = "closing")
     {
         Window dialog = Dialog("Unsaved changes", 430, 180);
         Button save = new() { Content = "Save", MinWidth = 90 };
@@ -1090,8 +3375,25 @@ internal sealed class AutomationStudioWindow : Window
         save.Click += (_, _) => dialog.Close("save"); discard.Click += (_, _) => dialog.Close("discard"); cancel.Click += (_, _) => dialog.Close("cancel");
         StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
         buttons.Children.Add(save); buttons.Children.Add(discard); buttons.Children.Add(cancel);
-        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text($"Save changes to {what} before closing?"), buttons } };
+        dialog.Content = new StackPanel { Margin = new Thickness(18), Spacing = 16, Children = { Text($"Save changes to {what} before {action}?"), buttons } };
         return await dialog.ShowDialog<string>(this).ConfigureAwait(true) ?? "cancel";
+    }
+
+    private async Task<bool> ResolveDirtyAutomationAsync(StudioDocument document, string action)
+    {
+        if (!document.IsDirty) return true;
+        string choice = await ConfirmDirtyAsync(document.Title, action).ConfigureAwait(true);
+        if (choice == "cancel") return false;
+
+        _documents.Activate(document.Key);
+        if (choice == "save")
+        {
+            await SaveActiveAsync().ConfigureAwait(true);
+            return !document.IsDirty;
+        }
+
+        await CloseDocumentAsync(document, discardDirtyChanges: true).ConfigureAwait(true);
+        return true;
     }
 
     private async Task<bool?> ConfirmAsync(string title, string message, string confirm)

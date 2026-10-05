@@ -1,3 +1,4 @@
+using NexMud.Client.Automation;
 using NexMud.Client.Interaction;
 using NexMud.Client.Runtime;
 using NexMud.Client.Settings;
@@ -123,7 +124,7 @@ internal sealed record AutomationCollections(
             StudioDocumentKind.Keybinding => (this with { Keys = [.. Keys, new CommandKeyBinding("Cmd+1", "look", Name: Unique("New keybinding"), Context: KeybindingContext.Input)] }, Keys.Count),
             StudioDocumentKind.Timer => (this with { Timers = [.. Timers, new CommandTimer(Unique("new-timer"), 60, "score")] }, Timers.Count),
             StudioDocumentKind.StateRule => (this with { Rules = [.. Rules, new GameRule(Unique("new-state-rule"), "hp.percent < 30", "look")] }, Rules.Count),
-            StudioDocumentKind.Workflow => (this with { Workflows = [.. Workflows, new AutomationWorkflow(Unique("new-workflow"), "send look")] }, Workflows.Count),
+            StudioDocumentKind.Workflow => (this with { Workflows = [.. Workflows, new AutomationWorkflow(Unique("new-workflow"), "", Actions: [new SendCommandAutomationAction("look")], Id: Guid.NewGuid().ToString("N"))] }, Workflows.Count),
             StudioDocumentKind.Highlight => (this with { Highlights = [.. Highlights, new TranscriptHighlightRule(Unique("new highlight"), "#F59E0B")] }, Highlights.Count),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Only Automation kinds can be created here.")
         };
@@ -146,7 +147,7 @@ internal sealed record AutomationCollections(
             CommandKeyBinding v => v with { Gesture = Name(0), Name = UniqueName(kind, Name(0)), Command = Name(1) },
             GameRule v => v with { Name = UniqueName(kind, Name(0)), Condition = Name(1), Command = Name(2) },
             SemanticTriggerRule v => v with { Name = UniqueName(kind, Name(0)), EventName = Name(1) },
-            AutomationWorkflow v => v with { Name = UniqueName(kind, Name(0)), Steps = Name(1) },
+            AutomationWorkflow v => v with { Name = UniqueName(kind, Name(0)) },
             var other => other!
         };
         return (added.Replace(kind, index, filled), index);

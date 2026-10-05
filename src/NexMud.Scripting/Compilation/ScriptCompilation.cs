@@ -73,6 +73,18 @@ public sealed record ScriptManifest(
     }
 }
 
+public sealed record ScriptCompilePackageContext(
+    string PackageRoot,
+    string ProjectConfigPath,
+    string DependencyGraphHash)
+{
+    public string PackageRoot { get; } = Path.GetFullPath(PackageRoot);
+    public string ProjectConfigPath { get; } = Path.GetFullPath(ProjectConfigPath);
+    public string DependencyGraphHash { get; } = string.IsNullOrWhiteSpace(DependencyGraphHash)
+        ? throw new ArgumentException("A dependency graph hash is required.", nameof(DependencyGraphHash))
+        : DependencyGraphHash;
+}
+
 public sealed record ScriptCompileRequest(
     ScriptManifest Manifest,
     ScriptSourceLanguage Language,
@@ -80,6 +92,7 @@ public sealed record ScriptCompileRequest(
     ScriptCompilerOptions? Options = null)
 {
     public ScriptCompilerOptions EffectiveOptions => Options ?? ScriptCompilerOptions.Default;
+    public ScriptCompilePackageContext? PackageContext { get; init; }
 }
 
 public sealed record CompiledScriptModule(
@@ -173,6 +186,7 @@ public static class ScriptCompileCacheKey
         canonical.AppendLine(request.EffectiveOptions.EmitSourceMaps.ToString());
         canonical.AppendLine(request.EffectiveOptions.UseEsModules.ToString());
         canonical.AppendLine(request.EffectiveOptions.Strict.ToString());
+        canonical.AppendLine(request.PackageContext?.DependencyGraphHash ?? string.Empty);
         foreach (ScriptSourceFile source in request.Sources.OrderBy(source => source.Path, StringComparer.Ordinal))
         {
             canonical.AppendLine(source.Path);

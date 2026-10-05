@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using NexMud.Client.Paths;
@@ -59,7 +61,11 @@ public sealed record ScriptPackageSnapshot(
     ScriptStatus RuntimeStatus,
     IReadOnlyList<ExportedScriptFunction> Exports,
     DateTimeOffset? LastBuild,
-    string? LastRuntimeFault = null);
+    string? LastRuntimeFault = null)
+{
+    public bool HasNodeModulesDirectory { get; init; }
+    public string? RuntimeMessage { get; init; }
+}
 
 public sealed record ScriptWorkspaceSourceFile(string RelativePath, long Size);
 
@@ -69,6 +75,12 @@ public sealed record ScriptSourceSearchResult(
     int Line,
     int Column,
     string Preview);
+
+public sealed record ScriptSourceSearchOptions(
+    bool MatchCase = false,
+    bool WholeWord = false,
+    IReadOnlyList<string>? IncludedTerms = null,
+    IReadOnlyList<string>? ExcludedTerms = null);
 
 public sealed record ScriptPackageBuildChanged(
     string ProfileId,
@@ -90,7 +102,7 @@ public sealed record ScriptPackageRuntimeChanged(
 /// never persists source directly. Successful builds replace the active Jint package; failed
 /// builds leave the last-known-good runtime untouched.
 /// </summary>
-public sealed class ScriptWorkspaceService
+public sealed partial class ScriptWorkspaceService
 {
     private const string ManifestFileName = "manifest.json";
     private static readonly string[] SupportedExtensions = [".ts", ".js", ".d.ts", ".json"];
@@ -104,11 +116,13 @@ public sealed class ScriptWorkspaceService
         ScriptPackageBuildStatus Status,
         IReadOnlyList<ExportedScriptFunction> Exports,
         DateTimeOffset? BuiltAt,
-        string? LastRuntimeFault = null);
+        string? LastRuntimeFault = null,
+        string? RuntimeMessage = null);
 
     private readonly ClientScriptPlatform _platform;
     private readonly IEventSink _events;
     private readonly IScriptCompiler _compiler;
+    private readonly IScriptPackageManager _packageManager;
     private readonly Func<string> _activeProfileId;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, BuildState> _buildStates = new(StringComparer.OrdinalIgnoreCase);
@@ -119,12 +133,14 @@ public sealed class ScriptWorkspaceService
         ClientScriptPlatform platform,
         IEventSink events,
         Func<string> activeProfileId,
-        IScriptCompiler? compiler = null)
+        IScriptCompiler? compiler = null,
+        IScriptPackageManager? packageManager = null)
     {
         _platform = platform ?? throw new ArgumentNullException(nameof(platform));
         _events = events ?? throw new ArgumentNullException(nameof(events));
         _activeProfileId = activeProfileId ?? throw new ArgumentNullException(nameof(activeProfileId));
         _compiler = compiler ?? new TypeScriptCompiler();
+        _packageManager = packageManager ?? new ScriptPackageManager();
     }
 
     public event EventHandler? WorkspaceChanged;
@@ -143,16 +159,14 @@ public sealed class ScriptWorkspaceService
         CancellationToken cancellationToken = default)
     {
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
-        string root = GetScriptsRoot(profileId);
-        if (!Directory.Exists(root)) return [];
+        ScriptPackageWorkspaceMigrationResult migration =
+            await EnsurePackageWorkspaceAsync(profileId, cancellationToken).ConfigureAwait(false);
 
         List<ScriptPackageSnapshot> packages = [];
-        foreach (string directory in Directory.EnumerateDirectories(root).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        foreach (ScriptPackageCatalogEntry package in migration.Packages
+                     .OrderBy(value => value.Document.Name, StringComparer.OrdinalIgnoreCase))
         {
-            string manifestPath = Path.Combine(directory, ManifestFileName);
-            if (!File.Exists(manifestPath)) continue;
-            ScriptPackageDefinition? definition = await ReadManifestAsync(manifestPath, cancellationToken).ConfigureAwait(false);
-            if (definition is null) continue;
+            ScriptPackageDefinition definition = package.Document.ToRuntimeDefinition(package.Enabled);
             string stateKey = StateKey(profileId, definition.PackageId);
             BuildState state = _buildStates.TryGetValue(stateKey, out BuildState? known)
                 ? known
@@ -164,7 +178,11 @@ public sealed class ScriptWorkspaceService
                 runtimeStatus,
                 state.Exports,
                 state.BuiltAt,
-                state.LastRuntimeFault));
+                state.LastRuntimeFault)
+            {
+                HasNodeModulesDirectory = Directory.Exists(Path.Combine(package.PackageRoot, "node_modules")),
+                RuntimeMessage = state.RuntimeMessage
+            });
         }
         return packages;
     }
@@ -180,34 +198,36 @@ public sealed class ScriptWorkspaceService
         string id = ScriptWorkspacePath.NormalizeIdentifier(
             string.IsNullOrWhiteSpace(packageId) ? CreatePackageId(name) : packageId,
             nameof(packageId));
-        ScriptPackageDefinition definition = new(
+        string scriptsRoot = GetScriptsRoot(profileId);
+        _ = await EnsurePackageWorkspaceAsync(profileId, cancellationToken).ConfigureAwait(false);
+        ScriptPackageDocument document = ScriptPackageDocument.CreateNew(
             id,
-            name.Trim(),
-            "1.0.0",
-            "main.ts",
-            ScriptCapability.ReadState |
-            ScriptCapability.SubscribeEvents |
-            ScriptCapability.SendCommands |
-            ScriptCapability.CreateTimers |
-            ScriptCapability.ReadScriptStorage |
-            ScriptCapability.WriteScriptStorage |
-            ScriptCapability.Log,
-            false);
+            id,
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion,
+            displayName: name.Trim());
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            string packageRoot = GetPackageRoot(profileId, id);
+            string packageRoot = Path.Combine(scriptsRoot, id);
             if (Directory.Exists(packageRoot))
                 throw new InvalidOperationException($"Script package '{id}' already exists for profile '{profileId}'.");
-            Directory.CreateDirectory(packageRoot);
-            await WriteManifestAsync(packageRoot, definition, cancellationToken).ConfigureAwait(false);
+            Directory.CreateDirectory(Path.Combine(packageRoot, "src"));
             await AtomicWriteAsync(
-                Path.Combine(packageRoot, "main.ts"),
+                Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName),
+                document.ToJson(),
+                cancellationToken).ConfigureAwait(false);
+            await AtomicWriteAsync(
+                Path.Combine(packageRoot, "src", "main.ts"),
                 "import { nex, type AutomationInvocationContext } from \"@nexmud/api\";\n\nexport async function run(ctx: AutomationInvocationContext) {\n  await nex.log.info(\"Script invoked\", { source: ctx.sourceKind });\n}\n",
                 cancellationToken).ConfigureAwait(false);
+            await ScriptPackageWorkspaceMigrator.WriteRuntimeStateAsync(
+                scriptsRoot,
+                id,
+                enabled: false,
+                cancellationToken).ConfigureAwait(false);
             WorkspaceChanged?.Invoke(this, EventArgs.Empty);
-            return definition;
+            return document.ToRuntimeDefinition(enabled: false);
         }
         finally
         {
@@ -234,6 +254,7 @@ public sealed class ScriptWorkspaceService
             return Task.FromResult<IReadOnlyList<ScriptWorkspaceSourceFile>>([]);
         ScriptWorkspaceSourceFile[] files = Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories)
             .Where(path => !Path.GetFileName(path).Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+            .Where(path => !IsGeneratedPackagePath(packageRoot, path))
             .Where(IsSupportedSourcePath)
             .Select(path => new ScriptWorkspaceSourceFile(
                 Path.GetRelativePath(packageRoot, path).Replace('\\', '/'),
@@ -374,11 +395,17 @@ public sealed class ScriptWorkspaceService
         packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
         if (string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal) && _loadedPackageIds.Contains(packageId))
         {
-            await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(packageId), cancellationToken).ConfigureAwait(false);
+            ScriptModuleId moduleId = new(packageId);
+            await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+            _platform.UnregisterRuntimeProfile(moduleId, profileId);
             _loadedPackageIds.Remove(packageId);
         }
         string packageRoot = GetPackageRoot(profileId, packageId);
         if (Directory.Exists(packageRoot)) Directory.Delete(packageRoot, recursive: true);
+        await ScriptPackageWorkspaceMigrator.RemoveRuntimeStateAsync(
+            GetScriptsRoot(profileId),
+            packageId,
+            cancellationToken).ConfigureAwait(false);
         _buildStates.TryRemove(StateKey(profileId, packageId), out _);
         WorkspaceChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -391,12 +418,13 @@ public sealed class ScriptWorkspaceService
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
         string packageRoot = GetPackageRoot(profileId, packageId);
-        ScriptPackageDefinition definition = await RequireManifestAsync(packageRoot, cancellationToken).ConfigureAwait(false);
+        ScriptPackageDefinition definition =
+            await RequirePackageDefinitionAsync(profileId, packageId, cancellationToken).ConfigureAwait(false);
         Guid buildId = Guid.NewGuid();
         DateTimeOffset builtAt = DateTimeOffset.UtcNow;
 
         List<ScriptSourceFile> sources = [];
-        foreach (string sourcePath in Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories)
+        foreach (string sourcePath in EnumerateBuildInputFiles(packageRoot)
                      .Where(path => path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
                                     path.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
                      .OrderBy(path => path, StringComparer.Ordinal))
@@ -416,8 +444,11 @@ public sealed class ScriptWorkspaceService
             definition.Capabilities,
             ScriptOwnerKind.UserScript,
             ScriptRuntimeProfile.UserScript);
-        ScriptCompileResult compile = await _compiler.CompileAsync(
-            new ScriptCompileRequest(manifest, ScriptSourceLanguage.TypeScript, sources),
+        ScriptCompileResult compile = await CompilePackageAsync(
+            profileId,
+            packageRoot,
+            manifest,
+            sources,
             cancellationToken).ConfigureAwait(false);
         IReadOnlyList<ExportedScriptFunction> exports = compile.ExportedFunctions ?? Array.Empty<ExportedScriptFunction>();
         ScriptPackageBuildStatus status = compile.Success ? ScriptPackageBuildStatus.Succeeded : ScriptPackageBuildStatus.Failed;
@@ -426,8 +457,8 @@ public sealed class ScriptWorkspaceService
             ? prior
             : new BuildState(ScriptPackageBuildStatus.NeverBuilt, [], null);
         _buildStates[stateKey] = compile.Success
-            ? new BuildState(status, exports, builtAt, previous.LastRuntimeFault)
-            : previous with { Status = status, BuiltAt = builtAt };
+            ? new BuildState(status, exports, builtAt)
+            : previous with { Status = status, BuiltAt = builtAt, RuntimeMessage = null };
 
         if (compile.Success && compile.Package is not null && definition.Enabled &&
             string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
@@ -438,11 +469,35 @@ public sealed class ScriptWorkspaceService
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
+                bool hasPreviousRuntime = _loadedPackageIds.Contains(packageId) &&
+                    _platform.JavaScriptRuntime.Snapshot().Any(module =>
+                        module.Id.Value.Equals(packageId, StringComparison.OrdinalIgnoreCase) && module.Status == ScriptStatus.Running);
+                if (hasPreviousRuntime)
+                {
+                    string previousBuildMessage = $"Running previous build; runtime reload failed: {exception.Message}";
+                    _buildStates[stateKey] = _buildStates[stateKey] with
+                    {
+                        LastRuntimeFault = exception.Message,
+                        RuntimeMessage = previousBuildMessage
+                    };
+                    await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Running, previousBuildMessage, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(previousBuildMessage, exception);
+                }
+
                 _buildStates[stateKey] = _buildStates[stateKey] with { LastRuntimeFault = exception.Message };
                 await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Faulted, exception.Message, CancellationToken.None)
                     .ConfigureAwait(false);
                 throw;
             }
+        }
+        else if (!compile.Success && definition.Enabled && _loadedPackageIds.Contains(packageId) &&
+                 string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
+        {
+            const string previousBuildMessage = "Current source build failed. Running previous build.";
+            _buildStates[stateKey] = _buildStates[stateKey] with { RuntimeMessage = previousBuildMessage };
+            await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Running,
+                previousBuildMessage, CancellationToken.None).ConfigureAwait(false);
         }
 
         ScriptPackageBuildResult result = new(
@@ -467,6 +522,163 @@ public sealed class ScriptWorkspaceService
         return result;
     }
 
+    private async Task<ScriptCompileResult> CompilePackageAsync(
+        string profileId,
+        string packageRoot,
+        ScriptManifest manifest,
+        IReadOnlyList<ScriptSourceFile> sources,
+        CancellationToken cancellationToken)
+    {
+        ScriptPackageDocument package;
+        try
+        {
+            package = await ScriptPackageDocument.LoadAsync(
+                Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0010",
+                $"Package metadata could not be loaded: {exception.Message}"));
+        }
+
+        if (ScriptPackageDependencyValidator.Validate(package).Count > 0)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0011",
+                "Package metadata contains unsupported dependency sources. Only registry semver and profile-local workspace dependencies are allowed."));
+        }
+
+        if (package.Dependencies.Count > 0 || package.DevDependencies.Count > 0 ||
+            package.OptionalDependencies.Count > 0 || package.PeerDependencies.Count > 0)
+        {
+            ScriptPackageOperationResult restore;
+            try
+            {
+                restore = await _packageManager.RestoreAsync(profileId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0012",
+                    $"Package dependency restore failed: {exception.Message}"));
+            }
+
+            if (!restore.Success)
+            {
+                return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                    ScriptDiagnosticSeverity.Error,
+                    "NEXTS0012",
+                    $"Package dependencies are not ready: {restore.Message}"));
+            }
+        }
+
+        string projectConfigPath = Path.Combine(packageRoot, "tsconfig.json");
+        if (!File.Exists(projectConfigPath))
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0013",
+                "Package TypeScript project configuration is missing."));
+        }
+
+        string scriptsRoot = GetScriptsRoot(profileId);
+        string dependencyGraphHash;
+        try
+        {
+            dependencyGraphHash = await ComputeDependencyGraphHashAsync(scriptsRoot, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return ScriptCompileResult.Failed(new ScriptCompilerDiagnostic(
+                ScriptDiagnosticSeverity.Error,
+                "NEXTS0014",
+                $"Package dependency state could not be fingerprinted: {exception.Message}"));
+        }
+        ScriptCompileRequest request = new(manifest, ScriptSourceLanguage.TypeScript, sources)
+        {
+            PackageContext = new ScriptCompilePackageContext(packageRoot, projectConfigPath, dependencyGraphHash)
+        };
+        return await _compiler.CompileAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<string> ComputeDependencyGraphHashAsync(
+        string scriptsRoot,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.GetFullPath(scriptsRoot);
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] separator = [0];
+        string[] explicitInputs =
+        [
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.LockfileName),
+            Path.Combine(root, "pnpm-workspace.yaml"),
+            Path.Combine(root, ".npmrc"),
+            Path.Combine(root, "node_modules", ".pnpm", "lock.yaml"),
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "tsconfig.base.json"),
+            Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "sdk", "@nexmud", "api", "index.d.ts")
+        ];
+        IEnumerable<string> inputs = EnumerateBuildInputFiles(root)
+            .Concat(explicitInputs.Where(File.Exists))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(path => path, StringComparer.Ordinal);
+        foreach (string path in inputs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string relativePath = Path.GetRelativePath(root, path).Replace('\\', '/');
+            hash.AppendData(Encoding.UTF8.GetBytes(relativePath));
+            hash.AppendData(separator);
+            await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                hash.AppendData(buffer, 0, read);
+            hash.AppendData(separator);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static IEnumerable<string> EnumerateBuildInputFiles(string root)
+    {
+        Stack<string> directories = new();
+        directories.Push(root);
+        while (directories.TryPop(out string? directory))
+        {
+            foreach (string file in Directory.EnumerateFiles(directory))
+            {
+                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0)
+                    yield return file;
+            }
+
+            foreach (string child in Directory.EnumerateDirectories(directory))
+            {
+                string name = Path.GetFileName(child);
+                if (name.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals(ScriptPackageWorkspaceMigrator.NexMudDirectoryName, StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+                    (File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0)
+                {
+                    continue;
+                }
+                directories.Push(child);
+            }
+        }
+    }
+
     public async Task<IReadOnlyList<ScriptPackageBuildResult>> BuildAllAsync(
         string profileId,
         CancellationToken cancellationToken = default)
@@ -484,10 +696,16 @@ public sealed class ScriptWorkspaceService
         bool enabled,
         CancellationToken cancellationToken = default)
     {
-        string packageRoot = GetPackageRoot(profileId, packageId);
-        ScriptPackageDefinition definition = await RequireManifestAsync(packageRoot, cancellationToken).ConfigureAwait(false);
+        profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
+        packageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
+        ScriptPackageDefinition definition =
+            await RequirePackageDefinitionAsync(profileId, packageId, cancellationToken).ConfigureAwait(false);
         ScriptPackageDefinition updated = definition with { Enabled = enabled };
-        await WriteManifestAsync(packageRoot, updated, cancellationToken).ConfigureAwait(false);
+        await ScriptPackageWorkspaceMigrator.WriteRuntimeStateAsync(
+            GetScriptsRoot(profileId),
+            updated.PackageId,
+            enabled,
+            cancellationToken).ConfigureAwait(false);
         WorkspaceChanged?.Invoke(this, EventArgs.Empty);
 
         if (!string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal)) return;
@@ -495,7 +713,9 @@ public sealed class ScriptWorkspaceService
         {
             if (_loadedPackageIds.Remove(updated.PackageId))
             {
-                await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(updated.PackageId), cancellationToken).ConfigureAwait(false);
+                ScriptModuleId moduleId = new(updated.PackageId);
+                await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+                _platform.UnregisterRuntimeProfile(moduleId, profileId);
                 await PublishRuntimeAsync(profileId, updated.PackageId, ScriptStatus.Disabled, null, cancellationToken).ConfigureAwait(false);
             }
             return;
@@ -511,14 +731,73 @@ public sealed class ScriptWorkspaceService
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         if (string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal)) return;
 
-        foreach (string packageId in _loadedPackageIds.ToArray())
-            await _platform.JavaScriptRuntime.UnloadAsync(new ScriptModuleId(packageId), cancellationToken).ConfigureAwait(false);
-        _loadedPackageIds.Clear();
+        await UnloadProfilePackagesAsync(cancellationToken).ConfigureAwait(false);
         _loadedRuntimeProfileId = profileId;
+        await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>Rebuild enabled packages without unloading last-known-good runtime instances.</summary>
+    public async Task ReloadProfileAsync(string profileId, CancellationToken cancellationToken = default)
+    {
+        profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
+        if (!string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
+            throw new InvalidOperationException("Only the active Connection Profile runtime can be reloaded.");
+        if (!string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal))
+        {
+            bool loadedPackagesBelongToProfile = _loadedPackageIds.All(packageId =>
+                string.Equals(_platform.ResolveRuntimeProfile(packageId), profileId, StringComparison.Ordinal));
+            if (!loadedPackagesBelongToProfile)
+            {
+                await ActivateProfileAsync(profileId, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            _loadedRuntimeProfileId = profileId;
+        }
+
+        await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task UnloadProfilePackagesAsync(CancellationToken cancellationToken)
+    {
+        string? previousProfileId = _loadedRuntimeProfileId;
+        foreach (string packageId in _loadedPackageIds.ToArray())
+        {
+            ScriptModuleId moduleId = new(packageId);
+            await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
+            if (previousProfileId is not null)
+            {
+                _platform.UnregisterRuntimeProfile(moduleId, previousProfileId);
+                await PublishRuntimeAsync(previousProfileId, packageId, ScriptStatus.Disabled, null, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        _loadedPackageIds.Clear();
+    }
+
+    private async Task LoadEnabledPackagesAsync(string profileId, CancellationToken cancellationToken)
+    {
         IReadOnlyList<ScriptPackageSnapshot> packages = await ListPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+        List<string> failures = [];
         foreach (ScriptPackageSnapshot package in packages.Where(package => package.Definition.Enabled))
-            _ = await BuildPackageAsync(profileId, package.Definition.PackageId, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                ScriptPackageBuildResult result = await BuildPackageAsync(
+                    profileId, package.Definition.PackageId, cancellationToken).ConfigureAwait(false);
+                if (!result.Success)
+                    failures.Add($"{package.Definition.PackageId}: build failed");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                failures.Add($"{package.Definition.PackageId}: {exception.Message}");
+            }
+        }
+
+        if (failures.Count > 0)
+            throw new InvalidOperationException($"Runtime package reload was partial: {string.Join("; ", failures)}");
     }
 
 
@@ -542,35 +821,50 @@ public sealed class ScriptWorkspaceService
             cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<IReadOnlyList<ScriptSourceSearchResult>> SearchAsync(
+        string profileId,
+        string query,
+        CancellationToken cancellationToken = default) =>
+        SearchAsync(profileId, query, new ScriptSourceSearchOptions(), cancellationToken);
+
     public async Task<IReadOnlyList<ScriptSourceSearchResult>> SearchAsync(
         string profileId,
         string query,
+        ScriptSourceSearchOptions options,
         CancellationToken cancellationToken = default)
     {
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        string root = GetScriptsRoot(profileId);
-        if (!Directory.Exists(root)) return [];
+        ArgumentNullException.ThrowIfNull(options);
+        ScriptPackageWorkspaceMigrationResult migration =
+            await EnsurePackageWorkspaceAsync(profileId, cancellationToken).ConfigureAwait(false);
         List<ScriptSourceSearchResult> results = [];
-        foreach (string path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-                     .Where(path => IsSupportedSourcePath(path)))
+        foreach (ScriptPackageCatalogEntry package in migration.Packages)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            string[] lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
-            for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+            foreach (string path in EnumerateBuildInputFiles(package.PackageRoot)
+                         .Where(path => !IsGeneratedPackagePath(package.PackageRoot, path))
+                         .Where(path => !Path.GetFileName(path).Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                         .Where(IsSupportedSourcePath))
             {
-                int column = lines[lineIndex].IndexOf(query, StringComparison.OrdinalIgnoreCase);
-                if (column < 0) continue;
-                string relative = Path.GetRelativePath(root, path).Replace('\\', '/');
-                int slash = relative.IndexOf('/');
-                if (slash < 1) continue;
-                results.Add(new ScriptSourceSearchResult(
-                    relative[..slash],
-                    relative[(slash + 1)..],
-                    lineIndex + 1,
-                    column + 1,
-                    lines[lineIndex].Trim()));
-                if (results.Count >= 500) return results;
+                cancellationToken.ThrowIfCancellationRequested();
+                using StreamReader reader = new(path);
+                int lineNumber = 0;
+                while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+                {
+                    lineNumber++;
+                    int column = ScriptSourceSearchMatcher.FindFirst(line, query, options);
+                    if (column < 0) continue;
+                    string relative = Path.GetRelativePath(package.PackageRoot, path).Replace('\\', '/');
+                    string searchable = $"{package.Document.NexMud.Id} {relative} {line}";
+                    if (!ScriptSourceSearchMatcher.MatchesFilters(searchable, options)) continue;
+                    results.Add(new ScriptSourceSearchResult(
+                        package.Document.NexMud.Id,
+                        relative,
+                        lineNumber,
+                        column + 1,
+                        line.Trim()));
+                    if (results.Count >= 500) return results;
+                }
             }
         }
         return results;
@@ -582,21 +876,34 @@ public sealed class ScriptWorkspaceService
         CompiledScriptPackage package,
         CancellationToken cancellationToken)
     {
-        string storagePath = Path.Combine(GetProfileRoot(profileId), "script-storage.db");
-        IScriptHost host = _platform.CreateHost(
-            package.Manifest.Id,
-            new ScriptPermissionSet(package.Manifest.Permissions),
-            ScriptCommandOrigin.Script,
-            definition.Name,
-            storagePath);
-        bool loaded = _platform.JavaScriptRuntime.Snapshot().Any(snapshot =>
-            snapshot.Id.Value.Equals(definition.PackageId, StringComparison.OrdinalIgnoreCase) &&
-            snapshot.Status is ScriptStatus.Loading or ScriptStatus.Running);
-        if (loaded)
-            await _platform.JavaScriptRuntime.ReloadAsync(package, host, cancellationToken).ConfigureAwait(false);
-        else
-            await _platform.JavaScriptRuntime.LoadAsync(package, host, cancellationToken).ConfigureAwait(false);
+        string? previousProfileId = _platform.RegisterRuntimeProfile(package.Manifest.Id, profileId);
+        try
+        {
+            string storagePath = Path.Combine(GetProfileRoot(profileId), "script-storage.db");
+            IScriptHost host = _platform.CreateHost(
+                package.Manifest.Id,
+                new ScriptPermissionSet(package.Manifest.Permissions),
+                ScriptCommandOrigin.Script,
+                definition.Name,
+                storagePath);
+            bool loaded = _platform.JavaScriptRuntime.Snapshot().Any(snapshot =>
+                snapshot.Id.Value.Equals(definition.PackageId, StringComparison.OrdinalIgnoreCase) &&
+                snapshot.Status is ScriptStatus.Loading or ScriptStatus.Running);
+            if (loaded)
+                await _platform.JavaScriptRuntime.ReloadAsync(package, host, cancellationToken).ConfigureAwait(false);
+            else
+                await _platform.JavaScriptRuntime.LoadAsync(package, host, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _platform.RestoreRuntimeProfile(package.Manifest.Id, profileId, previousProfileId);
+            throw;
+        }
+
         _loadedPackageIds.Add(definition.PackageId);
+        string stateKey = StateKey(profileId, definition.PackageId);
+        if (_buildStates.TryGetValue(stateKey, out BuildState? state))
+            _buildStates[stateKey] = state with { RuntimeMessage = null };
         await PublishRuntimeAsync(profileId, definition.PackageId, ScriptStatus.Running, null, cancellationToken).ConfigureAwait(false);
     }
 
@@ -619,43 +926,30 @@ public sealed class ScriptWorkspaceService
             "scripting.workspace",
             cancellationToken).AsTask();
 
-    private static async Task<ScriptPackageDefinition> RequireManifestAsync(
-        string packageRoot,
+    private async Task<ScriptPackageWorkspaceMigrationResult> EnsurePackageWorkspaceAsync(
+        string profileId,
         CancellationToken cancellationToken)
     {
-        ScriptPackageDefinition? definition = await ReadManifestAsync(
-            Path.Combine(packageRoot, ManifestFileName),
+        string root = GetScriptsRoot(profileId);
+        return await ScriptPackageWorkspaceMigrator.EnsureAsync(
+            root,
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion,
             cancellationToken).ConfigureAwait(false);
-        return definition ?? throw new InvalidOperationException($"Script package manifest is missing or invalid: {packageRoot}");
     }
 
-    private static async Task<ScriptPackageDefinition?> ReadManifestAsync(
-        string manifestPath,
+    private async Task<ScriptPackageDefinition> RequirePackageDefinitionAsync(
+        string profileId,
+        string packageId,
         CancellationToken cancellationToken)
     {
-        try
-        {
-            await using FileStream stream = File.OpenRead(manifestPath);
-            ScriptPackageDefinition? definition = await JsonSerializer.DeserializeAsync<ScriptPackageDefinition>(
-                stream,
-                JsonOptions,
-                cancellationToken).ConfigureAwait(false);
-            return definition?.Normalize();
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
+        ScriptPackageWorkspaceMigrationResult migration =
+            await EnsurePackageWorkspaceAsync(profileId, cancellationToken).ConfigureAwait(false);
+        ScriptPackageCatalogEntry? package = migration.Packages.FirstOrDefault(candidate =>
+            candidate.Document.NexMud.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase));
+        if (package is null)
+            throw new InvalidOperationException($"Script package '{packageId}' is missing or invalid.");
+        return package.Document.ToRuntimeDefinition(package.Enabled);
     }
-
-    private static Task WriteManifestAsync(
-        string packageRoot,
-        ScriptPackageDefinition definition,
-        CancellationToken cancellationToken) =>
-        AtomicWriteAsync(
-            Path.Combine(packageRoot, ManifestFileName),
-            JsonSerializer.Serialize(definition.Normalize(), JsonOptions) + Environment.NewLine,
-            cancellationToken);
 
     private static async Task AtomicWriteAsync(string path, string content, CancellationToken cancellationToken)
     {
@@ -691,8 +985,70 @@ public sealed class ScriptWorkspaceService
 
     private static string GetScriptsRoot(string profileId) => Path.Combine(GetProfileRoot(profileId), "scripts");
 
-    private static string GetPackageRoot(string profileId, string packageId) =>
-        Path.Combine(GetScriptsRoot(profileId), ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId)));
+    internal static string ResolvePackageRoot(string profileId, string packageId) => GetPackageRoot(profileId, packageId);
+
+    private static string GetPackageRoot(string profileId, string packageId)
+    {
+        string normalizedPackageId = ScriptWorkspacePath.NormalizeIdentifier(packageId, nameof(packageId));
+        string scriptsRoot = GetScriptsRoot(profileId);
+        string direct = Path.Combine(scriptsRoot, normalizedPackageId);
+        if (Directory.Exists(direct))
+        {
+            string packageJson = Path.Combine(direct, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+            if (!File.Exists(packageJson)) return direct;
+            try
+            {
+                ScriptPackageDocument document = ScriptPackageDocument.Parse(File.ReadAllText(packageJson));
+                if (document.NexMud.Id.Equals(normalizedPackageId, StringComparison.OrdinalIgnoreCase)) return direct;
+            }
+            catch
+            {
+                return direct;
+            }
+        }
+
+        if (!Directory.Exists(scriptsRoot)) return direct;
+        foreach (string directory in Directory.EnumerateDirectories(scriptsRoot))
+        {
+            string packageJson = Path.Combine(directory, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+            if (!File.Exists(packageJson)) continue;
+            try
+            {
+                ScriptPackageDocument document = ScriptPackageDocument.Parse(File.ReadAllText(packageJson));
+                if (document.NexMud.Id.Equals(normalizedPackageId, StringComparison.OrdinalIgnoreCase)) return directory;
+            }
+            catch
+            {
+                // Invalid package metadata is reported by package discovery; path lookup skips it.
+            }
+        }
+        return direct;
+    }
+
+    private static string ResolvePackageIdFromDirectory(string profileId, string directoryName)
+    {
+        string packageRoot = Path.Combine(
+            GetScriptsRoot(profileId),
+            ScriptWorkspacePath.NormalizeIdentifier(directoryName, nameof(directoryName)));
+        string packageJson = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+        if (!File.Exists(packageJson)) return directoryName;
+        try
+        {
+            return ScriptPackageDocument.Parse(File.ReadAllText(packageJson)).NexMud.Id;
+        }
+        catch
+        {
+            return directoryName;
+        }
+    }
+
+    private static bool IsGeneratedPackagePath(string packageRoot, string path)
+    {
+        string relative = Path.GetRelativePath(packageRoot, path).Replace('\\', '/');
+        return relative.Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                            segment.Equals(ScriptPackageWorkspaceMigrator.NexMudDirectoryName, StringComparison.OrdinalIgnoreCase));
+    }
 
     private static string GetSourcePath(string profileId, string packageId, string relativePath) =>
         ScriptWorkspacePath.CombineInside(GetPackageRoot(profileId, packageId), relativePath);

@@ -88,13 +88,14 @@ internal sealed class StudioDocument
     public string Title { get; set; }
     public bool IsDirty { get; set; }
     public IReadOnlyList<string> Breadcrumb { get; set; } = [];
-    public int Index { get; init; } = -1;
+    public string? AutomationId { get; init; }
     public string? ProfileId { get; init; }
     public string? PackageId { get; init; }
     public string? Path { get; init; }
     public bool IsScript => Kind == StudioDocumentKind.Script;
 
-    public static string AutomationKey(StudioDocumentKind kind, int index) => $"automation:{kind}:{index}";
+    public static string AutomationKey(string profileId, StudioDocumentKind kind, string automationId) =>
+        $"automation:{profileId}:{kind}:{automationId}";
 }
 
 /// <summary>
@@ -185,21 +186,51 @@ internal sealed class StudioDocumentSet
     public IEnumerable<StudioDocument> Dirty => _documents.Where(d => d.IsDirty);
 }
 
+internal sealed record StudioSavedSearch(
+    string Name,
+    string Query,
+    bool Automations = true,
+    bool Workflows = true,
+    bool Scripts = true,
+    bool Descriptions = true,
+    bool ScriptContent = true,
+    bool MatchCase = false,
+    bool WholeWords = false,
+    string IncludeTerms = "",
+    string ExcludeTerms = "");
+
 /// <summary>Studio layout preferences. Widths/heights are clamped to the ranges defined by the workbench spec.</summary>
 internal sealed class StudioUiPreferences
 {
-    public const double DefaultExplorerWidth = 260, MinExplorerWidth = 220, MaxExplorerWidth = 360;
-    public const double DefaultInspectorWidth = 320, MinInspectorWidth = 300, MaxInspectorWidth = 360;
+    public const double DefaultExplorerWidth = 300, MinExplorerWidth = 240, MaxExplorerWidth = 420;
     public const double DefaultBottomHeight = 240, MinBottomHeight = 120, MaxBottomHeight = 600;
-    public const double CollapsedBottomHeight = 30;
+    public const double CollapsedBottomHeight = 40;
 
     private double _explorerWidth = DefaultExplorerWidth;
-    private double _inspectorWidth = DefaultInspectorWidth;
     private double _bottomHeight = DefaultBottomHeight;
 
     public double ExplorerWidth { get => _explorerWidth; set => _explorerWidth = Math.Clamp(value, MinExplorerWidth, MaxExplorerWidth); }
-    public double InspectorWidth { get => _inspectorWidth; set => _inspectorWidth = Math.Clamp(value, MinInspectorWidth, MaxInspectorWidth); }
     public double BottomHeight { get => _bottomHeight; set => _bottomHeight = Math.Clamp(value, MinBottomHeight, MaxBottomHeight); }
+    public bool BottomCollapsed { get; set; } = true;
+    public string ActiveActivity { get; set; } = nameof(StudioActivity.Automations);
+    public List<string> RecentSearches { get; set; } = [];
+    public List<StudioSavedSearch> SavedSearches { get; set; } = [];
+    public bool SearchAutomations { get; set; } = true;
+    public bool SearchWorkflows { get; set; } = true;
+    public bool SearchScripts { get; set; } = true;
+    public bool SearchDescriptions { get; set; } = true;
+    public bool SearchScriptContent { get; set; } = true;
+    public bool SearchMatchCase { get; set; }
+    public bool SearchWholeWords { get; set; }
+    public string SearchIncludeTerms { get; set; } = string.Empty;
+    public string SearchExcludeTerms { get; set; } = string.Empty;
+
+    public StudioActivity ResolveActivity() =>
+        Enum.TryParse(ActiveActivity, ignoreCase: true, out StudioActivity activity)
+            ? activity
+            : StudioActivity.Automations;
+
+    public void SetActivity(StudioActivity activity) => ActiveActivity = activity.ToString();
 
     public static string DefaultPath => NexMudDataPaths.GetFilePath("automation-studio-ui.json");
 

@@ -7,7 +7,18 @@ using Avalonia.Media;
 namespace NexMud.Gui.AutomationStudio;
 
 /// <summary>What the user wants to create, with the quick-start values collected by the wizard.</summary>
-internal sealed record NewItemRequest(NewItemTemplate Template, IReadOnlyList<string> Values);
+internal sealed record NewItemRequest(NewItemTemplate Template, IReadOnlyList<string> Values)
+{
+    public static string? Validate(NewItemTemplate template, IReadOnlyList<string> values)
+    {
+        if (values.Count != template.Fields.Count || values.Any(string.IsNullOrWhiteSpace)) return "Fill in every field.";
+        if (template.Kind == StudioDocumentKind.Timer && !(int.TryParse(values[1], out int seconds) && seconds >= 1))
+            return "Interval must be a whole number of seconds, 1 or more.";
+        if (template.Kind == StudioDocumentKind.Highlight && !Color.TryParse(values[1], out _))
+            return "Colour must be a hex value such as #F59E0B.";
+        return null;
+    }
+}
 
 internal sealed record NewItemField(string Label, string Default, string Hint);
 
@@ -30,7 +41,7 @@ internal sealed record NewItemTemplate(string Title, string Description, StudioD
         new("Semantic Trigger", "React to a recognised game event such as entering a room.", StudioDocumentKind.SemanticTrigger,
             [new("Name", "on-room-change", "Trigger name"), new("Event", "RoomChanged", "Event name")], "RoomChanged  →  your actions"),
         new("Workflow", "Chain several steps into one reusable sequence.", StudioDocumentKind.Workflow,
-            [new("Name", "buff-up", "Workflow name"), new("First step", "send look", "A workflow step")], "step 1, step 2, step 3"),
+            [new("Name", "buff-up", "Workflow name")], "Add structured actions after creation"),
         new("Script package", "Write TypeScript for logic the visual editors can't express.", StudioDocumentKind.Script,
             [new("Package name", "My scripts", "Shown in the Explorer")], "main.ts with full IntelliSense")
     ];
@@ -91,25 +102,14 @@ internal static class NewItemDialog
         void Accept()
         {
             if (list.SelectedItem is not NewItemTemplate template) return;
-            if (boxes.Any(box => string.IsNullOrWhiteSpace(box.Text)))
+            string[] values = boxes.Select(box => box.Text?.Trim() ?? "").ToArray();
+            if (NewItemRequest.Validate(template, values) is { } validationError)
             {
-                error.Text = "Fill in every field.";
+                error.Text = validationError;
                 error.IsVisible = true;
                 return;
             }
-            if (template.Kind == StudioDocumentKind.Timer && !(int.TryParse(boxes[1].Text, out int seconds) && seconds >= 1))
-            {
-                error.Text = "Interval must be a whole number of seconds, 1 or more.";
-                error.IsVisible = true;
-                return;
-            }
-            if (template.Kind == StudioDocumentKind.Highlight && !Color.TryParse(boxes[1].Text, out _))
-            {
-                error.Text = "Colour must be a hex value such as #F59E0B.";
-                error.IsVisible = true;
-                return;
-            }
-            dialog.Close(new NewItemRequest(template, boxes.Select(box => box.Text!.Trim()).ToArray()));
+            dialog.Close(new NewItemRequest(template, values));
         }
 
         list.SelectionChanged += (_, _) => Render();

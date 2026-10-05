@@ -29,6 +29,8 @@ public sealed class ClientAutomationService
         public IMudEvent? Event { get; set; }
     }
 
+    private sealed record ActiveWorkflow(string Name, IScriptExecutionScope Scope);
+
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
     private readonly ChannelReader<EventEnvelope> _events;
     private readonly StateReducer _state;
@@ -44,7 +46,7 @@ public sealed class ClientAutomationService
     private readonly ConcurrentDictionary<string, byte> _completedOneShotWorkflows = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _lastWorkflowCondition = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastWorkflowFire = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, IScriptExecutionScope> _activeWorkflows = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ActiveWorkflow> _activeWorkflows = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _workflowStartLock = new();
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<bool>> _actionCompletions = new();
     private readonly Dictionary<string, string> _variables = new(StringComparer.OrdinalIgnoreCase);
@@ -88,30 +90,34 @@ public sealed class ClientAutomationService
         }
     }
 
-    public IReadOnlyList<string> ActiveWorkflowNames => _activeWorkflows.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
+    public IReadOnlyList<string> ActiveWorkflowNames => _activeWorkflows.Values
+        .Select(workflow => workflow.Name)
+        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
-    public Task<bool> RunWorkflowAsync(string name, CancellationToken cancellationToken = default)
+    public Task<bool> RunWorkflowAsync(string workflowId, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(workflowId)) return Task.FromResult(false);
         ClientSettings settings = _settings();
         AutomationPreferences preferences = settings.Automation ?? new AutomationPreferences();
         AutomationWorkflow? workflow = (settings.Workflows ?? Array.Empty<AutomationWorkflow>())
-            .FirstOrDefault(candidate => candidate.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (workflow is null || !workflow.Enabled || !preferences.Enabled ||
+            .FirstOrDefault(candidate => WorkflowId(candidate).Equals(workflowId.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (workflow is null || !workflow.Enabled || !workflow.AllowManualRun || !preferences.Enabled ||
             preferences.GetDisabledGroupSet().Contains(workflow.Group) || !CanAutomate(_state.Current))
             return Task.FromResult(false);
         return Task.FromResult(StartWorkflow(workflow, null, cancellationToken));
     }
 
-    public bool CancelWorkflow(string name)
+    public bool CancelWorkflow(string workflowId)
     {
-        if (!_activeWorkflows.TryGetValue(name, out IScriptExecutionScope? scope)) return false;
-        scope.Cancel();
+        if (!_activeWorkflows.TryGetValue(workflowId, out ActiveWorkflow? workflow)) return false;
+        workflow.Scope.Cancel();
         return true;
     }
 
     public void CancelAllWorkflows()
     {
-        foreach (IScriptExecutionScope scope in _activeWorkflows.Values) scope.Cancel();
+        foreach (ActiveWorkflow workflow in _activeWorkflows.Values) workflow.Scope.Cancel();
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -188,9 +194,11 @@ public sealed class ClientAutomationService
                      .OrderByDescending(workflow => workflow.Priority)
                      .ThenBy(workflow => workflow.Name, StringComparer.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrWhiteSpace(workflow.Name) || string.IsNullOrWhiteSpace(workflow.Steps) ||
-                (workflow.OneShot && _completedOneShotWorkflows.ContainsKey(workflow.Name)) ||
-                _activeWorkflows.ContainsKey(workflow.Name)) continue;
+            string workflowId = WorkflowId(workflow);
+            if (string.IsNullOrWhiteSpace(workflow.Name) ||
+                (string.IsNullOrEmpty(workflow.Steps) && workflow.Actions is not { Count: > 0 }) ||
+                (workflow.OneShot && _completedOneShotWorkflows.ContainsKey(workflowId)) ||
+                _activeWorkflows.ContainsKey(workflowId)) continue;
 
             bool eventMatches = string.IsNullOrWhiteSpace(workflow.TriggerEvent)
                 ? true
@@ -203,8 +211,8 @@ public sealed class ClientAutomationService
 
             bool hasCondition = !string.IsNullOrWhiteSpace(workflow.TriggerCondition);
             bool condition = !hasCondition || GameRuleEvaluator.Evaluate(workflow.TriggerCondition!, state, Variables, currentEvent);
-            bool previous = _lastWorkflowCondition.TryGetValue(workflow.Name, out bool prior) && prior;
-            if (stateChanged || hasCondition) _lastWorkflowCondition[workflow.Name] = condition;
+            bool previous = _lastWorkflowCondition.TryGetValue(workflowId, out bool prior) && prior;
+            if (stateChanged || hasCondition) _lastWorkflowCondition[workflowId] = condition;
 
             // State-only workflows are edge-triggered. Event-triggered workflows fire for each matching event
             // while their optional state guard is true.
@@ -215,9 +223,9 @@ public sealed class ClientAutomationService
 
             DateTimeOffset now = _scheduler.UtcNow;
             int cooldown = Math.Clamp(workflow.CooldownMilliseconds, 0, 600_000);
-            if (_lastWorkflowFire.TryGetValue(workflow.Name, out DateTimeOffset last) && now - last < TimeSpan.FromMilliseconds(cooldown)) continue;
+            if (_lastWorkflowFire.TryGetValue(workflowId, out DateTimeOffset last) && now - last < TimeSpan.FromMilliseconds(cooldown)) continue;
 
-            _lastWorkflowFire[workflow.Name] = now;
+            _lastWorkflowFire[workflowId] = now;
             StartWorkflow(workflow, currentEvent, cancellationToken);
             if (_activeWorkflows.Count >= maximum) break;
         }
@@ -226,27 +234,29 @@ public sealed class ClientAutomationService
 
     private bool StartWorkflow(AutomationWorkflow workflow, IMudEvent? triggerEvent, CancellationToken cancellationToken)
     {
+        string workflowId = WorkflowId(workflow);
         IScriptExecutionScope scope = _automationScope.CreateChild(
             ScriptOwnerKind.AutomationWorkflow,
             $"Automation: {workflow.Name}");
         lock (_workflowStartLock)
         {
             int maximum = Math.Clamp((_settings().Automation ?? new AutomationPreferences()).MaxConcurrentWorkflows, 1, 16);
-            if ((workflow.OneShot && _completedOneShotWorkflows.ContainsKey(workflow.Name)) ||
-                _activeWorkflows.Count >= maximum || !_activeWorkflows.TryAdd(workflow.Name, scope))
+            if ((workflow.OneShot && _completedOneShotWorkflows.ContainsKey(workflowId)) ||
+                _activeWorkflows.Count >= maximum || !_activeWorkflows.TryAdd(workflowId, new ActiveWorkflow(workflow.Name, scope)))
             {
                 _ = scope.DisposeAsync().AsTask();
                 return false;
             }
-            if (workflow.OneShot) _completedOneShotWorkflows.TryAdd(workflow.Name, 0);
+            if (workflow.OneShot) _completedOneShotWorkflows.TryAdd(workflowId, 0);
         }
 
-        _ = RunWorkflowScopeAsync(workflow, triggerEvent, scope, cancellationToken);
+        _ = RunWorkflowScopeAsync(workflow, workflowId, triggerEvent, scope, cancellationToken);
         return true;
     }
 
     private async Task RunWorkflowScopeAsync(
         AutomationWorkflow workflow,
+        string workflowId,
         IMudEvent? triggerEvent,
         IScriptExecutionScope scope,
         CancellationToken callerCancellation)
@@ -258,7 +268,7 @@ public sealed class ClientAutomationService
         {
             await scope.RunAsync(
                 $"workflow:{workflow.Name}",
-                token => ExecuteWorkflowAsync(workflow, triggerEvent, token)).ConfigureAwait(false);
+                token => ExecuteWorkflowAsync(workflow, workflowId, triggerEvent, token)).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (scope.IsCancellationRequested)
         {
@@ -272,12 +282,12 @@ public sealed class ClientAutomationService
         }
         finally
         {
-            _activeWorkflows.TryRemove(workflow.Name, out _);
+            _activeWorkflows.TryRemove(workflowId, out _);
             await scope.DisposeAsync().ConfigureAwait(false);
         }
     }
 
-    private async Task ExecuteWorkflowAsync(AutomationWorkflow workflow, IMudEvent? triggerEvent, CancellationToken cancellationToken)
+    private async Task ExecuteWorkflowAsync(AutomationWorkflow workflow, string workflowId, IMudEvent? triggerEvent, CancellationToken cancellationToken)
     {
         WorkflowContext context = new(triggerEvent);
         string[] steps = workflow.Steps
@@ -287,6 +297,51 @@ public sealed class ClientAutomationService
             .ToArray();
         await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Started, 0, steps.Length, "Triggered", cancellationToken).ConfigureAwait(false);
 
+        bool skipStructuredActions = false;
+        if (workflow.Actions is { Count: > 0 })
+        {
+            bool ready;
+            string? preparationError = null;
+            try
+            {
+                ready = _compiledAutomation is not null &&
+                        await _compiledAutomation.PrepareWorkflowActionsAsync(workflow, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                ready = false;
+                preparationError = exception.Message;
+            }
+
+            if (!ready)
+            {
+                string detail = preparationError is null
+                    ? "Workflow action dispatcher is unavailable."
+                    : $"Workflow action dispatcher could not be prepared: {preparationError}";
+                if (workflow.FailureMode == AutomationWorkflowFailureMode.Stop)
+                {
+                    await PublishWorkflowAsync(
+                        workflow.Name,
+                        AutomationWorkflowStatus.Failed,
+                        0,
+                        steps.Length,
+                        $"{detail} No workflow steps were executed.",
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                // Continue mode deliberately skips the unavailable tail and records recovery.
+                skipStructuredActions = true;
+                await PublishWorkflowAsync(
+                    workflow.Name,
+                    AutomationWorkflowStatus.Running,
+                    0,
+                    steps.Length,
+                    $"Action dispatch unavailable; continuing without structured actions: {detail}",
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         for (int index = 0; index < steps.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -294,7 +349,7 @@ public sealed class ClientAutomationService
             try
             {
                 await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Running, index, steps.Length, step, cancellationToken).ConfigureAwait(false);
-                bool keepGoing = await ExecuteWorkflowStepAsync(workflow.Name, step, index, steps.Length, context, cancellationToken).ConfigureAwait(false);
+                bool keepGoing = await ExecuteWorkflowStepAsync(workflowId, workflow.Name, step, index, steps.Length, context, cancellationToken).ConfigureAwait(false);
                 if (!keepGoing)
                 {
                     await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Completed, index + 1, steps.Length, "Stopped by workflow.", cancellationToken).ConfigureAwait(false);
@@ -319,17 +374,47 @@ public sealed class ClientAutomationService
             }
         }
 
-        if (workflow.Actions is { Count: > 0 } && _compiledAutomation is not null)
+        if (!skipStructuredActions && workflow.Actions is { Count: > 0 })
         {
-            bool dispatched = await _compiledAutomation.RunWorkflowActionsAsync(
-                workflow,
-                context.Event,
-                Variables,
-                cancellationToken).ConfigureAwait(false);
-            if (!dispatched && workflow.FailureMode == AutomationWorkflowFailureMode.Stop)
+            bool dispatched = false;
+            string? dispatchError = null;
+            try
             {
-                await PublishWorkflowAsync(workflow.Name, AutomationWorkflowStatus.Failed, steps.Length, steps.Length, "Compiled workflow actions were not dispatched.", cancellationToken).ConfigureAwait(false);
-                return;
+                dispatched = _compiledAutomation is not null && await _compiledAutomation.RunWorkflowActionsAsync(
+                    workflow,
+                    context.Event,
+                    Variables,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                dispatchError = exception.Message;
+            }
+
+            if (!dispatched)
+            {
+                string detail = dispatchError is null
+                    ? "Structured workflow actions could not be dispatched."
+                    : $"Structured workflow actions could not be dispatched: {dispatchError}";
+                if (workflow.FailureMode == AutomationWorkflowFailureMode.Stop)
+                {
+                    await PublishWorkflowAsync(
+                        workflow.Name,
+                        AutomationWorkflowStatus.Failed,
+                        steps.Length,
+                        steps.Length,
+                        detail,
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                await PublishWorkflowAsync(
+                    workflow.Name,
+                    AutomationWorkflowStatus.Running,
+                    steps.Length,
+                    steps.Length,
+                    $"Action dispatch failed; continuing: {detail}",
+                    cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -337,6 +422,7 @@ public sealed class ClientAutomationService
     }
 
     private async Task<bool> ExecuteWorkflowStepAsync(
+        string workflowId,
         string workflowName,
         string step,
         int index,
@@ -347,12 +433,12 @@ public sealed class ClientAutomationService
         if (TryConditionalStep(step, "if", out string condition, out string conditionalStep))
         {
             if (!GameRuleEvaluator.Evaluate(condition, _state.Current, Variables, context.Event)) return true;
-            return await ExecuteWorkflowStepAsync(workflowName, conditionalStep, index, total, context, cancellationToken).ConfigureAwait(false);
+            return await ExecuteWorkflowStepAsync(workflowId, workflowName, conditionalStep, index, total, context, cancellationToken).ConfigureAwait(false);
         }
         if (TryConditionalStep(step, "unless", out string unlessCondition, out string unlessStep))
         {
             if (GameRuleEvaluator.Evaluate(unlessCondition, _state.Current, Variables, context.Event)) return true;
-            return await ExecuteWorkflowStepAsync(workflowName, unlessStep, index, total, context, cancellationToken).ConfigureAwait(false);
+            return await ExecuteWorkflowStepAsync(workflowId, workflowName, unlessStep, index, total, context, cancellationToken).ConfigureAwait(false);
         }
         if (TryRetryStep(step, out int retries, out int retryDelayMilliseconds, out string retryStep))
         {
@@ -362,7 +448,7 @@ public sealed class ClientAutomationService
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    return await ExecuteWorkflowStepAsync(workflowName, retryStep, index, total, context, cancellationToken).ConfigureAwait(false);
+                    return await ExecuteWorkflowStepAsync(workflowId, workflowName, retryStep, index, total, context, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -396,7 +482,7 @@ public sealed class ClientAutomationService
                 ExpandTemplate(command, _state.Current, context.Event),
                 awaitDispatch: true,
                 cancellationToken,
-                GetWorkflowScope(workflowName)).ConfigureAwait(false);
+                GetWorkflowScope(workflowId)).ConfigureAwait(false);
             if (!succeeded) throw new InvalidOperationException($"Command rejected: {command}");
             return true;
         }
@@ -508,8 +594,11 @@ public sealed class ClientAutomationService
         }
     }
 
-    private IScriptExecutionScope? GetWorkflowScope(string workflowName) =>
-        _activeWorkflows.TryGetValue(workflowName, out IScriptExecutionScope? scope) ? scope : null;
+    private IScriptExecutionScope? GetWorkflowScope(string workflowId) =>
+        _activeWorkflows.TryGetValue(workflowId, out ActiveWorkflow? workflow) ? workflow.Scope : null;
+
+    private static string WorkflowId(AutomationWorkflow workflow) =>
+        AutomationRuntimeCompiler.WorkflowProgramId(workflow);
 
     private void CompleteActionWaiter(IMudEvent mudEvent)
     {

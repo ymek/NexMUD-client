@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using NexMud.Adapters.Avendar;
 using NexMud.Adapters.Observation;
@@ -34,6 +36,7 @@ using NexMud.Scripting.Time;
 using NexMud.Scripting.Jint.Runtime;
 using NexMud.Scripting.TypeScript.Declarations;
 using NexMud.Scripting.TypeScript.Compiler;
+using NexMud.Scripting.Tooling;
 using NexMud.Core.Actions;
 using NexMud.Core.Events;
 using NexMud.Core.Jev;
@@ -50,8 +53,11 @@ public static class Program
     private static int _passed;
     private static int _failed;
 
-    public static async Task<int> Main()
+    public static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0].StartsWith("--tool-process-", StringComparison.Ordinal))
+            return await RunToolProcessProbeAsync(args).ConfigureAwait(false);
+
         await RunAsync("connection options reject bad port", ConnectionOptionsRejectBadPort);
         await RunAsync("default telnet identity is neutral", DefaultTelnetIdentityIsNeutral);
         await RunAsync("copilot preset configures matrix", CopilotPresetConfiguresMatrix);
@@ -80,6 +86,42 @@ public static class Program
         await RunAsync("Jint reload preserves running instance when replacement fails", JintReloadPreservesOldInstanceOnFailure);
         await RunAsync("NexMUD TypeScript declarations track script API version", TypeScriptDeclarationsTrackApiVersion);
         await RunAsync("TypeScript compiler compiles and type-checks reference script", TypeScriptCompilerCompilesReferenceScript);
+        await RunAsync("package compiler bundles dependencies and activates in Jint", Phase7PackageCompilerTests.BundlesPackageDependenciesAndEntrypointExports);
+        await RunAsync("package compiler discovers local import entrypoint exports", Phase7PackageCompilerTests.DiscoversEntrypointExportsFromLocalImports);
+        await RunAsync("package compiler discovers aliased local import entrypoint exports", Phase7PackageCompilerTests.DiscoversAliasedEntrypointExportsFromLocalImports);
+        await RunAsync("package compiler rejects unresolved local entrypoint exports", Phase7PackageCompilerTests.RejectsUnresolvedLocalEntrypointExports);
+        await RunAsync("package compiler preserves configured type libraries", Phase7PackageCompilerTests.PreservesProjectConfiguredTypeLibraries);
+        await RunAsync("package compiler rejects Node built-in imports", Phase7PackageCompilerTests.RejectsNodeBuiltins);
+        await RunAsync("package dependency source policy covers optional and peer dependencies", Phase7PackageCompilerTests.DependencySourcesAreValidatedAcrossManifestSections);
+        await RunAsync("package compile cache includes dependency graph", Phase7PackageCompilerTests.CacheKeyIncludesDependencyGraph);
+        await RunAsync("Phase 8 discovers package tests", Phase8ScriptTestServiceTests.DiscoversSupportedPackageTests);
+        await RunAsync("Phase 8 isolates discovery by profile", Phase8ScriptTestServiceTests.DiscoversTestsFromRequestedProfile);
+        await RunAsync("Phase 8 ignores linked test directories", Phase8ScriptTestServiceTests.IgnoresLinkedTestDirectories);
+        await RunAsync("Phase 8 runs controlled Vitest and maps locations", Phase8ScriptTestServiceTests.RunsBundledVitestAndMapsAssertionLocations);
+        await RunAsync("Phase 8 runs real Vitest with an offline API shim", Phase8ScriptTestServiceTests.RunsRealBundledVitestAgainstOfflineApiShim);
+        await RunAsync("Phase 8 escapes selected test names", Phase8ScriptTestServiceTests.AppliesSelectedTestNamesAsEscapedVitestArguments);
+        await RunAsync("Phase 8 rejects oversized Vitest reports", Phase8ScriptTestServiceTests.RejectsOversizedVitestReport);
+        await RunAsync("Phase 8 reports malformed Vitest reports", Phase8ScriptTestServiceTests.ReportsMalformedVitestReport);
+        await RunAsync("Phase 8 reports process start failures", Phase8ScriptTestServiceTests.ReportsProcessStartFailures);
+        await RunAsync("Phase 8 propagates cancellation", Phase8ScriptTestServiceTests.PropagatesTestCancellation);
+        await RunAsync("Phase 8 sandbox profile escapes paths and limits roots", Phase8ScriptTestServiceTests.SandboxProfileQuotesPathsAndAllowsOnlyRequestedRoots);
+        await RunAsync("Phase 8 fails closed when OS sandbox is unavailable", Phase8ScriptTestServiceTests.SandboxProviderFailsClosedWhenUnavailable);
+        await RunAsync("Phase 8 macOS sandbox denies network and outside filesystem", Phase8ScriptTestServiceTests.MacOsSandboxDeniesNetworkAndOutsideFilesystem);
+        await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
+        await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
+        await RunAsync("Phase 5 source search handles overlap, Unicode, and filters", Phase5SourceSearchTests.HandlesOverlappingUnicodeAndFilterTerms);
+        await RunAsync("Studio batches runtime events for UI dispatch", StudioRuntimeRefreshTests.ReadsBoundedEventBatchesInOrder);
+        await RunAsync("Studio runtime batches await new events and cancel cleanly", StudioRuntimeRefreshTests.ReadsEventsArrivingAfterWaitAndHonorsCancellation);
+        await RunAsync("Studio coalesces runtime refresh bursts", StudioRuntimeRefreshTests.CoalescesUntilRefreshCompletes);
+        await RunAsync("Studio ignores stale runtime refresh completion after profile switch", StudioRuntimeRefreshTests.ProfileInvalidationIgnoresStaleRefreshCompletion);
+        await RunAsync("Studio search workspace accepts Avalonia grid columns", StudioLayoutTests.SearchWorkspaceColumnsParse);
+        await RunAsync("Studio Monaco visibility tracks active editor", StudioLayoutTests.MonacoVisibilityTracksEditorMode);
+        await RunAsync("Runtime uses a focused navigator refresh policy", StudioLayoutTests.RuntimeSkipsWorkspaceNavigator);
+        await RunAsync("Studio search matcher honors case and whole-word filters", StudioSearchMatcherTests.MatchesCaseAndWholeWordOptions);
+        await RunAsync("Studio search matcher handles overlapping Unicode whole-word boundaries", StudioSearchMatcherTests.HandlesOverlappingAndUnicodeWholeWordBoundaries);
+        await RunAsync("Studio search matcher applies include and exclude terms", StudioSearchMatcherTests.AppliesIncludeAndExcludeTerms);
+        await RunAsync("Studio search matcher ranks title matches", StudioSearchMatcherTests.RanksExactAndTitleMatchesFirst);
+        await RunAsync("Studio saved search preserves scope and filters", StudioSearchMatcherTests.SavedSearchRoundTripsScopesAndFilters);
         await RunAsync("scripting vertical slice routes semantic vitals event through central command dispatch", ScriptingVerticalSliceRoutesVitalsToCommand);
         await RunAsync("scripting vertical slice isolates permission denial", ScriptingVerticalSliceDeniesMissingCommandPermission);
         await RunAsync("scripting unload discards late async host completion", ScriptingUnloadDiscardsLateHostCompletion);
@@ -87,6 +129,8 @@ public static class Program
         await RunAsync("scripting handler faults stay isolated", ScriptingHandlerFaultStaysIsolated);
         await RunAsync("scripting runaway handler is constrained", ScriptingRunawayHandlerIsConstrained);
         await RunAsync("scripting runtime diagnostics map to TypeScript source", ScriptingRuntimeDiagnosticsMapToTypeScriptSource);
+        await RunAsync("scripting runtime diagnostics retain originating profile", ScriptingRuntimeDiagnosticsKeepOriginatingProfile);
+        await RunAsync("scripting runtime profile restore is conditional", RuntimeProfileRegistryRestoresPreviousOwnerConditionally);
         await RunAsync("Automation compiler is deterministic and capability-derived", AutomationCompilerIsDeterministic);
         await RunAsync("compiled Automation alias executes through Jint with Automation provenance", CompiledAutomationAliasExecutesThroughJint);
         await RunAsync("compiled Automation alias resumes after delayed host completion", CompiledAutomationAliasResumesAfterDelayedHostCompletion);
@@ -174,7 +218,12 @@ public static class Program
         await RunAsync("world scrollback is bounded and searchable", WorldScrollbackIsBoundedAndSearchable);
         await RunAsync("automation expressions support OR predicates variables and entity functions", AutomationExpressionsSupportRichPredicates);
         await RunAsync("automation rules yield to the human override window without dropping commands", AutomationRulesWaitForHumanOverride);
-        await RunAsync("automation workflow settings round trip", AutomationWorkflowSettingsRoundTrip);
+        await RunAsync("automation workflow settings round trip preserves DSL and structured actions", AutomationWorkflowSettingsRoundTrip);
+        await RunAsync("workflow program identity distinguishes duplicate names", WorkflowProgramIdentityDistinguishesDuplicateNames);
+        await RunAsync("workflow settings normalization assigns stable unique ids", WorkflowSettingsNormalizationAssignsStableUniqueIds);
+        await RunAsync("workflow dispatcher preflight prevents partial legacy execution", WorkflowDispatcherPreflightPreventsPartialExecution);
+        await RunAsync("continue mode skips unavailable workflow actions and completes DSL", ContinueModeSkipsUnavailableWorkflowActions);
+        await RunAsync("legacy workflow conversion is conservative and all-or-nothing", LegacyWorkflowConversionIsAllOrNothing);
         await RunAsync("automation workflow dispatches sequential commands without blocking its event reader", AutomationWorkflowDispatchesWithoutDeadlock);
         await RunAsync("automation workflow retries are bounded and observable", AutomationWorkflowRetriesAreBounded);
         await RunAsync("automation workflow concurrency is enforced for manual starts", AutomationWorkflowConcurrencyIsEnforced);
@@ -267,7 +316,530 @@ public static class Program
         await RunAsync("typesafe choice response maps to trace", TypesafeChoiceMapsToTrace);
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
         await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
+        await RunAsync("studio automation CRUD covers every structured kind", StudioAutomationCrudCoversEveryKind);
+        await RunAsync("studio creation wizard validates requests", StudioCreationWizardValidatesRequests);
         await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
+        await RunAsync("studio document set tracks dirty state", () =>
+        {
+            var set = new NexMud.Gui.AutomationStudio.StudioDocumentSet();
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                "automation:Alias:0",
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "cake");
+            set.OpenOrFocus(document);
+            set.SetDirty(document.Key, true);
+            Assert.Equal(document.Key, Assert.Single(set.Dirty).Key);
+            set.SetDirty(document.Key, false);
+            Assert.False(set.Dirty.Any());
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio UI preferences default collapsed and preserve saved state", StudioUiPreferencesPreserveBottomCollapse);
+        await RunAsync("script workspace paths reject traversal", () =>
+        {
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeRelativePath("src/../escape.ts"));
+            Assert.Throws<ArgumentException>(() =>
+                ScriptWorkspacePath.NormalizeIdentifier("bad/package", "packageId"));
+
+            string root = Path.Combine(Path.GetTempPath(), "nexmud-workspace-containment");
+            string inside = ScriptWorkspacePath.CombineInside(root, "src/main.ts");
+            string canonicalRoot = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
+            Assert.True(inside.StartsWith(canonicalRoot, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio diagnostics aggregate, replace, resolve, and isolate profiles", () =>
+        {
+            var hub = new NexMud.Gui.AutomationStudio.StudioDiagnosticsHub();
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "1", "Error", "old"));
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "build:pkg", "2", "Warning", "build"));
+            hub.ReplaceSource("profile-a", "typescript:file.ts",
+            [
+                new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "1", "Error", "updated"),
+                new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "typescript:file.ts", "3", "Info", "new")
+            ]);
+            hub.ReplaceSource("profile-b", "typescript:file.ts", []);
+            Assert.Equal(3, hub.Snapshot("profile-a").Count);
+            Assert.Equal("updated", hub.Snapshot("profile-a").Single(item => item.Key == "1").Message);
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Message == "old"));
+            Assert.Equal(0, hub.Snapshot("profile-b").Count);
+            hub.Resolve("profile-a", "typescript:file.ts", "1");
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Key == "1"));
+            hub.ReplaceSource("profile-a", "typescript:file.ts", []);
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "tests:pkg-a", "failed", "Error", "test"));
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-a", "tests:pkg-b", "failed", "Error", "test"));
+            hub.ReplaceSource("profile-a", "tests:pkg-a", []);
+            var remainingTestDiagnostics = hub.Snapshot("profile-a")
+                .Where(item => item.Source.StartsWith("tests:", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(1, remainingTestDiagnostics.Length);
+            Assert.Equal("tests:pkg-b", remainingTestDiagnostics[0].Source);
+            hub.Upsert(new NexMud.Gui.AutomationStudio.StudioDiagnostic("profile-b", "tests:pkg-c", "failed", "Error", "other profile"));
+            hub.ResolveSourcesByPrefix("profile-a", "tests:");
+            Assert.False(hub.Snapshot("profile-a").Any(item => item.Source.StartsWith("tests:", StringComparison.Ordinal)));
+            Assert.Equal("other profile", hub.Snapshot("profile-b").Single().Message);
+            Assert.Equal(1, hub.Snapshot("profile-a").Count);
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio profile transitions serialize and discard stale requests", async () =>
+        {
+            var transitions = new NexMud.Gui.AutomationStudio.StudioProfileTransitionGate();
+            using CancellationTokenSource cancellation = new();
+            long first = transitions.Request();
+            Assert.True(await transitions.EnterLatestAsync(first, cancellation.Token));
+            long latest = transitions.Request();
+            Task<bool> staleTransition = transitions.EnterLatestAsync(first, cancellation.Token);
+            transitions.Exit();
+
+            Assert.False(await staleTransition);
+            Assert.True(transitions.IsCurrent(latest));
+            Assert.True(await transitions.EnterLatestAsync(latest, cancellation.Token));
+            transitions.Exit();
+        });
+        await RunAsync("studio document sessions survive superseded profile switches", () =>
+        {
+            var sessions = new NexMud.Gui.AutomationStudio.StudioDocumentSessionStore();
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                "script:pkg/src/main.ts", NexMud.Gui.AutomationStudio.StudioDocumentKind.Script, "main.ts")
+            {
+                ProfileId = "profile-a",
+                PackageId = "pkg",
+                Path = "src/main.ts"
+            };
+            sessions.Capture("profile-a", [document], document.Key);
+            sessions.Capture("profile-a", [], null);
+
+            Assert.True(sessions.TryGet("profile-a", out NexMud.Gui.AutomationStudio.StudioDocumentSessionSnapshot snapshot));
+            Assert.Equal(document.Key, snapshot.ActiveDocumentKey);
+            Assert.Equal("profile-a", snapshot.Documents.Single().ProfileId);
+            sessions.Remove("profile-a");
+            Assert.False(sessions.TryGet("profile-a", out _));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio profile switch cancels previous generation", () =>
+        {
+            using var session = new NexMud.Gui.AutomationStudio.StudioSessionController("avendar");
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot first = session.Current;
+            NexMud.Gui.AutomationStudio.StudioSessionSnapshot second = session.SwitchProfile("test-profile");
+
+            Assert.True(first.CancellationToken.IsCancellationRequested);
+            Assert.Equal(1L, second.Generation);
+            Assert.Equal("test-profile", second.ProfileId);
+            Assert.True(session.IsCurrent(second));
+            Assert.False(session.IsCurrent(first));
+            return Task.CompletedTask;
+        });
+        await RunAsync("automation script references survive module-path rewrite", () =>
+        {
+            ScriptFunctionRef source = new("combat-tools", "src/combat.ts", "flee");
+            ScriptFunctionRef destination = new("combat-tools", "src/actions/combat.ts", "flee");
+            JsonElement arguments = JsonSerializer.SerializeToElement(new { });
+
+            ClientSettings settings = ClientSettings.Default with
+            {
+                Aliases =
+                [
+                    new CommandAlias(
+                        "panic",
+                        "flee",
+                        Actions:
+                        [
+                            new RunScriptFunctionAutomationAction(source, arguments)
+                        ])
+                ],
+                Triggers =
+                [
+                    new TriggerRule(
+                        "You are hurt",
+                        "flee",
+                        Conditions:
+                        [
+                            new ScriptPredicateAutomationCondition(source, arguments)
+                        ])
+                ]
+            };
+
+            AutomationReferenceIndex index = new();
+            Assert.Equal(2, index.FindUses(settings, source).Count);
+
+            ClientSettings rewritten = index.RewriteModulePath(
+                settings,
+                "combat-tools",
+                "src/combat.ts",
+                "src/actions/combat.ts");
+
+            Assert.Equal(0, index.FindUses(rewritten, source).Count);
+            Assert.Equal(2, index.FindUses(rewritten, destination).Count);
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio activities partition automation and workflow explorers", () =>
+        {
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias));
+            Assert.False(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Automations,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.IncludesAutomationKind(
+                NexMud.Gui.AutomationStudio.StudioActivity.Workflows,
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Workflow));
+            Assert.True(NexMud.Gui.AutomationStudio.StudioActivityModel.ShowsScriptPackages(
+                NexMud.Gui.AutomationStudio.StudioActivity.Scripts));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio automation organization keeps stable item identity", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("one", "look"),
+                        new CommandAlias("two", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"test_{++sequence}");
+            string first = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+            string second = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(second, catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            Assert.False(first == catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0));
+            return Task.CompletedTask;
+        });
+        await RunAsync("studio folders organize without changing runtime groups", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Triggers = [new TriggerRule("danger", "flee", Group: "combat")]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"item_{++sequence}");
+            catalog = catalog.AddFolder(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                "Defensive",
+                createId: () => "folder_defensive");
+            string itemId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, 0);
+            catalog = catalog.MoveItem(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger,
+                itemId,
+                "folder_defensive");
+
+            Assert.Equal("folder_defensive", catalog.FolderIdFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Trigger, itemId));
+            Assert.Equal("combat", collections.Triggers[0].Group);
+            Assert.Throws<InvalidOperationException>(() => catalog.DeleteEmptyFolder("folder_defensive"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio open automation identity survives sibling deletion", () =>
+        {
+            var collections = NexMud.Gui.AutomationStudio.AutomationCollections.From(
+                ClientSettings.Default with
+                {
+                    Aliases =
+                    [
+                        new CommandAlias("first", "look"),
+                        new CommandAlias("second", "score")
+                    ]
+                });
+            int sequence = 0;
+            var catalog = NexMud.Gui.AutomationStudio.AutomationOrganizationCatalog.Empty.Reconcile(
+                collections,
+                () => $"open_{++sequence}");
+            string openId = catalog.IdFor(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 1);
+            var document = new NexMud.Gui.AutomationStudio.StudioDocument(
+                NexMud.Gui.AutomationStudio.StudioDocument.AutomationKey(
+                    "profile",
+                    NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                    openId),
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                "second")
+            {
+                AutomationId = openId,
+                ProfileId = "profile"
+            };
+
+            catalog = catalog.RegisterRemoved(NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias, 0);
+
+            Assert.Equal(openId, document.AutomationId);
+            Assert.Equal(0, catalog.SourceIndexFor(
+                NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias,
+                document.AutomationId!));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer builds nested package-relative tree", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceSourceFile[] files =
+            [
+                new("main.ts", 10),
+                new("src/combat.ts", 20),
+                new("src/util/math.ts", 30),
+                new("types/api.d.ts", 40)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files);
+
+            Assert.SequenceEqual(["src", "types", "main.ts"], roots.Select(node => node.Name));
+            NexMud.Gui.AutomationStudio.ScriptExplorerEntry src = roots[0];
+            Assert.True(src.IsFolder);
+            Assert.SequenceEqual(["util", "combat.ts"], src.Children.Select(node => node.Name));
+            Assert.Equal("src/util/math.ts", src.Children[0].Children[0].RelativePath);
+
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> filtered =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(files, "combat");
+            Assert.Equal(1, filtered.Count);
+            Assert.Equal("src", filtered[0].Name);
+            Assert.Equal("combat.ts", Assert.Single(filtered[0].Children).Name);
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer shows installed node_modules as ignored", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceEntry[] entries =
+            [
+                new("src/main.ts", false, 10, DateTimeOffset.UnixEpoch)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(
+                    entries,
+                    hasNodeModulesDirectory: true);
+            Assert.SequenceEqual(["src", "node_modules"], roots.Select(entry => entry.Name));
+            NexMud.Gui.AutomationStudio.ScriptExplorerEntry ignored =
+                roots.Single(entry => entry.Name == "node_modules");
+
+            Assert.True(ignored.IsFolder);
+            Assert.True(ignored.IsIgnored);
+            Assert.Equal(0, ignored.Children.Count);
+            Assert.False(roots.Single(entry => entry.Name == "src").IsIgnored);
+            Assert.False(NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(
+                    entries,
+                    "main.ts",
+                    hasNodeModulesDirectory: true)
+                .Any(entry => entry.Name == "node_modules"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer derives safe file destinations", () =>
+        {
+            Assert.Equal("src/module.ts", NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "module.ts"));
+            Assert.Equal("src", NexMud.Gui.AutomationStudio.ScriptExplorerTree.ParentPath("src/module.ts"));
+            Assert.True(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("src/util/math.ts", "src"));
+            Assert.False(NexMud.Gui.AutomationStudio.ScriptExplorerTree.IsSameOrDescendant("source.ts", "src"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Combine("src", "../escape.ts"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer preserves explicit empty folders", () =>
+        {
+            NexMud.Client.Scripting.ScriptWorkspaceEntry[] entries =
+            [
+                new("empty", true, 0, DateTimeOffset.UnixEpoch),
+                new("src", true, 0, DateTimeOffset.UnixEpoch),
+                new("src/main.ts", false, 10, DateTimeOffset.UnixEpoch)
+            ];
+            IReadOnlyList<NexMud.Gui.AutomationStudio.ScriptExplorerEntry> roots =
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Build(entries);
+
+            Assert.SequenceEqual(["empty", "src"], roots.Select(node => node.Name));
+            Assert.True(roots[0].IsFolder);
+            Assert.Equal(0, roots[0].Children.Count);
+            Assert.Equal("main.ts", Assert.Single(roots[1].Children).Name);
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio script explorer rebases moved folder paths", () =>
+        {
+            Assert.Equal(
+                "lib/combat/actions.ts",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase(
+                    "src/combat/actions.ts",
+                    "src",
+                    "lib"));
+            Assert.Equal(
+                "lib",
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("src", "src", "lib"));
+            Assert.Throws<ArgumentException>(() =>
+                NexMud.Gui.AutomationStudio.ScriptExplorerTree.Rebase("other/file.ts", "src", "lib"));
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("studio text models detect external conflicts without losing editor authority", () =>
+        {
+            var registry = new NexMud.Gui.AutomationStudio.StudioTextModelRegistry();
+            const string uri = "nexmud://profile/default/package/tools/src/main.ts";
+            registry.Track(uri, "default", "tools", "src/main.ts", "export const value = 1;\n");
+
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 1;\n"));
+            Assert.False(registry.MatchesBaseline(uri, "export const value = 2;\n"));
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is not null);
+
+            registry.KeepEditorVersion(uri);
+            Assert.True(registry.CanOverwriteExternalChange(uri));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            Assert.False(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 2;\n"));
+
+            Assert.True(registry.RecordConflict(
+                uri,
+                NexMud.Gui.AutomationStudio.StudioExternalFileChangeKind.Modified,
+                "export const value = 3;\n"));
+            Assert.False(registry.CanOverwriteExternalChange(uri));
+
+            registry.MarkSaved(uri, "export const value = 3;\n");
+            Assert.True(registry.MatchesBaseline(uri, "export const value = 3;\n"));
+            Assert.True(registry.Find(uri)?.Conflict is null);
+            return Task.CompletedTask;
+        });
+
+        await RunAsync("bundled toolchain locator rejects path escape and missing components", () =>
+        {
+            string root = CreateToolchainFixture(
+                new ToolchainComponentManifest("fixture", "1.0.0", "components/fixture.js"),
+                "fixture");
+            try
+            {
+                ToolchainLocator locator = new(root);
+                ToolchainComponentLocation component = locator.ResolveRequired("fixture");
+                Assert.Equal(Path.Combine(root, "components", "fixture.js"), component.FullPath);
+                Assert.Throws<ToolchainUnavailableException>(() => locator.ResolveRequired("missing"));
+
+                WriteToolchainManifest(root,
+                    new ToolchainComponentManifest("escape", "1.0.0", "../escape.js"));
+                ToolchainLocator escaping = new(root);
+                Assert.Throws<ToolchainUnavailableException>(() => escaping.ResolveRequired("escape"));
+                return Task.CompletedTask;
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        });
+
+        await RunAsync("bundled toolchain health detects integrity mismatch", async () =>
+        {
+            string root = CreateToolchainFixture(
+                new ToolchainComponentManifest(
+                    "fixture",
+                    "1.0.0",
+                    "components/fixture.js",
+                    new string('0', 64)),
+                "fixture");
+            try
+            {
+                ToolchainHealthReport report = await new ToolchainHealthService(new ToolchainLocator(root)).CheckAsync();
+                Assert.False(report.Healthy);
+                ToolchainComponentHealth component = Assert.Single(report.Components);
+                Assert.False(component.Healthy);
+                Assert.True(component.Message?.Contains("SHA-256 mismatch", StringComparison.Ordinal) == true);
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        });
+
+        await RunAsync("tool process runner sanitizes environment", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            string pathEntry = Path.Combine(Path.GetTempPath(), "nexmud-tool-process-path");
+            const string parentOnly = "NEXMUD_TOOL_PROCESS_PARENT_ONLY";
+            const string explicitName = "NEXMUD_TOOL_PROCESS_EXPLICIT";
+            Environment.SetEnvironmentVariable(parentOnly, "secret");
+            try
+            {
+                ToolProcessRunner runner = new();
+                ToolProcessResult result = await runner.RunAsync(new ToolProcessRequest(
+                    executable,
+                    [.. prefix, "--tool-process-probe"],
+                    AppContext.BaseDirectory,
+                    [pathEntry],
+                    new Dictionary<string, string?> { [explicitName] = "visible" }));
+                Assert.Equal(0, result.ExitCode);
+                using JsonDocument payload = JsonDocument.Parse(result.StandardOutput);
+                Assert.Equal(Path.GetFullPath(pathEntry), payload.RootElement.GetProperty("path").GetString());
+                Assert.True(payload.RootElement.GetProperty("parentOnly").ValueKind == JsonValueKind.Null);
+                Assert.Equal("visible", payload.RootElement.GetProperty("explicitValue").GetString());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(parentOnly, null);
+            }
+        });
+
+        await RunAsync("tool process runner caps retained output while draining streams", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            ToolProcessResult result = await new ToolProcessRunner().RunAsync(new ToolProcessRequest(
+                executable, [.. prefix, "--tool-process-output"], AppContext.BaseDirectory,
+                OutputCharacterLimit: 128));
+            Assert.Equal(128, result.Output.Length);
+            Assert.True(result.OutputTruncated);
+        });
+
+        await RunAsync("tool process runner cancellation terminates child process", async () =>
+        {
+            (string executable, IReadOnlyList<string> prefix) = ToolProcessTestCommand();
+            ToolProcessRunner runner = new();
+            using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(200));
+            Stopwatch elapsed = Stopwatch.StartNew();
+            bool cancelled = false;
+            try
+            {
+                _ = await runner.RunAsync(new ToolProcessRequest(
+                    executable,
+                    [.. prefix, "--tool-process-wait"],
+                    AppContext.BaseDirectory), cancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                cancelled = true;
+            }
+
+            Assert.True(cancelled);
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5), "Cancelled tooling process did not terminate promptly.");
+        });
+
+        await RunAsync("script package workspace migrates legacy manifest without source loss", ScriptPackageWorkspaceMigratesLegacyManifest);
+        await RunAsync("script package workspace preserves existing package json", ScriptPackageWorkspacePreservesExistingPackageJson);
+        await RunAsync("script package migration rejects unapproved legacy capabilities", ScriptPackageMigrationRejectsUnapprovedCapabilities);
+        await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
+        await RunAsync("script package runtime state remains separate from package json", ScriptPackageRuntimeStateIsSeparate);
+        await RunAsync("script workspace reload is limited to the active profile", ScriptWorkspaceReloadRejectsInactiveProfile);
+        await RunAsync("script workspace reload preserves last-known-good package", ScriptWorkspaceReloadPreservesLastKnownGood);
+        await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
+        await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
+        await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
+        await RunAsync("language-server cancellation notifies only abandoned requests", Phase6StudioLanguageHostTests.LanguageServerCancellationNotifiesServerOnlyForAbandonedRequests);
+        await RunAsync("Studio language host rehydrates unsaved documents after restart", Phase6StudioLanguageHostTests.RehydratesUnsavedDocumentsAfterTransportRestart);
+        await RunAsync("Studio language host routes requests and profile diagnostics", Phase6StudioLanguageHostTests.RoutesRequestsDiagnosticsAndProfileLifecycle);
+        await RunAsync("language transport failures retain originating profile generation", Phase6StudioLanguageHostTests.LanguageTransportFailuresRetainOriginProfileAndGeneration);
+        await RunAsync("bundled TypeScript language service resolves project dependencies and live diagnostics", Phase6StudioLanguageHostTests.BundledLanguageServerUsesProjectTypesAndReportsLiveDiagnostics);
+        await RunAsync("Monaco bridge request errors preserve details and failures activate fallback", Phase6StudioLanguageHostTests.MonacoBridgeRequestsPreserveErrorsAndActivateFallback);
+        await RunAsync("Monaco language-server requests are allow-listed", Phase6StudioLanguageHostTests.LanguageServerRequestsAreAllowListed);
+        await RunAsync("Monaco language-server errors preserve JSON-RPC details", Phase6StudioLanguageHostTests.LanguageServerErrorsPreserveJsonRpcDetails);
+        await RunAsync("Studio language host rejects document URI traversal", Phase6StudioLanguageHostTests.UriValidationRejectsTraversal);
+        await RunAsync("Studio language host maps script source language ids", Phase6StudioLanguageHostTests.LanguageIdsFollowScriptSourceKinds);
+
+        await RunAsync("script package install uses bundled pnpm with lifecycle scripts disabled", ScriptPackageInstallUsesControlledPnpm);
+        await RunAsync("script package restore requires and freezes the workspace lockfile", ScriptPackageRestoreUsesFrozenLockfile);
+        await RunAsync("script package manager blocks unsupported dependency sources before pnpm", ScriptPackageManagerBlocksUnsupportedDependencySource);
+        await RunAsync("script package clean preserves source while removing generated artifacts", ScriptPackageCleanPreservesSource);
 
         Console.WriteLine($"Passed: {_passed}, Failed: {_failed}");
         return _failed == 0 ? 0 : 1;
@@ -903,6 +1475,57 @@ public static class Program
         Assert.True(diagnostics.Records.Any(record =>
                 record.Kind is ScriptDiagnosticKind.Timeout or ScriptDiagnosticKind.ResourceLimitExceeded),
             "A runaway handler must terminate at the Jint execution boundary.");
+    }
+
+    private static Task RuntimeProfileRegistryRestoresPreviousOwnerConditionally()
+    {
+        ScriptRuntimeProfileRegistry profiles = new();
+        ScriptModuleId moduleId = new("restore-module");
+        Guid instanceId = Guid.Empty;
+        Assert.True(profiles.Register(moduleId, "profile-a") is null);
+        Assert.Equal("profile-a", profiles.Register(moduleId, "profile-b"));
+        profiles.Restore(moduleId, "profile-b", "profile-a");
+        Assert.Equal("profile-a", profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)));
+        profiles.Restore(moduleId, "profile-b", null);
+        Assert.Equal("profile-a", profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)));
+        profiles.Restore(moduleId, "profile-a", null);
+        Assert.True(profiles.Resolve(new ScriptDiagnosticRecord(
+            ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", instanceId)) is null);
+        return Task.CompletedTask;
+    }
+
+    private static async Task ScriptingRuntimeDiagnosticsKeepOriginatingProfile()
+    {
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        ScriptRuntimeProfileRegistry profiles = new();
+        ScriptModuleId moduleId = new("profile-aware-module");
+        Guid oldInstance = Guid.NewGuid();
+        Guid newInstance = Guid.NewGuid();
+        profiles.Register(moduleId, "profile-a");
+        ClientScriptDiagnosticsSink sink = new(events, profiles.Resolve);
+
+        ScriptDiagnosticRecord oldLoaded = new(ScriptDiagnosticKind.ScriptLoaded, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance);
+        sink.Record(oldLoaded);
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted loadedA ? loadedA.ProfileId : null);
+
+        profiles.Unregister(moduleId, "profile-a");
+        profiles.Register(moduleId, "profile-b");
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted faultA ? faultA.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptUnloaded, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.Equal("profile-a", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted unloadedA ? unloadedA.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v1", oldInstance));
+        Assert.True((await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted lateFault && lateFault.ProfileId is null);
+
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptLoaded, DateTimeOffset.UtcNow, moduleId, "v2", newInstance));
+        Assert.Equal("profile-b", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted loadedB ? loadedB.ProfileId : null);
+        sink.Record(new ScriptDiagnosticRecord(ScriptDiagnosticKind.ScriptUnloaded, DateTimeOffset.UtcNow, moduleId, "v2", newInstance));
+        Assert.Equal("profile-b", (await observer.ReadAsync()).Payload is ScriptRuntimeDiagnosticEmitted unloadedB ? unloadedB.ProfileId : null);
+        profiles.Unregister(moduleId, "profile-b");
+        Assert.True(profiles.Resolve(new ScriptDiagnosticRecord(ScriptDiagnosticKind.InvocationFaulted, DateTimeOffset.UtcNow, moduleId, "v2", newInstance)) is null);
     }
 
     private static async Task ScriptingRuntimeDiagnosticsMapToTypeScriptSource()
@@ -1670,6 +2293,18 @@ public static class Program
         if (!result.Success || result.Package is null)
             throw new InvalidOperationException("TypeScript compilation failed: " + string.Join(" | ", result.Diagnostics.Select(value => $"{value.Code}: {value.Message}")));
         return result.Package;
+    }
+
+    internal static async Task AssertCompiledPackageLoadsInJintAsync(CompiledScriptPackage package)
+    {
+        await using ScriptExecutionSupervisor localSupervisor = new();
+        await using ScriptEventHub events = new();
+        CapabilityScriptHost host = CreateJintTestHost(package.Manifest.Id, events, ScriptCapability.None);
+        await using JintScriptRuntime runtime = new(localSupervisor);
+
+        await runtime.LoadAsync(package, host).ConfigureAwait(false);
+        ScriptModuleSnapshot loaded = Assert.Single(runtime.Snapshot());
+        Assert.True(loaded.Loaded, "Jint should load the package with bundled dependencies.");
     }
 
     private static CapabilityScriptHost CreateJintTestHost(
@@ -3607,7 +4242,32 @@ public static class Program
         KeybindingService service = new();
         CommandKeyBinding global = new("Ctrl+L", "look", Context: KeybindingContext.Global, Action: KeybindingActionKind.SendCommand, Priority: 1);
         CommandKeyBinding input = new("Ctrl+L", "clear", Context: KeybindingContext.Input, Action: KeybindingActionKind.ClearInput, Priority: 5);
-        service.Configure([global, input]);
+        AutomationWorkflow hotkeyWorkflow = new("hotkey target", "send look", Id: "workflow-stable-id", Hotkey: "F9");
+        AutomationWorkflow disabledWorkflow = new("disabled", "send score", Id: "workflow-disabled", Hotkey: "F10", Enabled: false);
+        AutomationWorkflow manualForbidden = new("manual forbidden", "send score", Id: "workflow-manual-forbidden", Hotkey: "F11", AllowManualRun: false);
+        AutomationWorkflow higherPriority = new("higher priority", "send score", Id: "workflow-high", Hotkey: "F12", Priority: 10);
+        AutomationWorkflow lowerPriority = new("lower priority", "send look", Id: "workflow-low", Hotkey: "F12", Priority: 1);
+        AutomationWorkflow tiedPriority = new("tied priority", "send score", Id: "workflow-tied", Hotkey: "F13", Priority: 5);
+        AutomationWorkflow tiedPriorityOther = new("tied priority other", "send look", Id: "workflow-tied-other", Hotkey: "F13", Priority: 5);
+        service.Configure([global, input], [hotkeyWorkflow, disabledWorkflow, manualForbidden, higherPriority, lowerPriority, tiedPriority, tiedPriorityOther]);
+
+        KeybindingResolution workflowHotkey = service.Resolve("F9", KeybindingContext.Global);
+        Assert.Equal("workflow-stable-id", workflowHotkey.Binding?.Command);
+        Assert.Equal(KeybindingActionKind.RunAutomation, workflowHotkey.Binding?.Action);
+        Assert.Equal(KeybindingService.WorkflowHotkeyBindingId("workflow-stable-id"), workflowHotkey.Binding?.Id);
+        Assert.True(service.Resolve("F10", KeybindingContext.Global).Binding is null, "Disabled workflows must not register hotkeys.");
+        Assert.True(service.Resolve("F11", KeybindingContext.Global).Binding is null, "Manual-run-disabled workflows must not register hotkeys.");
+        Assert.Equal("workflow-high", service.Resolve("F12", KeybindingContext.Global).Binding?.Command,
+            "Workflow hotkeys must honor descending workflow priority.");
+        KeybindingResolution tiedHotkey = service.Resolve("F13", KeybindingContext.Global);
+        Assert.True(tiedHotkey.HasConflict && tiedHotkey.Binding is null,
+            "Equal-priority workflow hotkeys must fail visibly rather than selecting by insertion order.");
+
+        service.Configure([global, input], [hotkeyWorkflow], new AutomationPreferences(Enabled: false));
+        Assert.True(service.Resolve("F9", KeybindingContext.Global).Binding is null,
+            "Globally disabled automation must not register workflow hotkeys.");
+        Assert.Equal(global, service.Resolve("Ctrl+L", KeybindingContext.Global).Binding,
+            "Global automation disable must not remove explicit keybindings.");
 
         KeybindingResolution exact = service.Resolve("Ctrl+L", KeybindingContext.Input);
         Assert.Equal(input, exact.Binding);
@@ -6061,19 +6721,46 @@ public static class Program
             ClientSettingsStore store = new(path);
             ClientSettings settings = ClientSettings.Default with
             {
-                Workflows = [new AutomationWorkflow(
-                    "recover after kill",
-                    "set last=${combat.target}\nwait !combat.active timeout=5000\njev recovery",
-                    TriggerEvent: nameof(EnemyKilled),
-                    CooldownMilliseconds: 250,
-                    FailureMode: AutomationWorkflowFailureMode.Continue)],
+                Workflows =
+                [
+                    new AutomationWorkflow(
+                        "recover after kill",
+                        "  # keep this comment  \r\n\r\n  send look  \r\n",
+                        TriggerEvent: nameof(EnemyKilled),
+                        CooldownMilliseconds: 250,
+                        FailureMode: AutomationWorkflowFailureMode.Continue,
+                        AllowManualRun: false,
+                        Hotkey: "Ctrl+F9"),
+                    new AutomationWorkflow("structured only", "", Actions:
+                    [
+                        new SendCommandAutomationAction("score"),
+                        new SetStorageAutomationAction("flag", "ready"),
+                        new DeleteStorageAutomationAction("old-flag")
+                    ])
+                ],
                 Automation = new AutomationPreferences(HumanOverrideMilliseconds: 2200, MaxConcurrentWorkflows: 3, PersistVariables: true)
             };
             await store.SaveAsync(settings);
             ClientSettings loaded = await store.LoadAsync();
-            AutomationWorkflow workflow = Assert.Single(loaded.Workflows!);
+            Assert.Equal(2, loaded.Workflows!.Count);
+            AutomationWorkflow workflow = loaded.Workflows[0];
             Assert.Equal("recover after kill", workflow.Name);
+            Assert.Equal("  # keep this comment  \r\n\r\n  send look  \r\n", workflow.Steps);
             Assert.Equal(nameof(EnemyKilled), workflow.TriggerEvent);
+            Assert.False(workflow.AllowManualRun);
+            Assert.Equal("Ctrl+F9", workflow.Hotkey);
+            AutomationWorkflow legacy = JsonSerializer.Deserialize<AutomationWorkflow>(
+                "{\"name\":\"legacy\",\"steps\":\"send look\"}",
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            Assert.True(legacy.AllowManualRun, "Older workflow JSON should default to manual-run enabled.");
+            Assert.True(legacy.Hotkey is null, "Older workflow JSON should default to no hotkey.");
+            AutomationWorkflow structured = loaded.Workflows[1];
+            Assert.Equal(string.Empty, structured.Steps);
+            Assert.Equal(3, structured.Actions!.Count);
+            SetStorageAutomationAction setStorage = Assert.IsType<SetStorageAutomationAction>(structured.Actions[1]);
+            Assert.True(setStorage.Value is JsonElement, "Storage JSON value should round-trip as a JSON element.");
+            Assert.Equal("ready", ((JsonElement)setStorage.Value!).GetString());
+            Assert.IsType<DeleteStorageAutomationAction>(structured.Actions[2]);
             Assert.Equal(2200, loaded.Automation!.HumanOverrideMilliseconds);
             Assert.Equal(3, loaded.Automation.MaxConcurrentWorkflows);
         }
@@ -6081,6 +6768,181 @@ public static class Program
         {
             try { Directory.Delete(directory, true); } catch { }
         }
+    }
+
+    private static Task WorkflowProgramIdentityDistinguishesDuplicateNames()
+    {
+        AutomationWorkflow first = new("duplicate name", "send look", Actions: [new SendCommandAutomationAction("look")]);
+        AutomationWorkflow second = new("duplicate name", "send score", Actions: [new SendCommandAutomationAction("score")]);
+        AutomationProgram firstProgram = new(
+            AutomationRuntimeCompiler.WorkflowProgramId(first), first.Name, AutomationProgramType.Workflow,
+            new WorkflowAutomationTrigger(first.TriggerEvent, first.TriggerCondition), [], first.Actions!);
+        AutomationProgram secondProgram = new(
+            AutomationRuntimeCompiler.WorkflowProgramId(second), second.Name, AutomationProgramType.Workflow,
+            new WorkflowAutomationTrigger(second.TriggerEvent, second.TriggerCondition), [], second.Actions!);
+
+        Assert.True(firstProgram.Id != secondProgram.Id, "Duplicate-name workflows require distinct program identities.");
+        AutomationProgram? selected = AutomationRuntimeCompiler.FindWorkflowProgram([firstProgram, secondProgram], second);
+        Assert.Equal(secondProgram.Id, selected?.Id);
+        Assert.Equal("score", Assert.IsType<SendCommandAutomationAction>(selected!.Actions[0]).Command);
+        return Task.CompletedTask;
+    }
+
+    private static async Task WorkflowSettingsNormalizationAssignsStableUniqueIds()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "nexmud-workflow-ids", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "settings.json");
+        try
+        {
+            ClientSettingsStore store = new(path);
+            ClientSettings settings = ClientSettings.Default with
+            {
+                Workflows =
+                [
+                    new AutomationWorkflow("duplicate name", "send look"),
+                    new AutomationWorkflow("duplicate name", "send score"),
+                    new AutomationWorkflow("duplicate name", "send look")
+                ]
+            };
+            await store.SaveAsync(settings);
+            string[] firstIds = (await store.LoadAsync()).Workflows!.Select(workflow => workflow.Id!).ToArray();
+            Assert.Equal(3, firstIds.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+            await store.SaveAsync(await store.LoadAsync());
+            string[] secondIds = (await store.LoadAsync()).Workflows!.Select(workflow => workflow.Id!).ToArray();
+            Assert.Equal(string.Join(",", firstIds), string.Join(",", secondIds));
+        }
+        finally
+        {
+            try { Directory.Delete(directory, true); } catch { }
+        }
+    }
+
+    private static async Task WorkflowDispatcherPreflightPreventsPartialExecution()
+    {
+        string statePath = Path.Combine(Path.GetTempPath(), $"nexmud-structured-workflow-{Guid.NewGuid():N}.json");
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        StateReducer reducer = new(events.StateEvents);
+        FakeSender sender = new();
+        JevAuthorityService authority = new(events);
+        ActionProcessor actions = new(sender, reducer, authority, events);
+        ClientSettings settings = ClientSettings.Default with
+        {
+            Workflows = [new AutomationWorkflow("workflow with actions", "send look", Actions: [new SendCommandAutomationAction("score")])],
+            Automation = new AutomationPreferences(HumanOverrideMilliseconds: 0)
+        };
+        await using ScriptExecutionSupervisor execution = new();
+        ScriptScheduler scheduler = new();
+        ClientScriptCommands commands = new(actions, reducer, scheduler, () => settings.Automation ?? new AutomationPreferences());
+        ClientAutomationService automation = new(
+            events.SubscribeLossless(), reducer, commands, scheduler, execution, events, () => settings,
+            stateStore: new AutomationStateStore(statePath));
+        using CancellationTokenSource cts = new();
+        Task reducerTask = reducer.RunAsync(cts.Token);
+        Task actionTask = actions.RunAsync(cts.Token);
+        Task automationTask = automation.RunAsync(cts.Token);
+
+        await events.PublishAsync(new ConnectionStateChanged(ConnectionStatus.Connected, "localhost", 4000), "test");
+        await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
+        await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
+                                  reducer.Current.Session.InputMode == SessionInputMode.Normal);
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
+
+        List<AutomationWorkflowStateChanged> states = [];
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+        while (!states.Any(state => state.Status is AutomationWorkflowStatus.Failed or AutomationWorkflowStatus.Completed))
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            if (envelope.Payload is AutomationWorkflowStateChanged state && state.WorkflowName == "workflow with actions")
+                states.Add(state);
+        }
+        Assert.True(states.Any(state => state.Status == AutomationWorkflowStatus.Started));
+        Assert.Equal(AutomationWorkflowStatus.Failed, states[^1].Status);
+        Assert.Equal(0, sender.Commands.Count);
+
+        cts.Cancel();
+        await IgnoreCancellation(reducerTask);
+        await IgnoreCancellation(actionTask);
+        await IgnoreCancellation(automationTask);
+        try { File.Delete(statePath); } catch { }
+        try { File.Delete(statePath + ".tmp"); } catch { }
+    }
+
+    private static async Task ContinueModeSkipsUnavailableWorkflowActions()
+    {
+        string statePath = Path.Combine(Path.GetTempPath(), $"nexmud-structured-continue-{Guid.NewGuid():N}.json");
+        await using EventPipeline events = new();
+        ChannelReader<EventEnvelope> observer = events.SubscribeLossless();
+        StateReducer reducer = new(events.StateEvents);
+        FakeSender sender = new();
+        JevAuthorityService authority = new(events);
+        ActionProcessor actions = new(sender, reducer, authority, events);
+        ClientSettings settings = ClientSettings.Default with
+        {
+            Workflows = [new AutomationWorkflow(
+                "continue without actions",
+                "send look\nset mode=continued",
+                FailureMode: AutomationWorkflowFailureMode.Continue,
+                Actions: [new SendCommandAutomationAction("score")])],
+            Automation = new AutomationPreferences(HumanOverrideMilliseconds: 0)
+        };
+        await using ScriptExecutionSupervisor execution = new();
+        ScriptScheduler scheduler = new();
+        ClientScriptCommands commands = new(actions, reducer, scheduler, () => settings.Automation ?? new AutomationPreferences());
+        ClientAutomationService automation = new(
+            events.SubscribeLossless(), reducer, commands, scheduler, execution, events, () => settings,
+            stateStore: new AutomationStateStore(statePath));
+        using CancellationTokenSource cts = new();
+        Task reducerTask = reducer.RunAsync(cts.Token);
+        Task actionTask = actions.RunAsync(cts.Token);
+        Task automationTask = automation.RunAsync(cts.Token);
+
+        await events.PublishAsync(new ConnectionStateChanged(ConnectionStatus.Connected, "localhost", 4000), "test");
+        await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
+        await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
+                                  reducer.Current.Session.InputMode == SessionInputMode.Normal);
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
+
+        List<AutomationWorkflowStateChanged> states = [];
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+        while (!states.Any(state => state.Status == AutomationWorkflowStatus.Completed))
+        {
+            EventEnvelope envelope = await observer.ReadAsync(timeout.Token);
+            if (envelope.Payload is AutomationWorkflowStateChanged state && state.WorkflowName == "continue without actions")
+                states.Add(state);
+        }
+        Assert.False(states.Any(state => state.Status == AutomationWorkflowStatus.Failed));
+        Assert.True(states.Any(state => state.Detail?.Contains("continuing without structured actions", StringComparison.Ordinal) == true));
+        Assert.Equal("look", Assert.Single(sender.Commands));
+        Assert.Equal("continued", automation.Variables["mode"]);
+
+        cts.Cancel();
+        await IgnoreCancellation(reducerTask);
+        await IgnoreCancellation(actionTask);
+        await IgnoreCancellation(automationTask);
+        try { File.Delete(statePath); } catch { }
+        try { File.Delete(statePath + ".tmp"); } catch { }
+    }
+
+    private static Task LegacyWorkflowConversionIsAllOrNothing()
+    {
+        Assert.True(LegacyWorkflowStepAdapter.TryConvert("# note\n\nSEND look\nDELAY 125", out IReadOnlyList<AutomationAction> converted, out string? error));
+        Assert.Equal(null, error);
+        Assert.Equal(2, converted.Count);
+        Assert.Equal("look", Assert.IsType<SendCommandAutomationAction>(converted[0]).Command);
+        Assert.Equal(125, Assert.IsType<DelayAutomationAction>(converted[1]).Milliseconds);
+
+        const string unsupported = "send look\n# explanation\n\nif hp < 50 :: send flee";
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert(unsupported, out IReadOnlyList<AutomationAction> rejected, out error));
+        Assert.Equal(0, rejected.Count);
+        Assert.True(error?.Contains("Line 4", StringComparison.Ordinal) == true);
+        Assert.True(error?.Contains("No changes were made", StringComparison.Ordinal) == true);
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("send kill ${target}", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("send   ", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("delay 600001", out _, out error));
+        Assert.False(LegacyWorkflowStepAdapter.TryConvert("wait 5", out _, out error));
+        return Task.CompletedTask;
     }
 
     private static async Task AutomationWorkflowDispatchesWithoutDeadlock()
@@ -6120,7 +6982,7 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("manual smoke"), "Manual workflow should start without an automatic trigger.");
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])), "Manual workflow should start without an automatic trigger.");
         await WaitUntilAsync(() => sender.Commands.Count == 1 && automation.ActiveWorkflowNames.Count == 0);
         Assert.Equal("look", sender.Commands[0]);
         Assert.False(automation.Variables.ContainsKey("mode"), "Workflow unset step should remove its persistent variable.");
@@ -6168,7 +7030,7 @@ public static class Program
         await events.PublishAsync(new SessionInputModeChanged(SessionInputMode.Normal), "test");
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
-        Assert.True(await automation.RunWorkflowAsync("bounded retry"));
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
 
         List<AutomationWorkflowStateChanged> states = [];
         using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(2));
@@ -6205,8 +7067,9 @@ public static class Program
         {
             Workflows =
             [
-                new AutomationWorkflow("first", "delay 500"),
-                new AutomationWorkflow("second", "send look")
+                new AutomationWorkflow("duplicate", "delay 500", Id: "first-id"),
+                new AutomationWorkflow("duplicate", "send look", Id: "second-id"),
+                new AutomationWorkflow("manual forbidden", "send score", Id: "manual-forbidden", AllowManualRun: false)
             ],
             Automation = new AutomationPreferences(MaxCommandsPerSecond: 20, HumanOverrideMilliseconds: 0, MaxConcurrentWorkflows: 1)
         };
@@ -6226,13 +7089,19 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("first"));
-        Assert.False(await automation.RunWorkflowAsync("second"),
+        string firstWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0]);
+        string secondWorkflowId = AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows[1]);
+        Assert.False(await automation.RunWorkflowAsync("manual-forbidden"),
+            "Workflows with manual execution disabled must reject manual starts.");
+        Assert.True(await automation.RunWorkflowAsync(firstWorkflowId));
+        Assert.False(await automation.RunWorkflowAsync(secondWorkflowId),
             "Manual workflow starts must honor MaxConcurrentWorkflows.");
+        Assert.True(automation.CancelWorkflow(firstWorkflowId), "Cancellation must select by stable workflow ID.");
         await WaitUntilAsync(() => automation.ActiveWorkflowNames.Count == 0);
-        Assert.True(await automation.RunWorkflowAsync("second"),
-            "A workflow should start after the previous execution releases its slot.");
+        Assert.True(await automation.RunWorkflowAsync(secondWorkflowId),
+            "A same-name workflow should start after the previous execution releases its slot.");
         await WaitUntilAsync(() => sender.Commands.Count == 1 && automation.ActiveWorkflowNames.Count == 0);
+        Assert.Equal("look", Assert.Single(sender.Commands));
 
         cts.Cancel();
         await IgnoreCancellation(reducerTask);
@@ -6275,7 +7144,7 @@ public static class Program
         await WaitUntilAsync(() => reducer.Current.Session.ConnectionStatus == ConnectionStatus.Connected &&
                                   reducer.Current.Session.InputMode == SessionInputMode.Normal);
 
-        Assert.True(await automation.RunWorkflowAsync("continue after failure"));
+        Assert.True(await automation.RunWorkflowAsync(AutomationRuntimeCompiler.WorkflowProgramId(settings.Workflows![0])));
         List<AutomationWorkflowStateChanged> states = [];
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
         while (!states.Any(state => state.Status == AutomationWorkflowStatus.Completed))
@@ -7665,7 +8534,494 @@ public static class Program
         }
     }
 
-    private static class Assert
+    private static async Task ScriptPackageWorkspaceMigratesLegacyManifest()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-workspace-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "combat-tools");
+        Directory.CreateDirectory(packageRoot);
+        const string source = "export const preserved = true;\n";
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "main.ts"), source);
+        ScriptPackageDefinition legacy = new(
+            "legacy.combat",
+            "Combat Tools",
+            "2.3.4",
+            "main.ts",
+            ScriptCapability.ReadState | ScriptCapability.SendCommands | ScriptCapability.Log,
+            true);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }));
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult first =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(first.Success);
+            Assert.Equal(1, first.MigratedPackageCount);
+            ScriptPackageCatalogEntry package = Assert.Single(first.Packages);
+            Assert.Equal("legacy.combat", package.Document.NexMud.Id);
+            Assert.Equal("combat-tools", package.Document.Name);
+            Assert.Equal("2.3.4", package.Document.Version);
+            Assert.Equal("./main.ts", package.Document.NexMud.Entry);
+            Assert.True(package.Document.NexMud.Permissions.Contains("state.read"));
+            Assert.True(package.Document.NexMud.Permissions.Contains("commands.send"));
+            Assert.True(package.Enabled);
+            Assert.Equal(source, await File.ReadAllTextAsync(Path.Combine(packageRoot, "main.ts")));
+            Assert.True(File.Exists(Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName)));
+            Assert.True(File.Exists(Path.Combine(root, ScriptPackageWorkspaceMigrator.WorkspaceFileName)));
+            Assert.True((await File.ReadAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.NpmRcFileName)))
+                .Contains("ignore-scripts=true", StringComparison.Ordinal));
+
+            string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+            string firstPackageJson = await File.ReadAllTextAsync(packageJsonPath);
+            ScriptPackageWorkspaceState state = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.True(state.Packages["legacy.combat"].Enabled);
+
+            ScriptPackageWorkspaceMigrationResult second =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(second.Success);
+            Assert.Equal(0, second.MigratedPackageCount);
+            Assert.Equal(firstPackageJson, await File.ReadAllTextAsync(packageJsonPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageWorkspacePreservesExistingPackageJson()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-existing-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "existing");
+        Directory.CreateDirectory(packageRoot);
+        ScriptPackageDocument created = ScriptPackageDocument.CreateNew("existing", "pkg_existing", "12.8.1");
+        JsonObject json = created.Root;
+        json["x-nexmud-test"] = new JsonObject { ["preserve"] = true };
+        string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+        string original = json.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + Environment.NewLine;
+        await File.WriteAllTextAsync(packageJsonPath, original);
+        ScriptPackageDefinition staleManifest = new(
+            "retired.package",
+            "Retired Package",
+            "0.1.0",
+            "legacy.ts",
+            ScriptCapability.ReadState,
+            true);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(staleManifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                Converters = { new JsonStringEnumConverter() }
+            }));
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult result =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.True(result.Success);
+            Assert.Equal(0, result.MigratedPackageCount);
+            Assert.Equal("pkg_existing", Assert.Single(result.Packages).Document.NexMud.Id);
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+            ScriptPackageWorkspaceState state = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.False(state.Packages["pkg_existing"].Enabled);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageMigrationRejectsUnapprovedCapabilities()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-unsafe-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "unsafe");
+        Directory.CreateDirectory(packageRoot);
+        string sourcePath = Path.Combine(packageRoot, "main.ts");
+        await File.WriteAllTextAsync(sourcePath, "export const preserved = true;\n");
+        ScriptPackageDefinition legacy = new(
+            "legacy.unsafe",
+            "Unsafe",
+            "1.0.0",
+            "main.ts",
+            ScriptCapability.ReadState | ScriptCapability.NetworkAccess,
+            false);
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.LegacyManifestFileName),
+            JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }));
+
+        try
+        {
+            ScriptPackageWorkspaceMigrationResult result =
+                await ScriptPackageWorkspaceMigrator.EnsureAsync(root, "12.8.1");
+            Assert.False(result.Success);
+            Assert.Equal(0, result.MigratedPackageCount);
+            Assert.False(File.Exists(Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName)));
+            Assert.True(File.Exists(sourcePath), "Migration failure must never remove package source.");
+            Assert.True(Assert.Single(result.Issues).Message.Contains("NetworkAccess", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task ScriptPackageDependencySourcesAreConstrained()
+    {
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier("^1.2.3"));
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier(">=1.0.0 <2.0.0"));
+        Assert.True(ScriptPackageDependencyValidator.IsSupportedSpecifier("workspace:*"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("https://example.test/pkg.tgz"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("git+ssh://example.test/repo.git"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("file:../../outside"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("link:../outside"));
+        Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("latest"));
+        return Task.CompletedTask;
+    }
+
+    private static async Task ScriptWorkspaceReloadRejectsInactiveProfile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-workspace-reload-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using NexMudRuntime runtime = new(new ClientSettingsStore(Path.Combine(root, "settings.json")));
+            try
+            {
+                await runtime.ScriptWorkspace.ReloadProfileAsync("inactive-profile");
+                throw new InvalidOperationException("Reloading a non-active profile should be rejected.");
+            }
+            catch (InvalidOperationException exception)
+            {
+                Assert.Equal("Only the active Connection Profile runtime can be reloaded.", exception.Message);
+            }
+
+            await runtime.ScriptWorkspace.ReloadProfileAsync(runtime.ActiveConnectionProfile.Id);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptWorkspaceReloadPreservesLastKnownGood()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-workspace-last-good-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        await using NexMudRuntime runtime = new(new ClientSettingsStore(Path.Combine(root, "settings.json")));
+        string profileId = runtime.ActiveConnectionProfile.Id;
+        string? packageId = null;
+        try
+        {
+            ScriptPackageDefinition definition = await runtime.ScriptWorkspace.CreatePackageAsync(
+                profileId, "Reload Regression", $"reload-regression-{Guid.NewGuid():N}");
+            packageId = definition.PackageId;
+            await runtime.ScriptWorkspace.SetEnabledAsync(profileId, definition.PackageId, true);
+            ScriptModuleSnapshot loaded = runtime.Scripting.JavaScriptRuntime.Snapshot()
+                .SingleOrDefault(module => module.Id.Value == definition.PackageId)
+                ?? throw new InvalidOperationException("Expected enabled package to load before reload.");
+            Assert.Equal(ScriptStatus.Running, loaded.Status);
+
+            await runtime.ScriptWorkspace.SaveSourceAsync(
+                profileId, definition.PackageId, "src/main.ts", "export function broken( {", build: false);
+            try
+            {
+                await runtime.ScriptWorkspace.ReloadProfileAsync(profileId);
+                throw new InvalidOperationException("A failed package rebuild should be reported.");
+            }
+            catch (InvalidOperationException exception) when
+                (exception.Message.StartsWith("Runtime package reload was partial:", StringComparison.Ordinal)) { }
+
+            ScriptModuleSnapshot preserved = runtime.Scripting.JavaScriptRuntime.Snapshot()
+                .SingleOrDefault(module => module.Id.Value == definition.PackageId)
+                ?? throw new InvalidOperationException("Expected previous package runtime to survive reload.");
+            Assert.Equal(loaded.Id, preserved.Id);
+            Assert.Equal(ScriptStatus.Running, preserved.Status);
+            ScriptPackageSnapshot package = await runtime.ScriptWorkspace.GetPackageAsync(profileId, definition.PackageId)
+                ?? throw new InvalidOperationException("Expected package snapshot after reload.");
+            Assert.Equal(ScriptPackageBuildStatus.Failed, package.BuildStatus);
+            Assert.Equal(ScriptStatus.Running, package.RuntimeStatus);
+            Assert.Equal("Current source build failed. Running previous build.", package.RuntimeMessage);
+        }
+        finally
+        {
+            if (packageId is not null)
+                await runtime.ScriptWorkspace.DeletePackageAsync(profileId, packageId);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageRuntimeStateIsSeparate()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-state-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "tools");
+        Directory.CreateDirectory(packageRoot);
+        ScriptPackageDocument package = ScriptPackageDocument.CreateNew(
+            "tools",
+            "pkg_tools",
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion);
+        string packageJsonPath = Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName);
+        await File.WriteAllTextAsync(packageJsonPath, package.ToJson());
+        string original = await File.ReadAllTextAsync(packageJsonPath);
+
+        try
+        {
+            _ = await ScriptPackageWorkspaceMigrator.EnsureAsync(
+                root,
+                ScriptPackageWorkspaceMigrator.ManagedPnpmVersion);
+            await ScriptPackageWorkspaceMigrator.WriteRuntimeStateAsync(root, "pkg_tools", enabled: true);
+            ScriptPackageWorkspaceState enabled = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.True(enabled.Packages["pkg_tools"].Enabled);
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+
+            await ScriptPackageWorkspaceMigrator.RemoveRuntimeStateAsync(root, "pkg_tools");
+            ScriptPackageWorkspaceState removed = await ScriptPackageWorkspaceMigrator.ReadStateAsync(root);
+            Assert.False(removed.Packages.ContainsKey("pkg_tools"));
+            Assert.Equal(original, await File.ReadAllTextAsync(packageJsonPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task ScriptPackageRuntimeDefinitionNormalizesEntrypoint()
+    {
+        ScriptPackageDocument package = ScriptPackageDocument.CreateNew(
+            "tools",
+            "pkg_tools",
+            ScriptPackageWorkspaceMigrator.ManagedPnpmVersion,
+            displayName: "Tools Package");
+        ScriptPackageDefinition definition = package.ToRuntimeDefinition(enabled: true);
+        Assert.Equal("pkg_tools", definition.PackageId);
+        Assert.Equal("Tools Package", definition.Name);
+        Assert.Equal("src/main.ts", definition.Entrypoint);
+        Assert.True(definition.Enabled);
+        Assert.True(definition.Capabilities.HasFlag(ScriptCapability.SendCommands));
+        return Task.CompletedTask;
+    }
+
+    private static async Task ScriptPackageInstallUsesControlledPnpm()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult result = await manager.InstallAsync("default");
+            Assert.True(result.Success);
+            ToolProcessRequest request = Assert.Single(runner.Requests);
+            Assert.Equal("/nexmud-toolchain/pnpm", request.Executable);
+            Assert.True(request.Arguments.Contains("install"));
+            Assert.True(request.Arguments.Contains("--recursive"));
+            Assert.True(request.Arguments.Contains("--ignore-scripts"));
+            Assert.True(request.Arguments.Contains("--no-frozen-lockfile"));
+            Assert.True(request.Arguments.Contains("--store-dir"));
+            Assert.Equal(Path.GetFullPath(root), request.WorkingDirectory);
+            Assert.Equal("true", request.Environment?["NPM_CONFIG_IGNORE_SCRIPTS"]);
+            string npmrc = await File.ReadAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.NpmRcFileName));
+            Assert.True(npmrc.Contains("ignore-scripts=true", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageRestoreUsesFrozenLockfile()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult missing = await manager.RestoreAsync("default");
+            Assert.False(missing.Success);
+            Assert.Equal("LockfileMissing", missing.Code);
+            Assert.Equal(0, runner.Requests.Count);
+
+            await File.WriteAllTextAsync(Path.Combine(root, ScriptPackageWorkspaceMigrator.LockfileName), "lockfileVersion: '9.0'\n");
+            ScriptPackageOperationResult restored = await manager.RestoreAsync("default");
+            Assert.True(restored.Success);
+            ToolProcessRequest request = Assert.Single(runner.Requests);
+            Assert.True(request.Arguments.Contains("--frozen-lockfile"));
+            Assert.True(request.Arguments.Contains("--ignore-scripts"));
+            Assert.False(request.Arguments.Contains("--no-frozen-lockfile"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageManagerBlocksUnsupportedDependencySource()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync("file:../../outside");
+        RecordingToolProcessRunner runner = new();
+        ScriptPackageManager manager = CreatePackageManager(root, runner);
+        try
+        {
+            ScriptPackageOperationResult result = await manager.InstallAsync("default");
+            Assert.False(result.Success);
+            Assert.Equal("UnsupportedDependencySource", result.Code);
+            Assert.Equal(0, runner.Requests.Count);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptPackageCleanPreservesSource()
+    {
+        string root = await CreatePackageManagerWorkspaceAsync();
+        string packageRoot = Path.Combine(root, "tools");
+        string sourcePath = Path.Combine(packageRoot, "src", "main.ts");
+        string packageNodeModules = Path.Combine(packageRoot, "node_modules", "fixture");
+        string workspaceNodeModules = Path.Combine(root, "node_modules", "fixture");
+        string buildOutput = Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "build", "pkg_tools");
+        Directory.CreateDirectory(packageNodeModules);
+        Directory.CreateDirectory(workspaceNodeModules);
+        Directory.CreateDirectory(buildOutput);
+        await File.WriteAllTextAsync(Path.Combine(packageNodeModules, "x"), "x");
+        await File.WriteAllTextAsync(Path.Combine(workspaceNodeModules, "x"), "x");
+        await File.WriteAllTextAsync(Path.Combine(buildOutput, "x"), "x");
+
+        ScriptPackageManager manager = CreatePackageManager(root, new RecordingToolProcessRunner());
+        try
+        {
+            ScriptPackageOperationResult result = await manager.CleanAsync("default");
+            Assert.True(result.Success);
+            Assert.True(File.Exists(sourcePath));
+            Assert.False(Directory.Exists(Path.Combine(packageRoot, "node_modules")));
+            Assert.False(Directory.Exists(Path.Combine(root, "node_modules")));
+            Assert.False(Directory.Exists(Path.Combine(root, ScriptPackageWorkspaceMigrator.NexMudDirectoryName, "build")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<string> CreatePackageManagerWorkspaceAsync(string dependencySpecifier = "^1.0.0")
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-package-manager-{Guid.NewGuid():N}");
+        string packageRoot = Path.Combine(root, "tools");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "src"));
+        ScriptPackageDocument document = ScriptPackageDocument.CreateNew("tools", "pkg_tools", "12.8.1");
+        JsonObject json = document.Root;
+        json["dependencies"] = new JsonObject { ["fixture"] = dependencySpecifier };
+        await File.WriteAllTextAsync(
+            Path.Combine(packageRoot, ScriptPackageWorkspaceMigrator.PackageJsonFileName),
+            json.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + Environment.NewLine);
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "src", "main.ts"), "export const value = 1;\n");
+        return root;
+    }
+
+    private static ScriptPackageManager CreatePackageManager(string root, RecordingToolProcessRunner runner) =>
+        new(
+            new FixtureToolchainLocator(),
+            runner,
+            _ => root,
+            _ => Path.Combine(root, ".pnpm-store"));
+
+    private sealed class FixtureToolchainLocator : IToolchainLocator
+    {
+        public string Root => "/nexmud-toolchain";
+        public ToolchainManifest Manifest { get; } = new(
+            1,
+            ToolchainPlatform.CurrentPlatform,
+            ToolchainPlatform.CurrentArchitecture,
+            "fixture",
+            []);
+
+        public ToolchainComponentLocation ResolveRequired(string componentName) => componentName switch
+        {
+            ToolchainComponentNames.Pnpm => new(componentName, "12.8.1", "/nexmud-toolchain/pnpm", null, true),
+            ToolchainComponentNames.Node => new(componentName, "24.21.0", "/nexmud-toolchain/node", null, true),
+            _ => throw new ToolchainUnavailableException($"Missing fixture component '{componentName}'.")
+        };
+    }
+
+    private sealed class RecordingToolProcessRunner : IToolProcessRunner
+    {
+        public List<ToolProcessRequest> Requests { get; } = [];
+
+        public Task<ToolProcessResult> RunAsync(
+            ToolProcessRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(request);
+            return Task.FromResult(new ToolProcessResult(0, "ok\n", string.Empty));
+        }
+    }
+
+    private static Task<int> RunToolProcessProbeAsync(string[] args)
+    {
+        if (args[0] == "--tool-process-probe")
+        {
+            Console.Write(JsonSerializer.Serialize(new
+            {
+                path = Environment.GetEnvironmentVariable("PATH"),
+                parentOnly = Environment.GetEnvironmentVariable("NEXMUD_TOOL_PROCESS_PARENT_ONLY"),
+                explicitValue = Environment.GetEnvironmentVariable("NEXMUD_TOOL_PROCESS_EXPLICIT")
+            }));
+            return Task.FromResult(0);
+        }
+
+        if (args[0] == "--tool-process-wait")
+            return WaitForToolProcessCancellationProbeAsync();
+
+        if (args[0] == "--tool-process-output")
+        {
+            Console.Out.Write(new string('o', 10_000));
+            Console.Error.Write(new string('e', 10_000));
+            return Task.FromResult(0);
+        }
+
+        return Task.FromResult(2);
+    }
+
+    private static async Task<int> WaitForToolProcessCancellationProbeAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        return 0;
+    }
+
+    private static (string Executable, IReadOnlyList<string> PrefixArguments) ToolProcessTestCommand()
+    {
+        string executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Unable to resolve the current test process executable.");
+        string processName = Path.GetFileNameWithoutExtension(executable);
+        return processName.Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+            ? (executable, [typeof(Program).Assembly.Location])
+            : (executable, []);
+    }
+
+    private static string CreateToolchainFixture(ToolchainComponentManifest component, string content)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-toolchain-{Guid.NewGuid():N}");
+        string path = Path.Combine(root, component.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        WriteToolchainManifest(root, component);
+        return root;
+    }
+
+    private static void WriteToolchainManifest(string root, params ToolchainComponentManifest[] components)
+    {
+        ToolchainManifest manifest = new(
+            1,
+            ToolchainPlatform.CurrentPlatform,
+            ToolchainPlatform.CurrentArchitecture,
+            "test",
+            components);
+        File.WriteAllText(
+            Path.Combine(root, "manifest.json"),
+            JsonSerializer.Serialize(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    }
+
+    internal static class Assert
     {
         public static void Equal<T>(T expected, T actual, string? message = null)
         {
@@ -7762,6 +9118,48 @@ Level 27: loot               n/a
 Level 30: circle stab        n/a
 """;
 
+    private static Task StudioAutomationCrudCoversEveryKind()
+    {
+        NexMud.Gui.AutomationStudio.AutomationCollections source =
+            NexMud.Gui.AutomationStudio.AutomationCollections.From(ClientSettings.Default);
+
+        foreach (NexMud.Gui.AutomationStudio.StudioDocumentKind kind in
+                 NexMud.Gui.AutomationStudio.StudioDocumentKinds.AutomationKinds)
+        {
+            (var created, int createdIndex) = source.AddNew(kind);
+            Assert.Equal(0, createdIndex);
+            Assert.Equal(1, created.Count(kind));
+            Assert.Equal(1, created.Entries(kind).Count);
+
+            (var duplicated, int duplicateIndex) = created.Duplicate(kind, createdIndex);
+            Assert.Equal(1, duplicateIndex);
+            Assert.Equal(2, duplicated.Count(kind));
+            Assert.False(created.Entries(kind)[0].Name == duplicated.Entries(kind)[1].Name);
+
+            var deleted = duplicated.Remove(kind, createdIndex);
+            Assert.Equal(1, deleted.Count(kind));
+            Assert.Equal(2, duplicated.Count(kind));
+        }
+
+        Assert.True(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "TRIGGER"));
+        Assert.False(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "timer"));
+        return Task.CompletedTask;
+    }
+
+    private static Task StudioCreationWizardValidatesRequests()
+    {
+        var templates = NexMud.Gui.AutomationStudio.NewItemTemplate.All;
+        var alias = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(alias, ["quick", "look"]) is null);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(alias, [" ", "look"]) is not null);
+        var timer = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Timer);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(timer, ["pulse", "1", "score"]) is null);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(timer, ["pulse", "0", "score"]) is not null);
+        var highlight = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Highlight);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(highlight, ["tells", "not-a-color"]) is not null);
+        return Task.CompletedTask;
+    }
+
     private static Task StudioCollectionsAreImmutableAndUnique()
     {
         NexMud.Gui.AutomationStudio.AutomationCollections empty = NexMud.Gui.AutomationStudio.AutomationCollections.From(NexMud.Client.Settings.ClientSettings.Default with { Aliases = [] });
@@ -7785,6 +9183,26 @@ Level 30: circle stab        n/a
         set.OpenOrFocus(new NexMud.Gui.AutomationStudio.StudioDocument("a", kind, "dup"));
         if (set.Documents.Count != 2 || set.Active?.Key != "a") throw new InvalidOperationException("reopen must focus, not duplicate");
         if (set.Close("a")?.Key != "b") throw new InvalidOperationException("close must focus neighbor");
+        return Task.CompletedTask;
+    }
+
+    private static Task StudioUiPreferencesPreserveBottomCollapse()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"nexmud-studio-ui-{Guid.NewGuid():N}.json");
+        try
+        {
+            var defaults = NexMud.Gui.AutomationStudio.StudioUiPreferences.Load(path);
+            if (!defaults.BottomCollapsed) throw new InvalidOperationException("default bottom panel must be collapsed");
+
+            defaults.BottomCollapsed = false;
+            defaults.Save(path);
+            if (NexMud.Gui.AutomationStudio.StudioUiPreferences.Load(path).BottomCollapsed)
+                throw new InvalidOperationException("saved expanded panel preference must be restored");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
         return Task.CompletedTask;
     }
 }

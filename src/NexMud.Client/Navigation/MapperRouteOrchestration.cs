@@ -119,9 +119,11 @@ internal sealed class MapperRouteExecutionContext
         bool singleStep,
         int maximumReplans,
         MapperRouteControl control,
-        Func<MapperRouteRuntimeUpdate, CancellationToken, Task> report)
+        Func<MapperRouteRuntimeUpdate, CancellationToken, Task> report,
+        string profileId = "default")
     {
         ExecutionId = executionId;
+        ProfileId = profileId;
         DestinationRoomId = destinationRoomId;
         DestinationLabel = destinationLabel;
         SingleStep = singleStep;
@@ -131,6 +133,7 @@ internal sealed class MapperRouteExecutionContext
     }
 
     public Guid ExecutionId { get; }
+    public string ProfileId { get; }
     public string DestinationRoomId { get; }
     public string? DestinationLabel { get; }
     public bool SingleStep { get; }

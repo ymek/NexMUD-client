@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "NexMUD/0.31.0": {
+      "NexMUD/0.32.0": {
         "dependencies": {
           "Avalonia": "12.1.2",
           "Avalonia.Controls.WebView": "12.1.0",
@@ -758,9 +758,18 @@
           }
         }
       },
+      "NexMud.Scripting.Tooling/1.0.0": {
+        "runtime": {
+          "NexMud.Scripting.Tooling.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
       "NexMud.Scripting.TypeScript/1.0.0": {
         "dependencies": {
-          "NexMud.Scripting": "1.0.0"
+          "NexMud.Scripting": "1.0.0",
+          "NexMud.Scripting.Tooling": "1.0.0"
         },
         "runtime": {
           "NexMud.Scripting.TypeScript.dll": {
@@ -784,7 +793,7 @@
     }
   },
   "libraries": {
-    "NexMUD/0.31.0": {
+    "NexMUD/0.32.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""
@@ -1037,6 +1046,11 @@
       "sha512": ""
     },
     "NexMud.Scripting.Jint/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "NexMud.Scripting.Tooling/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

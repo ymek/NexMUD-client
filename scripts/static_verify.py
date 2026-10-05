@@ -173,7 +173,7 @@ required_literals = {
     "automation shared scheduler": "IScriptScheduler _scheduler",
     "mapper shared execution scope": "ScriptOwnerKind.MapperRoute",
     "scripting platform composition root": "class ClientScriptPlatform",
-    "automation-owned behavior workspace": "class AutomationWorkspace",
+    "automation-owned behavior workspace": "class AutomationStudioWindow",
     "logical scrollback search": "WorldBufferSearchOptions",
     "command palette": 'Title = "NexMUD Command Palette"',
     "plain transcript log format": "TranscriptLogFormat.PlainText",
@@ -454,32 +454,31 @@ if "ArgumentException.ThrowIfNullOrWhiteSpace(request.Command)" in client_script
 if "ArgumentNullException.ThrowIfNull(request.Command)" not in client_script_infrastructure_text:
     fail("shared command adapter should reject null command values without rejecting empty input")
 
-automation_workspace_text = (ROOT / "src/NexMud.Gui/AutomationWorkspace.cs").read_text(encoding="utf-8")
+automation_studio_text = (ROOT / "src/NexMud.Gui/AutomationStudio/AutomationStudioWindow.cs").read_text(encoding="utf-8")
 scripting_workspace_text = (ROOT / "src/NexMud.Gui/ScriptingWorkspace.cs").read_text(encoding="utf-8")
+if (ROOT / "src/NexMud.Gui/AutomationWorkspace.cs").exists():
+    fail("obsolete combined AutomationWorkspace must be retired")
+monaco_host_text = (ROOT / "src/NexMud.Gui/MonacoEditorHost.cs").read_text(encoding="utf-8")
+monaco_bridge_text = (ROOT / "src/NexMud.Gui/Assets/Monaco/nexmud-editor-bridge.js").read_text(encoding="utf-8")
+if "RequestSymbolsAsync" in monaco_host_text or "requestSymbols" in monaco_bridge_text:
+    fail("obsolete symbol-request bridge API must be retired")
 for literal in (
-    'Text = "AUTOMATION"',
-    '"Aliases", "Keybindings", "Triggers", "State Rules", "Workflows", "Timers", "Script-backed"',
-    'UiTheme.PrimaryButton("New Automation")',
-    'BuildKeybindingEditor',
-    'BuildStateRuleEditor',
-    'BuildPreferences',
-    'AutomationKeybindingInvoked',
+    "class AutomationStudioWindow",
+    "private Control BuildActivityRail()",
+    "StudioActivity.Automations",
+    "StudioActivity.Scripts",
+    "StudioActivity.Workflows",
+    "StudioActivity.Runtime",
+    "BuildTestsTab()",
+    "BuildAutomationNodes",
+    "BuildScriptNodes",
+    "RefreshReferencePanel",
 ):
-    if literal not in automation_workspace_text:
-        fail(f"user-facing automation workspace requirement missing: {literal}")
-for legacy_literal in ('Panel("WORKFLOWS"', 'Panel("VARIABLES"'):
-    if legacy_literal in automation_workspace_text:
-        fail(f"operator-oriented automation UX returned: {legacy_literal}")
-if "mudEvent is not AutomationRuleMatched and" in automation_workspace_text:
-    fail("automation workspace event filter must use boolean && between independent type tests")
-for literal in (
-    "mudEvent is not AutomationRuleMatched &&",
-    "mudEvent is not AutomationVariableChanged &&",
-    "mudEvent is not AutomationWorkflowStateChanged &&",
-    'mudEvent is not ScriptLogEmitted { ModuleId: "automation.profile" }',
-):
-    if literal not in automation_workspace_text:
-        fail(f"automation workspace event filter invariant missing: {literal}")
+    if literal not in automation_studio_text:
+        fail(f"Automation Studio authoring surface missing: {literal}")
+for obsolete_inspector in ("BuildEmptyInspector", "BuildAutomationInspector", "BuildPackageInspector"):
+    if obsolete_inspector in automation_studio_text:
+        fail(f"obsolete Inspector implementation remains: {obsolete_inspector}")
 if "SqliteOpenMode.ReadOnly" not in mapper_repository_text or "SqliteCacheMode.Private" not in mapper_repository_text:
     fail("mapper repository must use an isolated read-only private-cache SQLite connection")
 if "UiTheme.Window" not in main_window_text or "UiTheme.Window" not in settings_workspace_text:
@@ -519,7 +518,7 @@ for literal in (
     "ApplyWorkspaceLayout(ToolView view)",
     "_workspaceHost.Content = _mapperWorkspace",
     "_workspaceHost.Content = _codexWorkspace",
-    "_workspaceHost.Content = _automationWorkspace",
+
     "_workspaceHost.Content = _scriptingWorkspace",
     "_settingsOverlay.IsVisible = true",
 ):
@@ -863,8 +862,12 @@ else:
     if ts_tree.findall(".//PackageReference"):
         fail("TypeScript boundary must not smuggle in Node/native compiler dependencies")
     ts_refs = [node.get("Include") or "" for node in ts_tree.findall(".//ProjectReference")]
-    if ts_refs != ["../NexMud.Scripting/NexMud.Scripting.csproj"]:
-        fail(f"TypeScript boundary must depend only on scripting contracts: {ts_refs}")
+    expected_ts_refs = [
+        "../NexMud.Scripting/NexMud.Scripting.csproj",
+        "../NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj",
+    ]
+    if ts_refs != expected_ts_refs:
+        fail(f"TypeScript boundary must depend only on scripting contracts and process tooling: {ts_refs}")
 ts_declarations = (ROOT / "src/NexMud.Scripting.TypeScript/Declarations/NexMudTypeDeclarations.cs").read_text(encoding="utf-8")
 for literal in ('ModuleSpecifier = "@nexmud/api"', "declare const nex: NexMudApi", "\"character.vitalsChanged\"", "Promise<NexMudCommandResult>", "NexMudTimersApi", "NexMudStorageApi", "ScriptApiVersion.Current"):
     if literal not in ts_declarations:
@@ -874,6 +877,7 @@ solution_text = (ROOT / "NexMud.slnx").read_text(encoding="utf-8")
 for project_path in (
     "src/NexMud.Scripting/NexMud.Scripting.csproj",
     "src/NexMud.Scripting.Jint/NexMud.Scripting.Jint.csproj",
+    "src/NexMud.Scripting.Tooling/NexMud.Scripting.Tooling.csproj",
     "src/NexMud.Scripting.TypeScript/NexMud.Scripting.TypeScript.csproj",
 ):
     if project_path not in solution_text:
@@ -1114,15 +1118,15 @@ for forbidden_asset_reference in (
         fail(f"rejected generated gameplay asset reference remains: {forbidden_asset_reference}")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-if not readme.startswith("# NexMUD Client v0.31.0"):
-    fail("README current version must be NexMUD 0.31.0")
-if '<Version>0.31.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
-    fail("GUI SemVer must be 0.31.0 for the current NexMUD release")
+if not readme.startswith("# NexMUD Client v0.32.0"):
+    fail("README current version must be NexMUD 0.32.0")
+if '<Version>0.32.0</Version>' not in (ROOT / "src/NexMud.Gui/NexMud.Gui.csproj").read_text(encoding="utf-8"):
+    fail("GUI SemVer must be 0.32.0 for the current NexMUD release")
 macos_build_script = (ROOT / "scripts/build-macos-app.sh").read_text(encoding="utf-8")
-if '<string>0.31.0</string>' not in macos_build_script:
-    fail("macOS CFBundleShortVersionString must be 0.31.0")
-if '<string>31000</string>' not in macos_build_script:
-    fail("macOS CFBundleVersion must be 31000 for NexMUD 0.31.0")
+if '<string>0.32.0</string>' not in macos_build_script:
+    fail("macOS CFBundleShortVersionString must be 0.32.0")
+if '<string>32000</string>' not in macos_build_script:
+    fail("macOS CFBundleVersion must be 32000 for NexMUD 0.32.0")
 item_inspection_text = (ROOT / "src/NexMud.Gui/ItemInspectionPopover.cs").read_text(encoding="utf-8")
 if "using Avalonia;" not in item_inspection_text:
     fail("ItemInspectionPopover must import Avalonia for Thickness/CornerRadius")
@@ -1350,7 +1354,6 @@ for source_name, source_text in (
 # 0.24.2 workspace typography correction
 workspace_typography_sources = {
     "ScriptingWorkspace": scripting_workspace_text,
-    "AutomationWorkspace": automation_workspace_text,
     "MapperWorkspace": mapper_workspace_text,
     "CodexWorkspace": codex_workspace_text,
     "PersistentGameplayPanels": persistent_gameplay_text,
@@ -1370,7 +1373,6 @@ for source_name, source_text in workspace_typography_sources.items():
 
 for source_name, source_text in (
     ("ScriptingWorkspace", scripting_workspace_text),
-    ("AutomationWorkspace", automation_workspace_text),
     ("MapperWorkspace", mapper_workspace_text),
     ("CodexWorkspace", codex_workspace_text),
 ):
@@ -1609,7 +1611,6 @@ if "public sealed class SettingsWorkspace : UserControl" not in settings_workspa
     fail("Settings must remain an in-app UserControl workspace")
 for literal in (
     "new GridLength(50, GridUnitType.Star)",
-    "new GridLength(53, GridUnitType.Star)",
     "new GridLength(56, GridUnitType.Star)",
     "new GridLength(42, GridUnitType.Star)",
 ):
@@ -1808,14 +1809,13 @@ for literal in (
     if literal not in output_rules_editor_text:
         fail(f"0.30.0 transcript Output Rules ownership missing: {literal}")
 for literal in (
-    '"Aliases", "Keybindings", "Triggers", "State Rules", "Workflows", "Timers", "Script-backed"',
-    'BuildKeybindingEditor',
-    'BuildStateRuleEditor',
-    'BuildTemplates',
-    'Disabled group',
+    "StudioActivity.Automations",
+    "StudioActivity.Workflows",
+    "BuildAutomationNodes",
+    "AutomationEntryNode",
 ):
-    if literal not in automation_workspace_text:
-        fail(f"0.30.0 Automation ownership missing: {literal}")
+    if literal not in automation_studio_text:
+        fail(f"0.30.0 Automation Studio ownership missing: {literal}")
 for literal in (
     'Text = "MAP PREFERENCES"',
     'Section("Avoidance"',
@@ -1833,15 +1833,10 @@ for literal in (
         fail(f"0.30.0 Jev ownership surface missing: {literal}")
 if 'new AutomationKeybindingInvoked(' not in main_window_text:
     fail("0.30.0 keybinding provenance must enter Automation activity")
-if automation_workspace_text.count("_filter.ItemsSource = Filters;") != 1:
-    fail("Automation workspace filter must be initialized exactly once")
-filter_init = automation_workspace_text.find("_filter.ItemsSource = Filters;")
-filter_subscription = automation_workspace_text.find("_filter.SelectionChanged +=")
-build_library = automation_workspace_text.find("private Control BuildLibrary()")
-if filter_init < 0 or filter_subscription < 0 or filter_init > filter_subscription:
-    fail("Automation workspace must initialize its filter before subscribing to SelectionChanged")
-if build_library >= 0 and "_filter.ItemsSource = Filters;" in automation_workspace_text[build_library:]:
-    fail("Automation library construction must not reinitialize the shared filter control")
+if automation_studio_text.count("_filter.TextChanged +=") != 1:
+    fail("Automation Studio filter must have one text-change subscription")
+if 'BuildExplorerHeader()' not in automation_studio_text or 'BuildActivityRail()' not in automation_studio_text:
+    fail("Automation Studio explorer must remain connected to the activity rail")
 if 'ActiveConnectionProfile' not in main_window_text or 'ActiveConnectionProfile' not in runtime_text:
     fail("0.30.0 runtime/main shell must use active connection profiles")
 if 'SaveSettingsWorkspaceAsync(' not in runtime_text or 'SaveSettingsWorkspaceAsync(' not in settings_workspace_text:

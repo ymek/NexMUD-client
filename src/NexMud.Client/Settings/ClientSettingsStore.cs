@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using NexMud.Contracts.Jev;
@@ -165,18 +167,33 @@ public sealed class ClientSettingsStore
                 Priority = Math.Clamp(rule.Priority, -10_000, 10_000)
             })
             .ToArray();
+        HashSet<string> workflowIds = new(StringComparer.OrdinalIgnoreCase);
         AutomationWorkflow[] workflows = (settings.Workflows ?? Array.Empty<AutomationWorkflow>())
-            .Where(workflow => !string.IsNullOrWhiteSpace(workflow.Name) && !string.IsNullOrWhiteSpace(workflow.Steps))
+            .Where(workflow => !string.IsNullOrWhiteSpace(workflow.Name) &&
+                               (workflow.Steps is { Length: > 0 } || workflow.Actions is { Count: > 0 }))
             .Take(100)
-            .Select(workflow => workflow with
+            .Select((workflow, index) =>
             {
-                Name = workflow.Name.Trim(),
-                Steps = workflow.Steps.Trim(),
-                TriggerCondition = string.IsNullOrWhiteSpace(workflow.TriggerCondition) ? null : workflow.TriggerCondition.Trim(),
-                TriggerEvent = string.IsNullOrWhiteSpace(workflow.TriggerEvent) ? null : workflow.TriggerEvent.Trim(),
-                Group = string.IsNullOrWhiteSpace(workflow.Group) ? "Default" : workflow.Group.Trim(),
-                Priority = Math.Clamp(workflow.Priority, -10_000, 10_000),
-                CooldownMilliseconds = Math.Clamp(workflow.CooldownMilliseconds, 0, 600_000)
+                string id = string.IsNullOrWhiteSpace(workflow.Id) ? string.Empty : workflow.Id.Trim();
+                if (id.Length == 0 || !workflowIds.Add(id))
+                {
+                    string baseId = CreateStableWorkflowId(workflow, index);
+                    id = baseId;
+                    int collision = 1;
+                    while (!workflowIds.Add(id)) id = $"{baseId}.{collision++}";
+                }
+
+                return workflow with
+                {
+                    Name = workflow.Name.Trim(),
+                    TriggerCondition = string.IsNullOrWhiteSpace(workflow.TriggerCondition) ? null : workflow.TriggerCondition.Trim(),
+                    TriggerEvent = string.IsNullOrWhiteSpace(workflow.TriggerEvent) ? null : workflow.TriggerEvent.Trim(),
+                    Group = string.IsNullOrWhiteSpace(workflow.Group) ? "Default" : workflow.Group.Trim(),
+                    Priority = Math.Clamp(workflow.Priority, -10_000, 10_000),
+                    CooldownMilliseconds = Math.Clamp(workflow.CooldownMilliseconds, 0, 600_000),
+                    Hotkey = string.IsNullOrWhiteSpace(workflow.Hotkey) ? null : workflow.Hotkey.Trim(),
+                    Id = id
+                };
             })
             .ToArray();
         CommandTimer[] timers = (settings.Timers ?? Array.Empty<CommandTimer>())
@@ -312,6 +329,13 @@ public sealed class ClientSettingsStore
         };
     }
 
+
+    private static string CreateStableWorkflowId(AutomationWorkflow workflow, int index)
+    {
+        string identity = $"{index}\n{JsonSerializer.Serialize(workflow)}";
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        return $"workflow.migrated.{Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant()}";
+    }
 
     private static ConnectionProfile[] NormalizeConnectionProfiles(
         IReadOnlyList<ConnectionProfile>? profiles,

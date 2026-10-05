@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NexMud.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7e66c575267f081188259c7dd2af036acd1455d6")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a8018306ed199da75b6f5c3f95bb347be95c1153")]
 [assembly: System.Reflection.AssemblyProductAttribute("NexMud.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NexMud.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

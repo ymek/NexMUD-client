@@ -765,14 +765,21 @@ public sealed record ScriptRuntimeDiagnosticEmitted(
     Guid? ParentOperationId,
     string? SourceFile,
     int? Line,
-    int? Column) : IMudEvent;
+    int? Column,
+    string? ProfileId = null) : IMudEvent;
 
 public sealed class ClientScriptDiagnosticsSink : IScriptDiagnosticsSink
 {
     private readonly IEventSink _events;
+    private readonly Func<ScriptDiagnosticRecord, string?>? _resolveProfileId;
 
-    public ClientScriptDiagnosticsSink(IEventSink events) =>
+    public ClientScriptDiagnosticsSink(
+        IEventSink events,
+        Func<ScriptDiagnosticRecord, string?>? resolveProfileId = null)
+    {
         _events = events ?? throw new ArgumentNullException(nameof(events));
+        _resolveProfileId = resolveProfileId;
+    }
 
     public void Record(ScriptDiagnosticRecord diagnostic)
     {
@@ -797,7 +804,8 @@ public sealed class ClientScriptDiagnosticsSink : IScriptDiagnosticsSink
                     diagnostic.ParentOperationId,
                     diagnostic.Location?.SourceFile,
                     diagnostic.Location?.Line,
-                    diagnostic.Location?.Column),
+                    diagnostic.Location?.Column,
+                    _resolveProfileId?.Invoke(diagnostic)),
                 "scripting.runtime").ConfigureAwait(false);
         }
         catch

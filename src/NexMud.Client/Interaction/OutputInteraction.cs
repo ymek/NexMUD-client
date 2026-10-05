@@ -677,7 +677,7 @@ public sealed class ClientInteractionRuntime
         if (History is CommandHistoryService history)
             history.Configure(input.HistoryMaximumEntries, input.DeduplicateConsecutiveHistory);
         Completion.Configure(input.CompletionTokenLimit);
-        Keybindings.Configure(settings.KeyBindings);
+        Keybindings.Configure(settings.KeyBindings, settings.Workflows, settings.Automation);
         lock (_processingGate)
         {
             Frames.Configure(settings.SlurpTelemetryPrompt);
