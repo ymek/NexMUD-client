@@ -3151,27 +3151,34 @@ internal sealed partial class AutomationStudioWindow : Window
         {
             await Dispatcher.UIThread.InvokeAsync(() => UpdateConnectionStatus(
                 _runtime.Transport.IsConnected ? ConnectionStatus.Connected : ConnectionStatus.Disconnected));
-            await foreach (var envelope in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            while (true)
             {
+                EventEnvelope[] batch = await RuntimeEventBatchReader.ReadBatchAsync(
+                    reader, RuntimeEventBatchReader.MaximumBatchSize, cancellationToken).ConfigureAwait(false);
+                if (batch.Length == 0) break;
+
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    bool recorded = RecordRuntimeEvent(envelope);
-                    bool profileScoped = envelope.Payload is ScriptLogEmitted or ScriptRuntimeDiagnosticEmitted or
-                        ScriptPackageBuildChanged or ScriptPackageRuntimeChanged;
-                    if (recorded || !profileScoped)
+                    foreach (EventEnvelope envelope in batch)
                     {
-                        string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
-                        lock (_events)
+                        bool recorded = RecordRuntimeEvent(envelope);
+                        bool profileScoped = envelope.Payload is ScriptLogEmitted or ScriptRuntimeDiagnosticEmitted or
+                            ScriptPackageBuildChanged or ScriptPackageRuntimeChanged;
+                        if (recorded || !profileScoped)
                         {
-                            _events.Enqueue(row);
-                            while (_events.Count > MaximumEventRows) _events.Dequeue();
+                            string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
+                            lock (_events)
+                            {
+                                _events.Enqueue(row);
+                                while (_events.Count > MaximumEventRows) _events.Dequeue();
+                            }
                         }
+                        if (recorded && envelope.Payload is ScriptLogEmitted log)
+                            AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
+                        if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
+                        if (envelope.Payload is ConnectionStateChanged connection) UpdateConnectionStatus(connection.Status);
                     }
-                    if (recorded && envelope.Payload is ScriptLogEmitted log)
-                        AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
-                    if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
-                    if (envelope.Payload is ConnectionStateChanged connection) UpdateConnectionStatus(connection.Status);
-                });
+                }, DispatcherPriority.Background);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

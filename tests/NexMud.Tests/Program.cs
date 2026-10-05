@@ -110,6 +110,8 @@ public static class Program
         await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
         await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
         await RunAsync("Phase 5 source search handles overlap, Unicode, and filters", Phase5SourceSearchTests.HandlesOverlappingUnicodeAndFilterTerms);
+        await RunAsync("Studio batches runtime events for UI dispatch", StudioRuntimeRefreshTests.ReadsBoundedEventBatchesInOrder);
+        await RunAsync("Studio runtime batches await new events and cancel cleanly", StudioRuntimeRefreshTests.ReadsEventsArrivingAfterWaitAndHonorsCancellation);
         await RunAsync("Studio coalesces runtime refresh bursts", StudioRuntimeRefreshTests.CoalescesUntilRefreshCompletes);
         await RunAsync("Studio ignores stale runtime refresh completion after profile switch", StudioRuntimeRefreshTests.ProfileInvalidationIgnoresStaleRefreshCompletion);
         await RunAsync("Studio search workspace accepts Avalonia grid columns", StudioLayoutTests.SearchWorkspaceColumnsParse);
