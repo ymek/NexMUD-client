@@ -21,7 +21,7 @@ namespace NexMud.Gui.AutomationStudio;
 /// </summary>
 internal sealed partial class AutomationStudioWindow : Window
 {
-    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFolder, SourceFile }
+    private enum NodeKind { Category, Folder, Entry, Scripts, Package, SourceFolder, SourceFile, RuntimeSection }
     private sealed record StudioNode(
         NodeKind Kind,
         string Label,
@@ -30,7 +30,8 @@ internal sealed partial class AutomationStudioWindow : Window
         string? AutomationId = null,
         string? FolderId = null,
         string? PackageId = null,
-        string? Path = null);
+        string? Path = null,
+        RuntimeSection? RuntimeSection = null);
 
     private const int MaximumEventRows = 500;
     private readonly NexMudRuntime _runtime;
@@ -1176,11 +1177,11 @@ internal sealed partial class AutomationStudioWindow : Window
             }
             else if (_activity == StudioActivity.Runtime)
             {
-                foreach (ScriptPackageSnapshot package in packages)
-                    roots.Add(Node(new StudioNode(
-                        NodeKind.Package,
-                        $"{package.Definition.Name} · {package.RuntimeStatus} · {package.BuildStatus}",
-                        PackageId: package.Definition.PackageId)));
+                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Package Status", RuntimeSection: RuntimeSection.PackageStatus)));
+                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Active Runtime", RuntimeSection: RuntimeSection.ActiveRuntime)));
+                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Diagnostics", RuntimeSection: RuntimeSection.Diagnostics)));
+                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Recent Faults", RuntimeSection: RuntimeSection.RecentFaults)));
+                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Events", RuntimeSection: RuntimeSection.Events)));
             }
 
             if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
@@ -1393,6 +1394,10 @@ internal sealed partial class AutomationStudioWindow : Window
                     break;
                 case NodeKind.SourceFile when node.PackageId is { } package && node.Path is { } path:
                     await OpenSourceAsync(package, path).ConfigureAwait(true);
+                    break;
+                case NodeKind.RuntimeSection when node.RuntimeSection is { } section:
+                    _runtimeSection = section;
+                    RenderRuntimeDashboard();
                     break;
                 case NodeKind.Category or NodeKind.Scripts:
                     item.IsExpanded = !item.IsExpanded;
@@ -2879,6 +2884,11 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private void RenderActive()
     {
+        if (_activity == StudioActivity.Runtime)
+        {
+            RenderRuntimeDashboard();
+            return;
+        }
         if (_activity == StudioActivity.Search)
         {
             RenderSearchActivity();
@@ -2977,6 +2987,7 @@ internal sealed partial class AutomationStudioWindow : Window
                 }
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
+                    RecordRuntimeEvent(envelope);
                     _eventsPanel.Children.Clear();
                     string[] snapshot; lock (_events) snapshot = _events.ToArray();
                     foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));

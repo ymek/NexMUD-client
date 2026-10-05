@@ -811,6 +811,7 @@ public static class Program
         await RunAsync("script package migration rejects unapproved legacy capabilities", ScriptPackageMigrationRejectsUnapprovedCapabilities);
         await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
         await RunAsync("script package runtime state remains separate from package json", ScriptPackageRuntimeStateIsSeparate);
+        await RunAsync("script workspace reload is limited to the active profile", ScriptWorkspaceReloadRejectsInactiveProfile);
         await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
         await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
         await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
@@ -8665,6 +8666,31 @@ public static class Program
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("link:../outside"));
         Assert.False(ScriptPackageDependencyValidator.IsSupportedSpecifier("latest"));
         return Task.CompletedTask;
+    }
+
+    private static async Task ScriptWorkspaceReloadRejectsInactiveProfile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-workspace-reload-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using NexMudRuntime runtime = new(new ClientSettingsStore(Path.Combine(root, "settings.json")));
+            try
+            {
+                await runtime.ScriptWorkspace.ReloadProfileAsync("inactive-profile");
+                throw new InvalidOperationException("Reloading a non-active profile should be rejected.");
+            }
+            catch (InvalidOperationException exception)
+            {
+                Assert.Equal("Only the active Connection Profile runtime can be reloaded.", exception.Message);
+            }
+
+            await runtime.ScriptWorkspace.ReloadProfileAsync(runtime.ActiveConnectionProfile.Id);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static async Task ScriptPackageRuntimeStateIsSeparate()

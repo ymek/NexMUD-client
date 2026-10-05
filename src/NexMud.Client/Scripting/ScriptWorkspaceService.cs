@@ -704,20 +704,68 @@ public sealed partial class ScriptWorkspaceService
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
         if (string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal)) return;
 
+        await UnloadProfilePackagesAsync(cancellationToken).ConfigureAwait(false);
+        _loadedRuntimeProfileId = profileId;
+        await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Unload and rebuild the enabled packages for the active profile in this runtime instance.</summary>
+    public async Task ReloadProfileAsync(string profileId, CancellationToken cancellationToken = default)
+    {
+        profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
+        if (!string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
+            throw new InvalidOperationException("Only the active Connection Profile runtime can be reloaded.");
+        if (!string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal))
+        {
+            await ActivateProfileAsync(profileId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await UnloadProfilePackagesAsync(cancellationToken).ConfigureAwait(false);
+        await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task UnloadProfilePackagesAsync(CancellationToken cancellationToken)
+    {
         string? previousProfileId = _loadedRuntimeProfileId;
         foreach (string packageId in _loadedPackageIds.ToArray())
         {
             ScriptModuleId moduleId = new(packageId);
             await _platform.JavaScriptRuntime.UnloadAsync(moduleId, cancellationToken).ConfigureAwait(false);
             if (previousProfileId is not null)
+            {
                 _platform.UnregisterRuntimeProfile(moduleId, previousProfileId);
+                await PublishRuntimeAsync(previousProfileId, packageId, ScriptStatus.Disabled, null, cancellationToken).ConfigureAwait(false);
+            }
         }
         _loadedPackageIds.Clear();
-        _loadedRuntimeProfileId = profileId;
+    }
 
+    private async Task LoadEnabledPackagesAsync(string profileId, CancellationToken cancellationToken)
+    {
         IReadOnlyList<ScriptPackageSnapshot> packages = await ListPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
+        List<string> failures = [];
         foreach (ScriptPackageSnapshot package in packages.Where(package => package.Definition.Enabled))
-            _ = await BuildPackageAsync(profileId, package.Definition.PackageId, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                ScriptPackageBuildResult result = await BuildPackageAsync(
+                    profileId, package.Definition.PackageId, cancellationToken).ConfigureAwait(false);
+                if (!result.Success)
+                    failures.Add($"{package.Definition.PackageId}: build failed");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                failures.Add($"{package.Definition.PackageId}: {exception.Message}");
+            }
+        }
+
+        if (failures.Count > 0)
+            throw new InvalidOperationException($"Runtime package reload was partial: {string.Join("; ", failures)}");
     }
 
 
