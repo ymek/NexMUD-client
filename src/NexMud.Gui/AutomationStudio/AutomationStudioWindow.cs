@@ -124,7 +124,10 @@ internal sealed partial class AutomationStudioWindow : Window
     private bool _refreshingProfiles;
     private bool _refreshingNavigator;
     private long _navigatorRefreshGeneration;
+    private long _runtimeRefreshGeneration;
     private bool _closeApproved;
+    private bool _closeConfirmationPending;
+    private long _closeConfirmationGeneration;
 
     internal event Func<string, Task>? GlobalSearchRequested;
     internal event Func<Task>? StudioSettingsRequested;
@@ -154,7 +157,12 @@ internal sealed partial class AutomationStudioWindow : Window
         _filter.TextChanged += async (_, _) => await RefreshNavigatorAsync().ConfigureAwait(true);
         InitializeSearchUi();
         Content = BuildLayout();
-        if (_activity == StudioActivity.Search) RenderSearchActivity();
+        if (_activity == StudioActivity.Runtime)
+        {
+            SetRuntimeNavigationItems();
+            RenderRuntimeDashboard();
+        }
+        else if (_activity == StudioActivity.Search) RenderSearchActivity();
 
         _profile.Background = StudioShellChrome.Input;
         _profile.Foreground = StudioShellChrome.Foreground;
@@ -265,10 +273,13 @@ internal sealed partial class AutomationStudioWindow : Window
                 BottomTab("Events", _eventsPanel), BottomTab("References", _referencesPanel)
             }
         };
+        _bottom.SelectionChanged += (_, _) => RefreshEventsPanel();
         _bottomToggle = new Button
         {
             Content = _bottomCollapsed ? "⌃" : "⌄",
             Width = 34,
+            Height = 28,
+            VerticalAlignment = VerticalAlignment.Top,
             Background = StudioShellChrome.Canvas,
             Foreground = StudioShellChrome.Foreground,
             BorderThickness = new Thickness(0)
@@ -299,6 +310,12 @@ internal sealed partial class AutomationStudioWindow : Window
         _preferences.SetActivity(activity);
         RenderActivityRail();
         UpdateActivityChrome();
+        if (activity == StudioActivity.Runtime)
+        {
+            SetRuntimeNavigationItems();
+            RenderRuntimeDashboard();
+            return;
+        }
         await RefreshNavigatorAsync().ConfigureAwait(true);
         if (activity == StudioActivity.Search) RenderSearchActivity();
         else RenderActive();
@@ -639,6 +656,7 @@ internal sealed partial class AutomationStudioWindow : Window
         _bottomCollapsed = !_bottomCollapsed;
         _root.RowDefinitions[3].Height = new GridLength(_bottomCollapsed ? StudioUiPreferences.CollapsedBottomHeight : _preferences.BottomHeight);
         _bottomToggle.Content = _bottomCollapsed ? "⌃" : "⌄";
+        if (!_bottomCollapsed) RefreshEventsPanel();
     }
 
     private static Button Button(string label, Func<Task> action)
@@ -688,11 +706,33 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private async void WindowOpened(object? sender, EventArgs e)
     {
-        await RefreshProfilesAsync().ConfigureAwait(true);
-        RestartWorkspaceWatcher();
-        await RefreshNavigatorAsync().ConfigureAwait(true);
-        RenderActive();
-        _ = Task.Run(() => ConsumeEventsAsync(_cts.Token), CancellationToken.None);
+        CancellationToken cancellationToken = _cts.Token;
+        try
+        {
+            await RefreshProfilesAsync().ConfigureAwait(true);
+            if (cancellationToken.IsCancellationRequested) return;
+            RestartWorkspaceWatcher();
+            if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+            {
+                SetRuntimeNavigationItems();
+                RenderRuntimeDashboard();
+                await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await RefreshNavigatorAsync().ConfigureAwait(true);
+                if (cancellationToken.IsCancellationRequested) return;
+                RenderActive();
+            }
+            if (cancellationToken.IsCancellationRequested) return;
+            _ = Task.Run(() => ConsumeEventsAsync(cancellationToken), CancellationToken.None);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+                AddProblem("Studio", $"Unable to initialize Automation Studio: {exception.Message}");
+        }
     }
 
     private async Task RefreshProfilesAsync()
@@ -751,6 +791,7 @@ internal sealed partial class AutomationStudioWindow : Window
                 CancelTests("Profile changed.");
                 ResetTestsPanel("Select a package to discover tests.");
                 InvalidateSearchForProfileChange();
+                InvalidateRuntimeRefreshForProfileChange();
                 _session.SwitchProfile(targetProfileId);
                 _diagnostics.ResolveSourcesByPrefix(targetProfileId, "tests:");
                 Interlocked.Increment(ref _navigatorRefreshGeneration);
@@ -782,7 +823,16 @@ internal sealed partial class AutomationStudioWindow : Window
                     ShowLanguageServerFailure(message);
                 }
                 RestartWorkspaceWatcher();
-                await RefreshNavigatorAsync().ConfigureAwait(true);
+                if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+                {
+                    SetRuntimeNavigationItems();
+                    RenderRuntimeDashboard();
+                    await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+                }
+                else
+                {
+                    await RefreshNavigatorAsync().ConfigureAwait(true);
+                }
                 if (_profileTransitions.IsCurrent(generation) &&
                     _profileDocumentSessions.TryGet(targetProfileId, out StudioDocumentSessionSnapshot targetSnapshot))
                 {
@@ -898,8 +948,12 @@ internal sealed partial class AutomationStudioWindow : Window
         if (_cts.IsCancellationRequested) return;
         Dispatcher.UIThread.Post(async () =>
         {
+            if (!StudioActivityModel.UsesWorkspaceNavigator(_activity))
+            {
+                await RefreshRuntimeActivityAsync().ConfigureAwait(true);
+                return;
+            }
             await RefreshNavigatorAsync().ConfigureAwait(true);
-            if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
         });
     }
 
@@ -1182,11 +1236,7 @@ internal sealed partial class AutomationStudioWindow : Window
             }
             else if (_activity == StudioActivity.Runtime)
             {
-                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Package Status", RuntimeSection: RuntimeSection.PackageStatus)));
-                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Active Runtime", RuntimeSection: RuntimeSection.ActiveRuntime)));
-                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Diagnostics", RuntimeSection: RuntimeSection.Diagnostics)));
-                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Recent Faults", RuntimeSection: RuntimeSection.RecentFaults)));
-                roots.Add(Node(new StudioNode(NodeKind.RuntimeSection, "Events", RuntimeSection: RuntimeSection.Events)));
+                roots.AddRange(BuildRuntimeNavigationItems());
             }
 
             if (!IsCurrentNavigatorRefresh(profileId, generation)) return;
@@ -1200,6 +1250,21 @@ internal sealed partial class AutomationStudioWindow : Window
                 _refreshingNavigator = false;
         }
     }
+
+    private void SetRuntimeNavigationItems()
+    {
+        _nodes.Clear();
+        _navigator.ItemsSource = BuildRuntimeNavigationItems();
+    }
+
+    private List<TreeViewItem> BuildRuntimeNavigationItems() =>
+    [
+        Node(new StudioNode(NodeKind.RuntimeSection, "Package Status", RuntimeSection: RuntimeSection.PackageStatus)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Active Runtime", RuntimeSection: RuntimeSection.ActiveRuntime)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Diagnostics", RuntimeSection: RuntimeSection.Diagnostics)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Recent Faults", RuntimeSection: RuntimeSection.RecentFaults)),
+        Node(new StudioNode(NodeKind.RuntimeSection, "Events", RuntimeSection: RuntimeSection.Events))
+    ];
 
     private bool IsCurrentNavigatorRefresh(string profileId, long generation) =>
         generation == Volatile.Read(ref _navigatorRefreshGeneration) &&
@@ -1386,6 +1451,7 @@ internal sealed partial class AutomationStudioWindow : Window
             {
                 case NodeKind.Entry when node.DocKind is { } kind && node.AutomationId is { } automationId:
                     OpenAutomation(kind, automationId);
+                    RenderActive();
                     break;
                 case NodeKind.Folder:
                     item.IsExpanded = !item.IsExpanded;
@@ -2876,13 +2942,8 @@ internal sealed partial class AutomationStudioWindow : Window
     /// Shows or hides the native WebView by collapsing its height. Toggling IsVisible on a native
     /// control left its bounds stale (it painted over the tab strip) and destroying it loses all models.
     /// </summary>
-    private bool _monacoStarted;
-
     private void ShowMonaco(bool show)
     {
-        // WebKit will not boot a zero-size page: stay expanded until the editor reports ready.
-        if (show) _monacoStarted = true;
-        else if (_monacoStarted && !_monaco.IsReady) return;
         _monaco.MaxHeight = show ? double.PositiveInfinity : 0;
         _center.IsVisible = !show;
     }
@@ -2984,19 +3045,22 @@ internal sealed partial class AutomationStudioWindow : Window
                 _runtime.Transport.IsConnected ? ConnectionStatus.Connected : ConnectionStatus.Disconnected));
             await foreach (var envelope in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
-                lock (_events)
-                {
-                    _events.Enqueue(row);
-                    while (_events.Count > MaximumEventRows) _events.Dequeue();
-                }
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    RecordRuntimeEvent(envelope);
-                    _eventsPanel.Children.Clear();
-                    string[] snapshot; lock (_events) snapshot = _events.ToArray();
-                    foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));
-                    if (envelope.Payload is ScriptLogEmitted log) AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
+                    bool recorded = RecordRuntimeEvent(envelope);
+                    bool profileScoped = envelope.Payload is ScriptLogEmitted or ScriptRuntimeDiagnosticEmitted or
+                        ScriptPackageBuildChanged or ScriptPackageRuntimeChanged;
+                    if (recorded || !profileScoped)
+                    {
+                        string row = $"{envelope.Timestamp:HH:mm:ss.fff} {envelope.Payload.GetType().Name}";
+                        lock (_events)
+                        {
+                            _events.Enqueue(row);
+                            while (_events.Count > MaximumEventRows) _events.Dequeue();
+                        }
+                    }
+                    if (recorded && envelope.Payload is ScriptLogEmitted log)
+                        AddConsole($"{envelope.Timestamp:HH:mm:ss.fff} [{log.ModuleId}] {log.Level}: {log.Message}");
                     if (envelope.Payload is ScriptRuntimeDiagnosticEmitted diagnostic) ApplyRuntimeDiagnostic(diagnostic);
                     if (envelope.Payload is ConnectionStateChanged connection) UpdateConnectionStatus(connection.Status);
                 });
@@ -3026,9 +3090,9 @@ internal sealed partial class AutomationStudioWindow : Window
                 diagnostic.Message ?? diagnostic.Kind, diagnostic.ScriptId, diagnostic.SourceFile, diagnostic.Line, diagnostic.Column));
             AddConsole($"Runtime [{diagnostic.ScriptId}] {diagnostic.Kind}: {diagnostic.Message}");
         }
-        RefreshProblems();
-        _ = RefreshRuntimePanelAsync();
-        if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
+        RequestRuntimeUiRefresh(diagnostics: true,
+            dashboard: _activity == StudioActivity.Runtime &&
+                _runtimeSection is RuntimeSection.Diagnostics or RuntimeSection.RecentFaults);
     }
 
     private void AddProblem(string severity, string message)
@@ -3122,23 +3186,46 @@ internal sealed partial class AutomationStudioWindow : Window
         }
     }
 
-    private async void WindowClosing(object? sender, WindowClosingEventArgs e)
+    private void WindowClosing(object? sender, WindowClosingEventArgs e)
     {
         if (_closeApproved || !_documents.Dirty.Any()) return;
         e.Cancel = true;
-        string choice = await ConfirmDirtyAsync("all open documents").ConfigureAwait(true);
-        if (choice == "cancel") return;
-        if (choice == "save")
+        if (_closeConfirmationPending) return;
+        _closeConfirmationPending = true;
+        long generation = ++_closeConfirmationGeneration;
+        Dispatcher.UIThread.Post(() => ConfirmCloseAsync(generation));
+    }
+
+    private async void ConfirmCloseAsync(long generation)
+    {
+        try
         {
-            await SaveAllAsync().ConfigureAwait(true);
-            if (_documents.Dirty.Any()) return;
+            if (generation != _closeConfirmationGeneration || !IsVisible || _closeApproved) return;
+            string choice = await ConfirmDirtyAsync("all open documents").ConfigureAwait(true);
+            if (generation != _closeConfirmationGeneration || !IsVisible || _closeApproved || choice == "cancel") return;
+            if (choice == "save")
+            {
+                await SaveAllAsync().ConfigureAwait(true);
+                if (generation != _closeConfirmationGeneration || !IsVisible || _documents.Dirty.Any()) return;
+            }
+            _closeApproved = true;
+            Close();
         }
-        _closeApproved = true;
-        Close();
+        catch (Exception exception)
+        {
+            if (generation == _closeConfirmationGeneration && IsVisible)
+                AddProblem("Close", exception.Message);
+        }
+        finally
+        {
+            if (generation == _closeConfirmationGeneration) _closeConfirmationPending = false;
+        }
     }
 
     private void WindowClosed(object? sender, EventArgs e)
     {
+        _closeConfirmationGeneration++;
+        _closeConfirmationPending = false;
         _workspace.WorkspaceChanged -= WorkspaceChanged;
         if (_workspaceWatcher is not null)
         {

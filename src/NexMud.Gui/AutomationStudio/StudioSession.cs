@@ -30,6 +30,9 @@ internal static class StudioActivityModel
 
     public static bool ShowsScriptPackages(StudioActivity activity) =>
         activity == StudioActivity.Scripts;
+
+    public static bool UsesWorkspaceNavigator(StudioActivity activity) =>
+        activity != StudioActivity.Runtime;
 }
 
 internal readonly record struct StudioSessionSnapshot(

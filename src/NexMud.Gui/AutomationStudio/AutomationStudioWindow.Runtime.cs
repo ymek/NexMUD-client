@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using NexMud.Client.Scripting;
 using NexMud.Client.Settings;
 using NexMud.Contracts.Events;
@@ -18,11 +19,142 @@ internal sealed partial class AutomationStudioWindow
     private readonly Queue<RuntimeEventRow> _runtimeEvents = new();
     private string _runtimeSearchText = "";
     private string _runtimeSelectedStatus = "All statuses";
+    private readonly RuntimeUiRefreshGate _runtimeUiRefreshGate = new();
+    private int _runtimeEventsDirty;
+    private int _eventsPanelDirty;
+    private int _runtimeDiagnosticsDirty;
+    private int _runtimeDashboardDirty;
+    private ContentControl? _runtimeRecentEventsHost;
+    private ContentControl? _runtimeSectionHost;
     private static readonly string[] RuntimeStatusOptions = ["All statuses", "Running", "Disabled", "Faulted", "Build failed"];
+
+    private void InvalidateRuntimeRefreshForProfileChange()
+    {
+        Interlocked.Increment(ref _runtimeRefreshGeneration);
+        _runtimeUiRefreshGate.Invalidate();
+        Interlocked.Exchange(ref _runtimeEventsDirty, 0);
+        Interlocked.Exchange(ref _eventsPanelDirty, 0);
+        Interlocked.Exchange(ref _runtimeDiagnosticsDirty, 0);
+        Interlocked.Exchange(ref _runtimeDashboardDirty, 0);
+    }
+
+    private async Task RefreshRuntimeActivityAsync()
+    {
+        string profileId = SelectedProfileId;
+        long generation = Interlocked.Increment(ref _runtimeRefreshGeneration);
+        try
+        {
+            IReadOnlyList<ScriptPackageSnapshot> packages = await _workspace.ListPackagesAsync(
+                profileId, _cts.Token).ConfigureAwait(true);
+            if (_cts.IsCancellationRequested || generation != Volatile.Read(ref _runtimeRefreshGeneration) ||
+                !string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal)) return;
+
+            _packages = packages;
+            await RefreshRuntimePanelAsync().ConfigureAwait(true);
+            if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { return; }
+        catch (Exception exception)
+        {
+            AddProblem("Runtime", $"Unable to refresh runtime activity: {exception.Message}");
+        }
+    }
+
+    private bool IsCurrentRuntimeRefresh(string profileId, long generation) =>
+        !_cts.IsCancellationRequested && generation == Volatile.Read(ref _runtimeRefreshGeneration) &&
+        string.Equals(profileId, SelectedProfileId, StringComparison.Ordinal);
+
+    private void RequestRuntimeUiRefresh(bool events = false, bool eventsPanel = false, bool diagnostics = false, bool dashboard = false)
+    {
+        if (_cts.IsCancellationRequested) return;
+        if (events) Interlocked.Exchange(ref _runtimeEventsDirty, 1);
+        if (eventsPanel) Interlocked.Exchange(ref _eventsPanelDirty, 1);
+        if (diagnostics) Interlocked.Exchange(ref _runtimeDiagnosticsDirty, 1);
+        if (dashboard) Interlocked.Exchange(ref _runtimeDashboardDirty, 1);
+        if (!_runtimeUiRefreshGate.TryQueue(out long generation)) return;
+        _ = DebounceRuntimeUiRefreshAsync(generation);
+    }
+
+    private async Task DebounceRuntimeUiRefreshAsync(long generation)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(200), _cts.Token).ConfigureAwait(false);
+            Dispatcher.UIThread.Post(() => _ = ApplyRuntimeUiRefreshAsync(generation), DispatcherPriority.Background);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+            _runtimeUiRefreshGate.Invalidate();
+        }
+    }
+
+    private async Task ApplyRuntimeUiRefreshAsync(long generation)
+    {
+        string profileId = SelectedProfileId;
+        long profileGeneration = Volatile.Read(ref _runtimeRefreshGeneration);
+        try
+        {
+            bool updateEvents = Interlocked.Exchange(ref _runtimeEventsDirty, 0) != 0;
+            bool updateEventsPanel = Interlocked.Exchange(ref _eventsPanelDirty, 0) != 0;
+            bool updateDiagnostics = Interlocked.Exchange(ref _runtimeDiagnosticsDirty, 0) != 0;
+            bool updateDashboard = Interlocked.Exchange(ref _runtimeDashboardDirty, 0) != 0;
+            if (!IsCurrentRuntimeRefresh(profileId, profileGeneration)) return;
+
+            if (updateEventsPanel) RefreshEventsPanel();
+            if (updateDiagnostics) await RefreshRuntimePanelAsync().ConfigureAwait(true);
+            if (!IsCurrentRuntimeRefresh(profileId, profileGeneration)) return;
+            if (_activity == StudioActivity.Runtime)
+            {
+                if (updateDashboard) RenderRuntimeDashboard();
+                else
+                {
+                    if (updateEvents) RefreshRuntimeEventViews();
+                    if (updateDiagnostics && _runtimeSection is RuntimeSection.Diagnostics or RuntimeSection.RecentFaults &&
+                        _runtimeSectionHost is not null)
+                        _runtimeSectionHost.Content = RenderRuntimeSection();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            AddProblem("Runtime", $"Unable to update runtime activity: {exception.Message}");
+        }
+        finally
+        {
+            if (_runtimeUiRefreshGate.Complete(generation))
+                _ = DebounceRuntimeUiRefreshAsync(generation);
+        }
+    }
+
+    private bool IsEventsTabSelected() =>
+        _bottom.SelectedItem is TabItem selected && string.Equals(selected.Header as string, "Events", StringComparison.Ordinal);
+
+    private void RefreshEventsPanel()
+    {
+        if (_bottomCollapsed || !IsEventsTabSelected()) return;
+        _eventsPanel.Children.Clear();
+        string[] snapshot;
+        lock (_events) snapshot = _events.ToArray();
+        foreach (string item in snapshot.TakeLast(150)) _eventsPanel.Children.Add(Text(item));
+    }
+
+    private void RefreshRuntimeEventViews()
+    {
+        if (_runtimeRecentEventsHost is not null)
+            _runtimeRecentEventsHost.Content = RenderRecentEventsPanel();
+        if (_runtimeSection is RuntimeSection.Events && _runtimeSectionHost is not null)
+            _runtimeSectionHost.Content = RenderRuntimeSection();
+    }
 
     private void RenderRuntimeDashboard()
     {
         if (_activity != StudioActivity.Runtime) return;
+        _runtimeRecentEventsHost = null;
+        _runtimeSectionHost = null;
         _breadcrumbBar.IsVisible = false;
         _statusLeft.Text = $"Runtime · {SelectedProfileId}";
         _statusCursor.Text = "";
@@ -51,11 +183,7 @@ internal sealed partial class AutomationStudioWindow
         restart.IsEnabled = isActiveProfile;
         Grid.SetColumn(restart, 2);
         header.Children.Add(restart);
-        Button refresh = RuntimeButton("Refresh", async () =>
-        {
-            await RefreshNavigatorAsync().ConfigureAwait(true);
-            RenderRuntimeDashboard();
-        });
+        Button refresh = RuntimeButton("Refresh", RefreshRuntimeActivityAsync);
         Grid.SetColumn(refresh, 3);
         header.Children.Add(refresh);
         page.Children.Add(header);
@@ -78,6 +206,7 @@ internal sealed partial class AutomationStudioWindow
 
         if (_runtimeSection is RuntimeSection.PackageStatus)
         {
+            ContentControl packageTableHost = new();
             TextBox packageSearch = new()
             {
                 PlaceholderText = "Search packages…", Text = _runtimeSearchText,
@@ -87,8 +216,10 @@ internal sealed partial class AutomationStudioWindow
             };
             packageSearch.TextChanged += (_, _) =>
             {
-                _runtimeSearchText = packageSearch.Text ?? "";
-                RenderRuntimeDashboard();
+                string query = packageSearch.Text ?? "";
+                if (string.Equals(query, _runtimeSearchText, StringComparison.Ordinal)) return;
+                _runtimeSearchText = query;
+                packageTableHost.Content = RenderPackageTable(isActiveProfile);
             };
             ComboBox statusFilter = new()
             {
@@ -96,8 +227,10 @@ internal sealed partial class AutomationStudioWindow
             };
             statusFilter.SelectionChanged += (_, _) =>
             {
-                _runtimeSelectedStatus = statusFilter.SelectedItem as string ?? RuntimeStatusOptions[0];
-                RenderRuntimeDashboard();
+                string statusValue = statusFilter.SelectedItem as string ?? RuntimeStatusOptions[0];
+                if (string.Equals(statusValue, _runtimeSelectedStatus, StringComparison.Ordinal)) return;
+                _runtimeSelectedStatus = statusValue;
+                packageTableHost.Content = RenderPackageTable(isActiveProfile);
             };
             Grid toolbar = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 8 };
             toolbar.Children.Add(packageSearch);
@@ -108,8 +241,10 @@ internal sealed partial class AutomationStudioWindow
             Grid.SetColumn(load, 2);
             toolbar.Children.Add(load);
             page.Children.Add(toolbar);
-            page.Children.Add(RenderPackageTable(isActiveProfile));
-            page.Children.Add(RenderRecentEventsPanel());
+            packageTableHost.Content = RenderPackageTable(isActiveProfile);
+            page.Children.Add(packageTableHost);
+            _runtimeRecentEventsHost = new ContentControl { Content = RenderRecentEventsPanel() };
+            page.Children.Add(_runtimeRecentEventsHost);
         }
         else
         {
@@ -121,7 +256,8 @@ internal sealed partial class AutomationStudioWindow
                 RuntimeSection.Events => "Events",
                 _ => "Package Status"
             }, Foreground = StudioShellChrome.Foreground, FontSize = 18, FontWeight = FontWeight.SemiBold });
-            page.Children.Add(RenderRuntimeSection());
+            _runtimeSectionHost = new ContentControl { Content = RenderRuntimeSection() };
+            page.Children.Add(_runtimeSectionHost);
         }
         _center.Content = new ScrollViewer { Content = page, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto };
     }
@@ -321,10 +457,7 @@ internal sealed partial class AutomationStudioWindow
             AddConsole($"Runtime build {packageId} failed: {exception.Message}");
         }
         if (profileId == SelectedProfileId)
-        {
-            await RefreshNavigatorAsync().ConfigureAwait(true);
-            RenderRuntimeDashboard();
-        }
+            await RefreshRuntimeActivityAsync().ConfigureAwait(true);
     }
 
     private async Task ReloadRuntimeProfileAsync()
@@ -338,11 +471,10 @@ internal sealed partial class AutomationStudioWindow
         {
             AddConsole(exception.Message);
         }
-        await RefreshNavigatorAsync().ConfigureAwait(true);
-        RenderRuntimeDashboard();
+        await RefreshRuntimeActivityAsync().ConfigureAwait(true);
     }
 
-    private void RecordRuntimeEvent(EventEnvelope envelope)
+    private bool RecordRuntimeEvent(EventEnvelope envelope)
     {
         RuntimeEventRow? row = envelope.Payload switch
         {
@@ -362,17 +494,23 @@ internal sealed partial class AutomationStudioWindow
                     package.PackageId, package.Message ?? package.Status),
             _ => null
         };
-        if (row is null) return;
+        if (row is null) return false;
         lock (_runtimeEvents)
         {
             _runtimeEvents.Enqueue(row);
             while (_runtimeEvents.Count > MaximumEventRows) _runtimeEvents.Dequeue();
         }
-        if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
+        RequestRuntimeUiRefresh(events: _activity == StudioActivity.Runtime,
+            eventsPanel: true,
+            dashboard: _activity == StudioActivity.Runtime &&
+                envelope.Payload is ScriptPackageBuildChanged or ScriptPackageRuntimeChanged);
+        return true;
     }
 
     private void ClearRuntimeEvents()
     {
         lock (_runtimeEvents) _runtimeEvents.Clear();
+        lock (_events) _events.Clear();
+        RefreshEventsPanel();
     }
 }

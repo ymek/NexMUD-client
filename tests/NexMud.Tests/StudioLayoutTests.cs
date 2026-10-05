@@ -5,6 +5,14 @@ namespace NexMud.Tests;
 
 internal static class StudioLayoutTests
 {
+    public static Task RuntimeSkipsWorkspaceNavigator()
+    {
+        Assert.False(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Runtime));
+        Assert.True(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Search));
+        Assert.True(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Automations));
+        return Task.CompletedTask;
+    }
+
     public static Task SearchWorkspaceColumnsParse()
     {
         var columns = AutomationStudioWindow.CreateSearchWorkspaceColumns();

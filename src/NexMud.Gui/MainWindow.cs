@@ -504,7 +504,7 @@ public sealed class MainWindow : Window
 
     private void ShowAutomationStudio()
     {
-        if (_automationStudioWindow is { } existing)
+        if (_automationStudioWindow is { IsVisible: true } existing)
         {
             if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
             existing.Show();
@@ -513,9 +513,14 @@ public sealed class MainWindow : Window
             return;
         }
 
+        _automationStudioWindow = null;
         AutomationStudioWindow studio = new(_runtime);
         studio.StudioSettingsRequested += ShowStudioSettingsAsync;
-        studio.Closed += (_, _) => _automationStudioWindow = null;
+        studio.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_automationStudioWindow, studio))
+                _automationStudioWindow = null;
+        };
         _automationStudioWindow = studio;
         studio.Show(this);
     }
