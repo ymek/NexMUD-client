@@ -76,6 +76,8 @@ public sealed class ClientScriptPlatform : IAsyncDisposable
     public string? RegisterRuntimeProfile(ScriptModuleId moduleId, string profileId) =>
         _runtimeProfiles.Register(moduleId, profileId);
 
+    public string? ResolveRuntimeProfile(string moduleId) => _runtimeProfiles.Resolve(moduleId);
+
     public void UnregisterRuntimeProfile(ScriptModuleId moduleId, string profileId) =>
         _runtimeProfiles.Unregister(moduleId, profileId);
 

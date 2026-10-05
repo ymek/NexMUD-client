@@ -812,6 +812,7 @@ public static class Program
         await RunAsync("script package dependency sources are constrained", ScriptPackageDependencySourcesAreConstrained);
         await RunAsync("script package runtime state remains separate from package json", ScriptPackageRuntimeStateIsSeparate);
         await RunAsync("script workspace reload is limited to the active profile", ScriptWorkspaceReloadRejectsInactiveProfile);
+        await RunAsync("script workspace reload preserves last-known-good package", ScriptWorkspaceReloadPreservesLastKnownGood);
         await RunAsync("script package runtime definition normalizes npm entrypoint", ScriptPackageRuntimeDefinitionNormalizesEntrypoint);
         await RunAsync("TypeScript project projection materializes SDK and project config", Phase6ProjectProjectionTests.MaterializesSdkAndProjectConfig);
         await RunAsync("language-server framing preserves UTF-8 Content-Length", Phase6LanguageServerTests.FramingRoundTripsUtf8Payload);
@@ -8689,6 +8690,53 @@ public static class Program
         }
         finally
         {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ScriptWorkspaceReloadPreservesLastKnownGood()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nexmud-workspace-last-good-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        await using NexMudRuntime runtime = new(new ClientSettingsStore(Path.Combine(root, "settings.json")));
+        string profileId = runtime.ActiveConnectionProfile.Id;
+        string? packageId = null;
+        try
+        {
+            ScriptPackageDefinition definition = await runtime.ScriptWorkspace.CreatePackageAsync(
+                profileId, "Reload Regression", $"reload-regression-{Guid.NewGuid():N}");
+            packageId = definition.PackageId;
+            await runtime.ScriptWorkspace.SetEnabledAsync(profileId, definition.PackageId, true);
+            ScriptModuleSnapshot loaded = runtime.Scripting.JavaScriptRuntime.Snapshot()
+                .SingleOrDefault(module => module.Id.Value == definition.PackageId)
+                ?? throw new InvalidOperationException("Expected enabled package to load before reload.");
+            Assert.Equal(ScriptStatus.Running, loaded.Status);
+
+            await runtime.ScriptWorkspace.SaveSourceAsync(
+                profileId, definition.PackageId, "src/main.ts", "export function broken( {", build: false);
+            try
+            {
+                await runtime.ScriptWorkspace.ReloadProfileAsync(profileId);
+                throw new InvalidOperationException("A failed package rebuild should be reported.");
+            }
+            catch (InvalidOperationException exception) when
+                (exception.Message.StartsWith("Runtime package reload was partial:", StringComparison.Ordinal)) { }
+
+            ScriptModuleSnapshot preserved = runtime.Scripting.JavaScriptRuntime.Snapshot()
+                .SingleOrDefault(module => module.Id.Value == definition.PackageId)
+                ?? throw new InvalidOperationException("Expected previous package runtime to survive reload.");
+            Assert.Equal(loaded.Id, preserved.Id);
+            Assert.Equal(ScriptStatus.Running, preserved.Status);
+            ScriptPackageSnapshot package = await runtime.ScriptWorkspace.GetPackageAsync(profileId, definition.PackageId)
+                ?? throw new InvalidOperationException("Expected package snapshot after reload.");
+            Assert.Equal(ScriptPackageBuildStatus.Failed, package.BuildStatus);
+            Assert.Equal(ScriptStatus.Running, package.RuntimeStatus);
+            Assert.Equal("Current source build failed. Running previous build.", package.RuntimeMessage);
+        }
+        finally
+        {
+            if (packageId is not null)
+                await runtime.ScriptWorkspace.DeletePackageAsync(profileId, packageId);
             Directory.Delete(root, recursive: true);
         }
     }

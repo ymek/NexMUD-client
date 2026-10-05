@@ -64,6 +64,7 @@ public sealed record ScriptPackageSnapshot(
     string? LastRuntimeFault = null)
 {
     public bool HasNodeModulesDirectory { get; init; }
+    public string? RuntimeMessage { get; init; }
 }
 
 public sealed record ScriptWorkspaceSourceFile(string RelativePath, long Size);
@@ -115,7 +116,8 @@ public sealed partial class ScriptWorkspaceService
         ScriptPackageBuildStatus Status,
         IReadOnlyList<ExportedScriptFunction> Exports,
         DateTimeOffset? BuiltAt,
-        string? LastRuntimeFault = null);
+        string? LastRuntimeFault = null,
+        string? RuntimeMessage = null);
 
     private readonly ClientScriptPlatform _platform;
     private readonly IEventSink _events;
@@ -178,7 +180,8 @@ public sealed partial class ScriptWorkspaceService
                 state.BuiltAt,
                 state.LastRuntimeFault)
             {
-                HasNodeModulesDirectory = Directory.Exists(Path.Combine(package.PackageRoot, "node_modules"))
+                HasNodeModulesDirectory = Directory.Exists(Path.Combine(package.PackageRoot, "node_modules")),
+                RuntimeMessage = state.RuntimeMessage
             });
         }
         return packages;
@@ -454,8 +457,8 @@ public sealed partial class ScriptWorkspaceService
             ? prior
             : new BuildState(ScriptPackageBuildStatus.NeverBuilt, [], null);
         _buildStates[stateKey] = compile.Success
-            ? new BuildState(status, exports, builtAt, previous.LastRuntimeFault)
-            : previous with { Status = status, BuiltAt = builtAt };
+            ? new BuildState(status, exports, builtAt)
+            : previous with { Status = status, BuiltAt = builtAt, RuntimeMessage = null };
 
         if (compile.Success && compile.Package is not null && definition.Enabled &&
             string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
@@ -466,11 +469,35 @@ public sealed partial class ScriptWorkspaceService
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
+                bool hasPreviousRuntime = _loadedPackageIds.Contains(packageId) &&
+                    _platform.JavaScriptRuntime.Snapshot().Any(module =>
+                        module.Id.Value.Equals(packageId, StringComparison.OrdinalIgnoreCase) && module.Status == ScriptStatus.Running);
+                if (hasPreviousRuntime)
+                {
+                    string previousBuildMessage = $"Running previous build; runtime reload failed: {exception.Message}";
+                    _buildStates[stateKey] = _buildStates[stateKey] with
+                    {
+                        LastRuntimeFault = exception.Message,
+                        RuntimeMessage = previousBuildMessage
+                    };
+                    await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Running, previousBuildMessage, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(previousBuildMessage, exception);
+                }
+
                 _buildStates[stateKey] = _buildStates[stateKey] with { LastRuntimeFault = exception.Message };
                 await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Faulted, exception.Message, CancellationToken.None)
                     .ConfigureAwait(false);
                 throw;
             }
+        }
+        else if (!compile.Success && definition.Enabled && _loadedPackageIds.Contains(packageId) &&
+                 string.Equals(profileId, _activeProfileId(), StringComparison.Ordinal))
+        {
+            const string previousBuildMessage = "Current source build failed. Running previous build.";
+            _buildStates[stateKey] = _buildStates[stateKey] with { RuntimeMessage = previousBuildMessage };
+            await PublishRuntimeAsync(profileId, packageId, ScriptStatus.Running,
+                previousBuildMessage, CancellationToken.None).ConfigureAwait(false);
         }
 
         ScriptPackageBuildResult result = new(
@@ -709,7 +736,7 @@ public sealed partial class ScriptWorkspaceService
         await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Unload and rebuild the enabled packages for the active profile in this runtime instance.</summary>
+    /// <summary>Rebuild enabled packages without unloading last-known-good runtime instances.</summary>
     public async Task ReloadProfileAsync(string profileId, CancellationToken cancellationToken = default)
     {
         profileId = ScriptWorkspacePath.NormalizeIdentifier(profileId, nameof(profileId));
@@ -717,11 +744,16 @@ public sealed partial class ScriptWorkspaceService
             throw new InvalidOperationException("Only the active Connection Profile runtime can be reloaded.");
         if (!string.Equals(_loadedRuntimeProfileId, profileId, StringComparison.Ordinal))
         {
-            await ActivateProfileAsync(profileId, cancellationToken).ConfigureAwait(false);
-            return;
+            bool loadedPackagesBelongToProfile = _loadedPackageIds.All(packageId =>
+                string.Equals(_platform.ResolveRuntimeProfile(packageId), profileId, StringComparison.Ordinal));
+            if (!loadedPackagesBelongToProfile)
+            {
+                await ActivateProfileAsync(profileId, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            _loadedRuntimeProfileId = profileId;
         }
 
-        await UnloadProfilePackagesAsync(cancellationToken).ConfigureAwait(false);
         await LoadEnabledPackagesAsync(profileId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -869,6 +901,9 @@ public sealed partial class ScriptWorkspaceService
         }
 
         _loadedPackageIds.Add(definition.PackageId);
+        string stateKey = StateKey(profileId, definition.PackageId);
+        if (_buildStates.TryGetValue(stateKey, out BuildState? state))
+            _buildStates[stateKey] = state with { RuntimeMessage = null };
         await PublishRuntimeAsync(profileId, definition.PackageId, ScriptStatus.Running, null, cancellationToken).ConfigureAwait(false);
     }
 

@@ -37,6 +37,9 @@ internal sealed class ScriptRuntimeProfileRegistry
         _moduleProfiles.TryUpdate(moduleId.Value, previousProfileId, expectedProfileId);
     }
 
+    public string? Resolve(string moduleId) =>
+        _moduleProfiles.TryGetValue(moduleId, out string? profileId) ? profileId : null;
+
     public string? Resolve(ScriptDiagnosticRecord diagnostic)
     {
         string moduleId = diagnostic.ScriptId.Value;

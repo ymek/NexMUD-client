@@ -756,6 +756,7 @@ internal sealed partial class AutomationStudioWindow : Window
                 Interlocked.Increment(ref _navigatorRefreshGeneration);
                 _refreshingNavigator = false;
                 _packages = [];
+                ClearRuntimeEvents();
                 _nodes.Clear();
                 _navigator.ItemsSource = Array.Empty<object>();
                 _activePackage = null;
@@ -895,7 +896,11 @@ internal sealed partial class AutomationStudioWindow : Window
     private void WorkspaceChanged(object? sender, EventArgs e)
     {
         if (_cts.IsCancellationRequested) return;
-        Dispatcher.UIThread.Post(async () => await RefreshNavigatorAsync().ConfigureAwait(true));
+        Dispatcher.UIThread.Post(async () =>
+        {
+            await RefreshNavigatorAsync().ConfigureAwait(true);
+            if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
+        });
     }
 
     private void WorkspaceExternalChanged(object? sender, ScriptWorkspaceExternalChangesEventArgs e)
@@ -3023,6 +3028,7 @@ internal sealed partial class AutomationStudioWindow : Window
         }
         RefreshProblems();
         _ = RefreshRuntimePanelAsync();
+        if (_activity == StudioActivity.Runtime) RenderRuntimeDashboard();
     }
 
     private void AddProblem(string severity, string message)
