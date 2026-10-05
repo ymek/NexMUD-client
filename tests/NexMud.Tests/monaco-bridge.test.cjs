@@ -6,10 +6,14 @@ const bridgePath = process.argv[2];
 if (!bridgePath) throw new Error('Expected path to nexmud-editor-bridge.js');
 const source = fs.readFileSync(bridgePath, 'utf8');
 
-function createBridge({ transport, immediateTimeout = false } = {}) {
+function createBridge({ transport, immediateTimeout = false, existingModel, existingModelUri } = {}) {
   const messages = [];
   const modes = [];
   const providers = new Map();
+  const languageChanges = [];
+  const existingModels = new Map();
+  if (existingModel) existingModels.set(existingModelUri, existingModel);
+  let activeModel = null;
   let timerId = 0;
   const defaults = {
     setModeConfiguration: configuration => modes.push(configuration),
@@ -18,11 +22,14 @@ function createBridge({ transport, immediateTimeout = false } = {}) {
   };
   const editor = {
     updateOptions() {}, addCommand() {}, onDidChangeCursorSelection() { return { dispose() {} }; },
-    getModel() { return null; }, setModel() {}, dispose() {}
+    getModel() { return activeModel; }, setModel(model) { activeModel = model; }, dispose() {}
   };
   const monaco = {
     editor: {
-      setTheme() {}, create: () => editor, getModel: () => null, setModelMarkers() {}
+      setTheme() {}, create: () => editor,
+      getModel: uri => existingModels.get(uri.toString()) ?? null,
+      setModelLanguage(model, language) { languageChanges.push(language); model.language = language; },
+      setModelMarkers() {}
     },
     languages: {
       typescript: { typescriptDefaults: defaults, javascriptDefaults: defaults },
@@ -62,7 +69,7 @@ function createBridge({ transport, immediateTimeout = false } = {}) {
   const bridge = context.nexmudEditorBridge;
   const receive = (type, payload = {}) => bridge.receive({ version: 1, type, payload });
   receive('setLanguageServerAvailable', { available: true });
-  return { bridge, receive, messages, modes, providers };
+  return { bridge, receive, messages, modes, providers, languageChanges, activeModel: () => activeModel };
 }
 
 async function requestError(errorPayload) {
@@ -96,6 +103,22 @@ async function main() {
   const available = createBridge();
   for (const feature of ['documentHighlights', 'onTypeFormattingEdits', 'codeActions', 'inlayHints', 'documentRangeFormattingEdits'])
     assert.equal(available.modes.at(-1)[feature], true, `${feature} should remain provided by Monaco`);
+
+  const existingUri = 'file:///package/main.ts';
+  const existingModel = {
+    language: 'plaintext', value: 'const current = 1;',
+    getLanguageId() { return this.language; },
+    getValue() { return this.value; },
+    setValue(value) { this.value = value; }
+  };
+  const reused = createBridge({ existingModel, existingModelUri: existingUri });
+  reused.receive('openDocument', { uri: existingUri, path: 'package/main.ts', content: 'const current = 2;' });
+  assert.equal(existingModel.language, 'typescript', 'reused TypeScript models must use syntax highlighting');
+  assert.equal(existingModel.value, 'const current = 2;');
+  assert.equal(reused.activeModel(), existingModel);
+  reused.receive('openDocument', { uri: existingUri, path: 'package/main.js', content: 'const current = 3;' });
+  assert.equal(existingModel.language, 'javascript', 'reused models must update language when their extension changes');
+  assert.deepEqual(reused.languageChanges, ['typescript', 'javascript']);
 
   await requestError({ code: -32602, message: 'Invalid params', data: { detail: 'bad position' }, unavailable: false });
   await requestError('ordinary request error');

@@ -1,3 +1,4 @@
+using Avalonia.Controls;
 using NexMud.Gui.AutomationStudio;
 using Assert = NexMud.Tests.Program.Assert;
 
@@ -10,6 +11,23 @@ internal static class StudioLayoutTests
         Assert.False(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Runtime));
         Assert.True(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Search));
         Assert.True(StudioActivityModel.UsesWorkspaceNavigator(StudioActivity.Automations));
+        return Task.CompletedTask;
+    }
+
+    public static Task MonacoVisibilityTracksEditorMode()
+    {
+        Border monaco = new();
+        Border center = new();
+
+        AutomationStudioWindow.ApplyMonacoVisibility(monaco, center, show: false);
+        Assert.False(monaco.IsVisible);
+        Assert.Equal(0d, monaco.MaxHeight);
+        Assert.True(center.IsVisible);
+
+        AutomationStudioWindow.ApplyMonacoVisibility(monaco, center, show: true);
+        Assert.True(monaco.IsVisible);
+        Assert.Equal(double.PositiveInfinity, monaco.MaxHeight);
+        Assert.False(center.IsVisible);
         return Task.CompletedTask;
     }
 

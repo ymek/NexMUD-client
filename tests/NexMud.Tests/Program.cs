@@ -113,6 +113,7 @@ public static class Program
         await RunAsync("Studio coalesces runtime refresh bursts", StudioRuntimeRefreshTests.CoalescesUntilRefreshCompletes);
         await RunAsync("Studio ignores stale runtime refresh completion after profile switch", StudioRuntimeRefreshTests.ProfileInvalidationIgnoresStaleRefreshCompletion);
         await RunAsync("Studio search workspace accepts Avalonia grid columns", StudioLayoutTests.SearchWorkspaceColumnsParse);
+        await RunAsync("Studio Monaco visibility tracks active editor", StudioLayoutTests.MonacoVisibilityTracksEditorMode);
         await RunAsync("Runtime uses a focused navigator refresh policy", StudioLayoutTests.RuntimeSkipsWorkspaceNavigator);
         await RunAsync("Studio search matcher honors case and whole-word filters", StudioSearchMatcherTests.MatchesCaseAndWholeWordOptions);
         await RunAsync("Studio search matcher handles overlapping Unicode whole-word boundaries", StudioSearchMatcherTests.HandlesOverlappingAndUnicodeWholeWordBoundaries);

@@ -239,15 +239,17 @@
     },
     openDocument(payload) {
       const uriText = String(payload.uri);
+      const language = languageFor(payload.path);
       let model = monaco.editor.getModel(monaco.Uri.parse(uriText));
       if (!model) {
-        model = monaco.editor.createModel(String(payload.content ?? ''), languageFor(payload.path), monaco.Uri.parse(uriText));
+        model = monaco.editor.createModel(String(payload.content ?? ''), language, monaco.Uri.parse(uriText));
         const subscription = model.onDidChangeContent(() => {
           send('documentChanged', { uri: uriText, versionId: model.getVersionId(), alternativeVersionId: model.getAlternativeVersionId(), text: model.getValue() });
         });
         modelSubscriptions.set(uriText, subscription);
-      } else if (model.getValue() !== String(payload.content ?? '')) {
-        model.setValue(String(payload.content ?? ''));
+      } else {
+        if (model.getLanguageId() !== language) monaco.editor.setModelLanguage(model, language);
+        if (model.getValue() !== String(payload.content ?? '')) model.setValue(String(payload.content ?? ''));
       }
       models.set(uriText, model);
       editor.setModel(model);

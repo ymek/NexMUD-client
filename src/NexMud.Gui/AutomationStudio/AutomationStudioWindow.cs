@@ -2258,7 +2258,6 @@ internal sealed partial class AutomationStudioWindow : Window
             MonacoEditorHost monaco = _monaco;
             ShowMonaco(true);
             // A NativeWebView only creates its native handle (and can only navigate) once visible in the tree.
-            monaco.IsVisible = true;
             _center.Content = null;
             if (_documents.Find(uri) is null)
             {
@@ -3029,14 +3028,17 @@ internal sealed partial class AutomationStudioWindow : Window
     private void CloseAllEditors() => _editors.Clear();
 
     /// <summary>
-    /// Shows or hides the native WebView by collapsing its height. Toggling IsVisible on a native
-    /// control left its bounds stale (it painted over the tab strip) and destroying it loses all models.
+    /// Keep the native WebView attached so its models survive, while changing visibility and bounds
+    /// together. IsVisible alone left stale native bounds that painted over the tab strip.
     /// </summary>
-    private void ShowMonaco(bool show)
+    internal static void ApplyMonacoVisibility(Control monaco, Control center, bool show)
     {
-        _monaco.MaxHeight = show ? double.PositiveInfinity : 0;
-        _center.IsVisible = !show;
+        monaco.MaxHeight = show ? double.PositiveInfinity : 0;
+        monaco.IsVisible = show;
+        center.IsVisible = !show;
     }
+
+    private void ShowMonaco(bool show) => ApplyMonacoVisibility(_monaco, _center, show);
 
     private void RenderActive()
     {
