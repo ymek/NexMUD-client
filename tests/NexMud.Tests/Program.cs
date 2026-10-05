@@ -111,6 +111,7 @@ public static class Program
         await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
         await RunAsync("Phase 5 source search handles overlap, Unicode, and filters", Phase5SourceSearchTests.HandlesOverlappingUnicodeAndFilterTerms);
         await RunAsync("Studio search matcher honors case and whole-word filters", StudioSearchMatcherTests.MatchesCaseAndWholeWordOptions);
+        await RunAsync("Studio search matcher handles overlapping Unicode whole-word boundaries", StudioSearchMatcherTests.HandlesOverlappingAndUnicodeWholeWordBoundaries);
         await RunAsync("Studio search matcher applies include and exclude terms", StudioSearchMatcherTests.AppliesIncludeAndExcludeTerms);
         await RunAsync("Studio search matcher ranks title matches", StudioSearchMatcherTests.RanksExactAndTitleMatchesFirst);
         await RunAsync("Studio saved search preserves scope and filters", StudioSearchMatcherTests.SavedSearchRoundTripsScopesAndFilters);

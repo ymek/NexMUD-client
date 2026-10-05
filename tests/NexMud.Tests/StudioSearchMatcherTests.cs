@@ -18,6 +18,23 @@ internal static class StudioSearchMatcherTests
         return Task.CompletedTask;
     }
 
+    public static Task HandlesOverlappingAndUnicodeWholeWordBoundaries()
+    {
+        Assert.False(StudioSearchMatcher.Contains("anything", null, matchCase: false, wholeWord: true));
+        Assert.True(StudioSearchMatcher.Contains("x---", "--", matchCase: false, wholeWord: true));
+        Assert.False(StudioSearchMatcher.Contains("αneedle", "needle", matchCase: false, wholeWord: true));
+        string supplementaryLetter = char.ConvertFromUtf32(0x10400);
+        string markedLetter = supplementaryLetter + char.ConvertFromUtf32(0x0301);
+        string highSurrogate = supplementaryLetter[..1];
+        string lowSurrogate = supplementaryLetter[1..];
+        Assert.False(StudioSearchMatcher.Contains(supplementaryLetter, highSurrogate, matchCase: false, wholeWord: true));
+        Assert.False(StudioSearchMatcher.Contains(supplementaryLetter, lowSurrogate, matchCase: false, wholeWord: true));
+        Assert.False(StudioSearchMatcher.Contains(supplementaryLetter + "needle", "needle", matchCase: false, wholeWord: true));
+        Assert.False(StudioSearchMatcher.Contains(markedLetter + "needle", "needle", matchCase: false, wholeWord: true));
+        Assert.True(StudioSearchMatcher.Contains($" {supplementaryLetter} ", supplementaryLetter, matchCase: false, wholeWord: true));
+        return Task.CompletedTask;
+    }
+
     public static Task AppliesIncludeAndExcludeTerms()
     {
         string[] included = StudioSearchMatcher.ParseTerms("combat, flee; combat");

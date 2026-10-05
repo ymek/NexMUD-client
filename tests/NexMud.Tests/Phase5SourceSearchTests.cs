@@ -23,6 +23,17 @@ internal static class Phase5SourceSearchTests
         Assert.Equal(0, ScriptSourceSearchMatcher.FindFirst("élan", "élan", new ScriptSourceSearchOptions(WholeWord: true)));
         Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst("élan2", "élan", new ScriptSourceSearchOptions(WholeWord: true)));
 
+        string supplementaryLetter = char.ConvertFromUtf32(0x10400);
+        string markedLetter = supplementaryLetter + char.ConvertFromUtf32(0x0301);
+        string highSurrogate = supplementaryLetter[..1];
+        string lowSurrogate = supplementaryLetter[1..];
+        ScriptSourceSearchOptions wholeWord = new(WholeWord: true);
+        Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst(supplementaryLetter, highSurrogate, wholeWord));
+        Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst(supplementaryLetter, lowSurrogate, wholeWord));
+        Assert.Equal(0, ScriptSourceSearchMatcher.FindFirst(supplementaryLetter, supplementaryLetter, wholeWord));
+        Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst(supplementaryLetter + "needle", "needle", wholeWord));
+        Assert.Equal(-1, ScriptSourceSearchMatcher.FindFirst(markedLetter + "needle", "needle", wholeWord));
+
         ScriptSourceSearchOptions options = new(IncludedTerms: ["combat", "retreat"], ExcludedTerms: ["unsafe"]);
         Assert.True(ScriptSourceSearchMatcher.MatchesFilters("combat retreat routine", options));
         Assert.False(ScriptSourceSearchMatcher.MatchesFilters("combat routine", options));

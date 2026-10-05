@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Text;
+
 namespace NexMud.Gui.AutomationStudio;
 
 internal static class StudioSearchMatcher
@@ -13,7 +16,7 @@ internal static class StudioSearchMatcher
             int index = value.IndexOf(term, offset, comparison);
             if (index < 0) return false;
             int end = index + term.Length;
-            if (!wholeWord || (IsBoundary(value, index - 1) && IsBoundary(value, end))) return true;
+            if (!wholeWord || (IsBoundaryBefore(value, index) && IsBoundaryAfter(value, end))) return true;
             offset = index + 1;
         }
         return false;
@@ -47,12 +50,29 @@ internal static class StudioSearchMatcher
         return 3;
     }
 
-    private static bool IsBoundary(string value, int index) =>
-        index < 0 || index >= value.Length || !IsWordCharacter(value[index]);
+    private static bool IsBoundaryBefore(string value, int index)
+    {
+        if (!IsRuneBoundary(value, index)) return false;
+        return index <= 0 ||
+               Rune.DecodeLastFromUtf16(value.AsSpan(0, index), out Rune previous, out _) != OperationStatus.Done ||
+               !IsWordCharacter(previous);
+    }
 
-    private static bool IsWordCharacter(char character) =>
-        char.IsLetterOrDigit(character) || character == '_' ||
-        char.GetUnicodeCategory(character) is System.Globalization.UnicodeCategory.NonSpacingMark or
+    private static bool IsBoundaryAfter(string value, int index)
+    {
+        if (!IsRuneBoundary(value, index)) return false;
+        return index >= value.Length ||
+               Rune.DecodeFromUtf16(value.AsSpan(index), out Rune next, out _) != OperationStatus.Done ||
+               !IsWordCharacter(next);
+    }
+
+    private static bool IsRuneBoundary(string value, int index) =>
+        index <= 0 || index >= value.Length ||
+        !char.IsHighSurrogate(value[index - 1]) || !char.IsLowSurrogate(value[index]);
+
+    private static bool IsWordCharacter(Rune character) =>
+        Rune.IsLetterOrDigit(character) || character.Value == '_' ||
+        Rune.GetUnicodeCategory(character) is System.Globalization.UnicodeCategory.NonSpacingMark or
             System.Globalization.UnicodeCategory.SpacingCombiningMark or
             System.Globalization.UnicodeCategory.EnclosingMark;
 }
