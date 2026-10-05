@@ -314,6 +314,7 @@ public static class Program
         await RunAsync("typesafe parallel score and noul map to trace", TypesafeParallelQuestionsMapToTrace);
         await RunAsync("studio automation collections add duplicate and remove without mutating source", StudioCollectionsAreImmutableAndUnique);
         await RunAsync("studio automation CRUD covers every structured kind", StudioAutomationCrudCoversEveryKind);
+        await RunAsync("studio creation wizard validates requests", StudioCreationWizardValidatesRequests);
         await RunAsync("studio document set focuses existing tab and closes to neighbor", StudioDocumentSetFocusAndClose);
         await RunAsync("studio document set tracks dirty state", () =>
         {
@@ -9139,6 +9140,20 @@ Level 30: circle stab        n/a
 
         Assert.True(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "TRIGGER"));
         Assert.False(NexMud.Gui.AutomationStudio.StudioFilter.Matches("Defensive trigger", "timer"));
+        return Task.CompletedTask;
+    }
+
+    private static Task StudioCreationWizardValidatesRequests()
+    {
+        var templates = NexMud.Gui.AutomationStudio.NewItemTemplate.All;
+        var alias = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Alias);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(alias, ["quick", "look"]) is null);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(alias, [" ", "look"]) is not null);
+        var timer = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Timer);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(timer, ["pulse", "1", "score"]) is null);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(timer, ["pulse", "0", "score"]) is not null);
+        var highlight = templates.Single(template => template.Kind == NexMud.Gui.AutomationStudio.StudioDocumentKind.Highlight);
+        Assert.True(NexMud.Gui.AutomationStudio.NewItemRequest.Validate(highlight, ["tells", "not-a-color"]) is not null);
         return Task.CompletedTask;
     }
 

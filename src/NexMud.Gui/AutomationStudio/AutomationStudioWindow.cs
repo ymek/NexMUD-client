@@ -87,6 +87,8 @@ internal sealed partial class AutomationStudioWindow : Window
     private Button _organizeButton = new();
     private Control _scriptActions = new StackPanel();
     private StudioActivity _activity;
+    private StudioDocumentKind? _automationCategoryPage;
+    private StudioDocumentKind? _automationWizardKind;
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal };
     private readonly ContentControl _center = new();
     private readonly StackPanel _problems = new() { Spacing = 3 };
@@ -1333,7 +1335,7 @@ internal sealed partial class AutomationStudioWindow : Window
                     .Where(item => groupMatches || StudioFilter.Matches(item.Workflow.Name, filter))
                     .ToArray();
                 if (members.Length == 0) continue;
-                TreeViewItem groupNode = Node(new StudioNode(NodeKind.Category, $"▸ {group.Key} ({group.Count()})", kind));
+                TreeViewItem groupNode = Node(new StudioNode(NodeKind.Folder, $"▸ {group.Key} ({group.Count()})", kind));
                 groupNode.IsExpanded = !string.IsNullOrWhiteSpace(filter) || group.Count() <= 12;
                 groupNode.ItemsSource = members
                     .Where(item => byIndex.ContainsKey(item.Index) && itemByIndex.ContainsKey(item.Index))
@@ -1470,7 +1472,13 @@ internal sealed partial class AutomationStudioWindow : Window
                     _runtimeSection = section;
                     RenderRuntimeDashboard();
                     break;
-                case NodeKind.Category or NodeKind.Scripts:
+                case NodeKind.Category when node.DocKind is { } category:
+                    item.IsExpanded = !item.IsExpanded;
+                    _automationCategoryPage = category;
+                    _automationWizardKind = null;
+                    RenderActive();
+                    break;
+                case NodeKind.Scripts:
                     item.IsExpanded = !item.IsExpanded;
                     break;
             }
@@ -2038,43 +2046,120 @@ internal sealed partial class AutomationStudioWindow : Window
         });
     }
 
-    private async Task CreateAutomationAsync(StudioDocumentKind kind)
+    private Task CreateAutomationAsync(StudioDocumentKind kind)
+    {
+        _automationCategoryPage = kind;
+        _automationWizardKind = kind;
+        RenderActive();
+        return Task.CompletedTask;
+    }
+
+    private Control AutomationCategoryPage(StudioDocumentKind kind)
+    {
+        StackPanel page = new() { Spacing = 16, Margin = new Thickness(28), MaxWidth = 1000 };
+        page.Children.Add(new TextBlock { Text = kind.CategoryLabel(), FontSize = 26, FontWeight = FontWeight.SemiBold, Foreground = UiTheme.Text });
+        page.Children.Add(new TextBlock { Text = "Manage your automations or create a new one.", Foreground = UiTheme.Muted });
+        page.Children.Add(Button($"+ New {kind.Label()}", () => CreateAutomationAsync(kind)));
+        AutomationCollections collections = AutomationCollections.From(_runtime.Settings);
+        IReadOnlyList<AutomationEntryInfo> entries = collections.Entries(kind);
+        if (entries.Count == 0)
+            page.Children.Add(new TextBlock { Text = $"No {kind.CategoryLabel().ToLowerInvariant()} yet.", Foreground = UiTheme.Muted, Margin = new Thickness(0, 12) });
+        foreach (AutomationEntryInfo entry in entries)
+        {
+            string automationId = _organization.IdFor(kind, entry.Index);
+            Grid row = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 8, Margin = new Thickness(0, 3) };
+            StackPanel identity = new() { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+            identity.Children.Add(new TextBlock { Text = entry.Enabled ? "● Enabled" : "○ Disabled", Foreground = entry.Enabled ? UiTheme.Accent : UiTheme.Muted, MinWidth = 90 });
+            identity.Children.Add(new TextBlock { Text = entry.Name, Foreground = UiTheme.Text, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(identity);
+            row.Children.Add(Button(entry.Enabled ? "Disable" : "Enable", () => ToggleCategoryAutomationAsync(kind, automationId)));
+            Grid.SetColumn(row.Children[^1], 1);
+            row.Children.Add(Button("Edit", () => { _automationCategoryPage = null; OpenAutomation(kind, automationId); RenderActive(); return Task.CompletedTask; }));
+            Grid.SetColumn(row.Children[^1], 2);
+            row.Children.Add(Button("Delete", () => RunCategoryActionAsync(kind, automationId, DeleteAutomationAsync)));
+            Grid.SetColumn(row.Children[^1], 3);
+            page.Children.Add(new Border { Padding = new Thickness(12), Background = StudioShellChrome.Card, BorderBrush = StudioShellChrome.Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = row });
+        }
+        return new ScrollViewer { Content = page, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+    }
+
+    private async Task RunCategoryActionAsync(StudioDocumentKind kind, string automationId, Func<StudioDocument, Task> action)
+    {
+        OpenAutomation(kind, automationId);
+        if (_documents.Active is { } document) await action(document).ConfigureAwait(true);
+        _automationCategoryPage = kind;
+        RenderActive();
+    }
+
+    private async Task ToggleCategoryAutomationAsync(StudioDocumentKind kind, string automationId)
+    {
+        string key = StudioDocument.AutomationKey(SelectedProfileId, kind, automationId);
+        OpenAutomation(kind, automationId);
+        if (_documents.Active is not { } document || !string.Equals(document.Key, key, StringComparison.Ordinal)) return;
+
+        if (document.IsDirty)
+        {
+            if (!await ResolveDirtyAutomationAsync(document, "toggling").ConfigureAwait(true))
+            {
+                _automationCategoryPage = kind;
+                RenderActive();
+                return;
+            }
+            if (!string.Equals(_documents.Active?.Key, key, StringComparison.Ordinal))
+                OpenAutomation(kind, automationId);
+        }
+
+        if (_documents.Active is { } active && string.Equals(active.Key, key, StringComparison.Ordinal))
+            await ToggleAutomationAsync(active).ConfigureAwait(true);
+        _automationCategoryPage = kind;
+        RenderActive();
+    }
+
+    private Control AutomationWizardPage(StudioDocumentKind kind)
+    {
+        NewItemTemplate template = NewItemTemplate.All.First(item => item.Kind == kind);
+        StackPanel page = new() { Spacing = 12, Margin = new Thickness(28), MaxWidth = 760 };
+        page.Children.Add(new TextBlock { Text = $"New {template.Title}", FontSize = 26, FontWeight = FontWeight.SemiBold, Foreground = UiTheme.Text });
+        page.Children.Add(new TextBlock { Text = template.Description, Foreground = UiTheme.Muted, TextWrapping = TextWrapping.Wrap });
+        page.Children.Add(new TextBlock { Text = $"Example: {template.Example}", Foreground = UiTheme.Faint, FontFamily = UiTheme.Mono, FontSize = 12 });
+        List<TextBox> fields = [];
+        foreach (NewItemField field in template.Fields)
+        {
+            TextBox input = UiTheme.FieldBox();
+            input.Text = field.Default;
+            input.MinHeight = 34;
+            fields.Add(input);
+            page.Children.Add(new StackPanel { Spacing = 4, Children = { new TextBlock { Text = $"{field.Label} — {field.Hint}", Foreground = UiTheme.Muted, FontSize = 12 }, input } });
+        }
+        TextBlock error = new() { Foreground = UiTheme.Danger, IsVisible = false };
+        page.Children.Add(error);
+        StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+        buttons.Children.Add(Button("Cancel", () => { _automationWizardKind = null; RenderActive(); return Task.CompletedTask; }));
+        buttons.Children.Add(Button("Create", async () =>
+        {
+            string[] values = fields.Select(field => field.Text?.Trim() ?? "").ToArray();
+            if (NewItemRequest.Validate(template, values) is { } validationError)
+            {
+                error.Text = validationError;
+                error.IsVisible = true;
+                return;
+            }
+            await SaveAutomationFromWizardAsync(kind, values).ConfigureAwait(true);
+        }));
+        page.Children.Add(buttons);
+        return new ScrollViewer { Content = page, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+    }
+
+    private async Task SaveAutomationFromWizardAsync(StudioDocumentKind kind, IReadOnlyList<string> values)
     {
         try
         {
-            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).AddNew(kind);
-            (string firstLabel, string secondLabel) = kind switch
-            {
-                StudioDocumentKind.Alias => ("Alias name (what you type)", "Expands to"),
-                StudioDocumentKind.Trigger => ("Text pattern to match", "Command to send"),
-                StudioDocumentKind.SemanticTrigger => ("Name", "Event (e.g. RoomChanged)"),
-                StudioDocumentKind.Keybinding => ("Gesture (e.g. Cmd+1)", "Command to send"),
-                StudioDocumentKind.Timer => ("Name", "Command to send"),
-                StudioDocumentKind.StateRule => ("Name", "State expression (e.g. hp.percent < 30)"),
-                _ => ("Name", "First step (e.g. send look)")
-            };
-            string? first = await PromptAsync($"New {kind.Label()}", firstLabel, (string?)collections.NameOf(kind, index) ?? "").ConfigureAwait(true);
-            if (string.IsNullOrWhiteSpace(first)) return;
-            string? second = await PromptAsync($"New {kind.Label()}", secondLabel, "").ConfigureAwait(true);
-            if (second is null) return;
-            first = first.Trim();
-            second = second.Trim();
-            object? seeded = collections.Get(kind, index) switch
-            {
-                CommandAlias v => v with { Name = first, Expansion = second.Length > 0 ? second : v.Expansion },
-                TriggerRule v => v with { Pattern = first, Command = second.Length > 0 ? second : v.Command },
-                SemanticTriggerRule v => v with { Name = first, EventName = second.Length > 0 ? second : v.EventName },
-                CommandKeyBinding v => v with { Gesture = first, Name = first, Command = second.Length > 0 ? second : v.Command },
-                CommandTimer v => v with { Name = first, Command = second.Length > 0 ? second : v.Command },
-                GameRule v => v with { Name = first, Condition = second.Length > 0 ? second : v.Condition },
-                AutomationWorkflow v => v with { Name = first, Steps = second.Length > 0 ? second : v.Steps },
-                _ => null
-            };
-            if (seeded is not null) collections = collections.Replace(kind, index, seeded);
+            (AutomationCollections collections, int index) = AutomationCollections.From(_runtime.Settings).AddFrom(kind, values);
             await collections.SaveAsync(_runtime, _cts.Token).ConfigureAwait(true);
             _organization = _organization.RegisterAdded(kind, index);
             await _organizationStore.SaveAsync(SelectedProfileId, _organization, _cts.Token).ConfigureAwait(true);
             string automationId = _organization.IdFor(kind, index);
+            _automationWizardKind = null;
             await RefreshNavigatorAsync().ConfigureAwait(true);
             OpenAutomation(kind, automationId);
         }
@@ -2867,6 +2952,11 @@ internal sealed partial class AutomationStudioWindow : Window
 
     private void DocumentsChanged()
     {
+        if (_documents.Active is not null)
+        {
+            _automationCategoryPage = null;
+            _automationWizardKind = null;
+        }
         RenderTabs();
         RenderActive();
     }
@@ -2964,10 +3054,26 @@ internal sealed partial class AutomationStudioWindow : Window
         _breadcrumbBar.IsVisible = true;
         StudioDocument? active = _documents.Active;
         RenderExternalConflict();
-        _breadcrumb.Text = active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
-        _breadcrumbBar.IsVisible = active is not null;
-        _statusLeft.Text = active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
+        bool showingAutomationPage = _activity is StudioActivity.Automations or StudioActivity.Workflows &&
+                                     (_automationWizardKind is not null || _automationCategoryPage is not null);
+        _breadcrumb.Text = showingAutomationPage || active is null ? "" : string.Join("  ›  ", active.Breadcrumb);
+        _breadcrumbBar.IsVisible = !showingAutomationPage && active is not null;
+        _statusLeft.Text = showingAutomationPage ? "Automation Studio" : active is null ? "Ready" : $"{active.Kind.Label()} · {active.Title}{(active.IsDirty ? " ●" : "")}";
         RenderBuildProblems(_activePackage);
+        if (_activity is StudioActivity.Automations or StudioActivity.Workflows && _automationWizardKind is { } wizardKind)
+        {
+            ShowMonaco(false);
+            _center.Content = AutomationWizardPage(wizardKind);
+            _statusCursor.Text = "";
+            return;
+        }
+        if (_activity is StudioActivity.Automations or StudioActivity.Workflows && _automationCategoryPage is { } categoryKind)
+        {
+            ShowMonaco(false);
+            _center.Content = AutomationCategoryPage(categoryKind);
+            _statusCursor.Text = "";
+            return;
+        }
         if (active is null)
         {
             ShowMonaco(false);
