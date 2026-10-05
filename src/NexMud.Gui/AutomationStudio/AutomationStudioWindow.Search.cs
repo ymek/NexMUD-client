@@ -244,11 +244,13 @@ internal sealed partial class AutomationStudioWindow
         return sidebar;
     }
 
+    internal static ColumnDefinitions CreateSearchWorkspaceColumns() => new("1.45*,*");
+
     private Control BuildSearchWorkspace()
     {
         Grid workspace = new()
         {
-            ColumnDefinitions = new ColumnDefinitions("1.45*,1fr"),
+            ColumnDefinitions = CreateSearchWorkspaceColumns(),
             RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*"),
             Background = StudioShellChrome.Canvas
         };

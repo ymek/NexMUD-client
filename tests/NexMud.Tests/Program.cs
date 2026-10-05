@@ -110,6 +110,7 @@ public static class Program
         await RunAsync("Phase 8 reports empty test suites", Phase8ScriptTestServiceTests.ReportsEmptySuiteWithoutStartingProcess);
         await RunAsync("Phase 5 source search honors case and whole-word filters", Phase5SourceSearchTests.HonorsCaseAndWholeWordOptions);
         await RunAsync("Phase 5 source search handles overlap, Unicode, and filters", Phase5SourceSearchTests.HandlesOverlappingUnicodeAndFilterTerms);
+        await RunAsync("Studio search workspace accepts Avalonia grid columns", StudioLayoutTests.SearchWorkspaceColumnsParse);
         await RunAsync("Studio search matcher honors case and whole-word filters", StudioSearchMatcherTests.MatchesCaseAndWholeWordOptions);
         await RunAsync("Studio search matcher handles overlapping Unicode whole-word boundaries", StudioSearchMatcherTests.HandlesOverlappingAndUnicodeWholeWordBoundaries);
         await RunAsync("Studio search matcher applies include and exclude terms", StudioSearchMatcherTests.AppliesIncludeAndExcludeTerms);
